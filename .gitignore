@@ -1,0 +1,13 @@
+.idea/
+lib/
+*.env
+.env
+LICENSE
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.ipynb_checkpoints
+logs/
+WorkDatabase/
