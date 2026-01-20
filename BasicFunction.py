@@ -1,7 +1,11 @@
 from dotenv import load_dotenv
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer, OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai import Agent, ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -138,26 +142,38 @@ class CustomProvider(OpenAIProvider):
 
 
 def create_model(model_name: str, parameter: dict):
-    if 'deepseek' in model_name:
-        provider = CustomProvider(base_url=os.environ.get('BASE_URL'), api_key=os.environ.get('API_KEY'))
-    else:
-        provider = OpenAIProvider(
-            base_url=os.environ.get('BASE_URL'),
+    if 'gemini' in model_name:
+        provider = GoogleProvider(
+            base_url='https://api.zhizengzeng.com/google',
             api_key=os.environ.get('API_KEY')
         )
-    return JsonRepairOpenAIChatModel(
-        model_name,
-        provider=provider,
-        settings=ModelSettings(**parameter)
-    )
+        return GoogleModel(model_name, provider=provider, settings=ModelSettings(**parameter))
+    elif 'claude' in model_name:
+        provider = AnthropicProvider(
+            base_url='https://api.zhizengzeng.com/anthropic',
+            api_key=os.environ.get('API_KEY')
+        )
+        return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**parameter))
+    else:
+        if 'deepseek' in model_name:
+            provider = CustomProvider(base_url=os.environ.get('BASE_URL'), api_key=os.environ.get('API_KEY'))
+        else:
+            provider = OpenAIProvider(
+                base_url=os.environ.get('BASE_URL'),
+                api_key=os.environ.get('API_KEY')
+            )
+        return JsonRepairOpenAIChatModel(
+            model_name,
+            provider=provider,
+            settings=ModelSettings(**parameter)
+        )
 
 
 def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: str):
     if parameter is None:
         parameter = {
             "temperature": 0.6,
-            "top_p": 0.8,
-            "max_tokens": 65536,
+            "max_tokens": 32768,
         }
 
     model = create_model(model_name, parameter)

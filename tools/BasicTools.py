@@ -29,7 +29,41 @@ _DANGEROUS_PATTERNS = [
     'exec ',
 ]
 
-base_dir = Path("./WorkDatabase")
+_WORK_DATABASE_ROOT = Path("./WorkDatabase")
+base_dir = _WORK_DATABASE_ROOT
+
+
+def set_task_directory(task_name: str) -> Path:
+    """
+    为当前任务设置独立的工作目录
+    
+    Parameters:
+        task_name: 任务名称，将用于创建子文件夹
+        
+    Returns:
+        Path: 任务工作目录的路径
+    """
+    global base_dir
+
+    safe_name = "".join(c if c.isalnum() or c in ('_', '-', ' ') else '_' for c in task_name)
+    safe_name = safe_name.strip()[:50]
+    
+    if not safe_name:
+        safe_name = "default_task"
+
+    task_dir = _WORK_DATABASE_ROOT / safe_name
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    base_dir = task_dir
+    logger.info(f"📁 任务工作目录已设置: {task_dir}")
+    
+    return task_dir
+
+
+def reset_task_directory():
+    global base_dir
+    base_dir = _WORK_DATABASE_ROOT
+    logger.info(f"📁 工作目录已重置为: {base_dir}")
 
 
 def _safe_path(name: str) -> Path:
@@ -509,11 +543,6 @@ def generate_image(prompt: str, width: int = 1024, height: int = 1024, max_wait_
     Returns:
         Success: Returns the image URL and generation details.
         Failure: Returns an error message.
-    
-    Examples of when to use:
-    - User: "生成一张山景图" → generate_image(prompt="A serene mountain landscape...")
-    - User: "给我画一只猫" → generate_image(prompt="A cute cat...")
-    - User: "create an image of a sunset" → generate_image(prompt="A beautiful sunset...")
     """
     logger.debug(f"(generate_image prompt='{prompt}', width={width}, height={height})")
     
@@ -622,13 +651,13 @@ workers_tools = [
     # 执行操作
     run_command,
     execute_file,
-    # 图像生成 - 使用此工具生成/创建/制作任何图像、图片、插图
+    # 图像生成
     generate_image,
     # 多模态图像理解
-    MultimodalTools.analyze_local_image,
-    MultimodalTools.analyze_image_url,
-    MultimodalTools.analyze_multiple_images,
-    MultimodalTools.analyze_videos_url,
+    # MultimodalTools.analyze_local_image,
+    # MultimodalTools.analyze_image_url,
+    # MultimodalTools.analyze_multiple_images,
+    # MultimodalTools.analyze_videos_url,
     ask_user,
     extract_text,
     # Agent Skills 工具
@@ -637,6 +666,5 @@ workers_tools = [
 
 workers_parameter = {
     "temperature": 0.6,
-    "top_p": 0.8,
-    "max_tokens": 65536,
+    "max_tokens": 32768,
 }

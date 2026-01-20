@@ -9,6 +9,7 @@ from tools.BasicTools import workers_tools, workers_parameter
 from prompt import workers_system_prompt
 import time
 from BasicFunction import create_agent
+from ModelConfig import WORKER_MODEL
 import traceback
 
 
@@ -385,7 +386,7 @@ async def execute_task_with_worker(task_description: str,
                 - On success: A detailed description of what was accomplished and the results
                 - On failure: An explanation of what went wrong and why the task couldn't be completed
     """
-    worker_agent = create_agent("deepseek-chat", workers_parameter, workers_tools, workers_system_prompt)
+    worker_agent = create_agent(WORKER_MODEL, workers_parameter, workers_tools, workers_system_prompt)
     prompt = f"[User's Ultimate Goal]\n{user_goal}\n\n[Current Task]\nPlease execute the following task:\n\n{task_description}"
     if retry_info:
         prompt += f"\n\nThis is a retry attempt. Previous failure details:\n{retry_info}\nPlease try an alternative approach to complete the task."
@@ -452,6 +453,5 @@ manager_tools = [
 
 manager_parameter = {
     "temperature": 0.8,
-    "top_p": 0.95,
-    "max_tokens": 65536,
+    "max_tokens": 32768,
 }

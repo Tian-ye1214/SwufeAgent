@@ -1,7 +1,8 @@
 from prompt import manager_system_prompt
-from tools.BasicTools import ask_user
+from tools.BasicTools import ask_user, set_task_directory, reset_task_directory
 from tools.ManagementTools import manager_tools, manager_parameter, task_manager, execute_task_with_worker
 from BasicFunction import create_agent
+from ModelConfig import MANAGER_MODEL, COORDINATOR_MODEL
 import logger
 import traceback
 import time
@@ -47,7 +48,7 @@ async def execute_task_with_manager(user_input: str, continue_from_previous: boo
             implementation details like "task completed" or "file created" unless 
             directly relevant to the user's question.
     """
-    manager_agent = create_agent("deepseek-reasoner", manager_parameter, manager_tools, manager_system_prompt)
+    manager_agent = create_agent(MANAGER_MODEL, manager_parameter, manager_tools, manager_system_prompt)
 
     if not continue_from_previous:
         logger.info("📌 当前步骤: 创建todo list")
@@ -140,14 +141,13 @@ def run_agent_system(user_input: str, history: list = []):
     5. Important: After executing a task using the tool, immediately summarize the results and end the dialogue, awaiting the user's next instruction.
 """
 
-    agent = create_agent("deepseek-reasoner", manager_parameter,
+    agent = create_agent(COORDINATOR_MODEL, manager_parameter,
                          [execute_task_with_manager, execute_task_with_worker, ask_user], system_prompt)
 
     start_time = time.time()
-    
     result = agent.run_sync(user_input, message_history=history)
-    
     elapsed = time.time() - start_time
+
     logger.info(f"[DEBUG] run_agent_system agent.run_sync() 完成，耗时 {elapsed:.2f} 秒")
     logger.info(result.output)
     history = list(result.all_messages())
@@ -178,6 +178,7 @@ def main():
 
             if '新任务' in user_input:
                 task_manager.reset()
+                reset_task_directory()
                 history = []
                 is_first_input = True
                 continue
@@ -185,6 +186,7 @@ def main():
             if is_first_input:
                 task_name = user_input[:30].replace(" ", "_")
                 logger.setup_task_logger(task_name)
+                set_task_directory(task_name)
                 is_first_input = False
 
             history = run_agent_system(user_input, history)
