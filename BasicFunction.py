@@ -130,7 +130,7 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         )
 
 
-class CustomProvider(OpenAIProvider):
+class ThinkingProvider(OpenAIProvider):
     def model_profile(self, model_name: str) -> ModelProfile | None:
         profile = deepseek_model_profile(model_name)
         return OpenAIModelProfile(
@@ -155,8 +155,11 @@ def create_model(model_name: str, parameter: dict):
         )
         return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**parameter))
     else:
-        if 'deepseek' in model_name:
-            provider = CustomProvider(base_url=os.environ.get('BASE_URL'), api_key=os.environ.get('API_KEY'))
+        thinking_models = ['deepseek', 'kimi']
+        use_thinking_provider = any(m in model_name.lower() for m in thinking_models)
+        
+        if use_thinking_provider:
+            provider = ThinkingProvider(base_url=os.environ.get('BASE_URL'), api_key=os.environ.get('API_KEY'))
         else:
             provider = OpenAIProvider(
                 base_url=os.environ.get('BASE_URL'),
@@ -172,7 +175,7 @@ def create_model(model_name: str, parameter: dict):
 def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: str):
     if parameter is None:
         parameter = {
-            "temperature": 0.6,
+            "temperature": 1.0,
             "max_tokens": 32768,
         }
 

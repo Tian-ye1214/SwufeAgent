@@ -5,7 +5,8 @@ import json_repair as json
 import logger
 from tools.BasicTools import ask_user
 from typing import Tuple
-from tools.BasicTools import workers_tools, workers_parameter
+from tools.BasicTools import workers_tools
+from ModelConfig import workers_parameter
 from prompt import workers_system_prompt
 import time
 from BasicFunction import create_agent
@@ -449,9 +450,3 @@ manager_tools = [
     check_task_can_retry,
     execute_task_with_worker,
 ]
-
-
-manager_parameter = {
-    "temperature": 0.8,
-    "max_tokens": 32768,
-}

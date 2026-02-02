@@ -1,6 +1,7 @@
 from prompt import manager_system_prompt
 from tools.BasicTools import ask_user, set_task_directory, reset_task_directory
-from tools.ManagementTools import manager_tools, manager_parameter, task_manager, execute_task_with_worker
+from tools.ManagementTools import manager_tools, task_manager, execute_task_with_worker
+from ModelConfig import manager_parameter
 from BasicFunction import create_agent
 from ModelConfig import MANAGER_MODEL, COORDINATOR_MODEL
 import logger

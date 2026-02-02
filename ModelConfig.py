@@ -1,6 +1,16 @@
-MANAGER_MODEL = "gemini-3-pro-preview"
-WORKER_MODEL = "gemini-3-pro-preview"
-COORDINATOR_MODEL = "gemini-3-pro-preview"
+MANAGER_MODEL = "kimi-k2.5"
+WORKER_MODEL = "kimi-k2.5"
+COORDINATOR_MODEL = "kimi-k2.5"
+
+workers_parameter = {
+    "temperature": 1.0,
+    "max_tokens": 32768,
+}
+
+manager_parameter = {
+    "temperature": 1.0,
+    "max_tokens": 32768,
+}
 
 
 def get_model_config():

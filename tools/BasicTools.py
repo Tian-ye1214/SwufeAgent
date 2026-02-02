@@ -9,7 +9,7 @@ from tools import MultimodalTools
 import logger
 import shlex
 import platform as _platform
-from tools.ExtraceFileContent import extract_text
+from tools.ExtractFileContent import extract_text
 from skills.SkillsTools import skills_tools
 
 _DANGEROUS_PATTERNS = [
@@ -663,8 +663,3 @@ workers_tools = [
     # Agent Skills 工具
     *skills_tools,
 ]
-
-workers_parameter = {
-    "temperature": 0.6,
-    "max_tokens": 32768,
-}
