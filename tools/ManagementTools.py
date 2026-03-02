@@ -2,6 +2,7 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import json_repair as json
+import asyncio
 import logger
 from tools.BasicTools import ask_user
 from typing import Tuple
@@ -123,6 +124,24 @@ class TaskManager:
                 if deps_satisfied:
                     return task
         return None
+    
+    def get_all_ready_tasks(self) -> List[Task]:
+        """获取所有可以并行执行的任务（依赖已满足且状态为PENDING）"""
+        ready = []
+        for task_id in self.task_order:
+            task = self.tasks[task_id]
+            if task.status != TaskStatus.PENDING:
+                continue
+            deps_satisfied = True
+            for dep_id in task.dependencies:
+                if dep_id not in self.tasks:
+                    continue
+                if self.tasks[dep_id].status != TaskStatus.COMPLETED:
+                    deps_satisfied = False
+                    break
+            if deps_satisfied:
+                ready.append(task)
+        return ready
     
     def mark_task_in_progress(self, task_id: str) -> str:
         """Mark a task as in progress"""
@@ -439,14 +458,201 @@ async def execute_task_with_worker(task_description: str,
         return False, error_msg
 
 
+class SharedMessageBoard:
+    """Worker间共享的消息板，支持并行Worker之间的实时通讯"""
+
+    def __init__(self):
+        self._messages: List[Dict] = []
+        self._lock = asyncio.Lock()
+
+    async def post(self, worker_id: str, task_desc: str, message: str, status: str = "completed"):
+        async with self._lock:
+            self._messages = [
+                m for m in self._messages
+                if not (m["worker_id"] == worker_id and m["status"] != "completed")
+            ]
+            self._messages.append({
+                "worker_id": worker_id,
+                "task": task_desc,
+                "message": message[:500],
+                "status": status,
+                "timestamp": time.strftime("%H:%M:%S"),
+            })
+
+    async def get_updates(self, exclude_worker: str = None) -> str:
+        async with self._lock:
+            msgs = [m for m in self._messages if m["worker_id"] != exclude_worker]
+
+        if not msgs:
+            return "No updates from other workers yet."
+
+        lines = ["=== Other Workers' Progress ==="]
+        for m in msgs:
+            icon = "✅" if m["status"] == "completed" else "🔄"
+            lines.append(f"{icon} [{m['worker_id']}] Task: {m['task']}")
+            lines.append(f"   Result: {m['message']}")
+            lines.append("")
+        return "\n".join(lines)
+
+
+def _create_board_tools(board: SharedMessageBoard, worker_id: str, task_desc: str):
+    """为Worker创建消息板通讯工具（闭包绑定到具体board和worker）"""
+
+    async def check_other_workers_progress() -> str:
+        """
+        Check the progress and results of other parallel workers.
+        Use this when you need to know what other workers have accomplished,
+        to avoid duplicate work or to build upon their results.
+        """
+        return await board.get_updates(exclude_worker=worker_id)
+
+    async def report_progress(message: str) -> str:
+        """
+        Report your current progress to other workers via the shared message board.
+        Use this to share intermediate results or important findings.
+        Parameters:
+            message: Summary of what you've accomplished so far
+        """
+        await board.post(worker_id, task_desc, message, status="in_progress")
+        return "Progress update posted to the message board."
+
+    return [check_other_workers_progress, report_progress]
+
+
+async def _execute_worker_with_board(task: Task, board: SharedMessageBoard, user_goal: str):
+    """执行单个Worker，支持通过消息板与其他Worker通讯"""
+    worker_id = f"Worker-{task.id}"
+
+    board_tools = _create_board_tools(board, worker_id, task.description)
+    all_tools = workers_tools + board_tools
+
+    parallel_addon = """
+
+## Parallel Worker Communication
+
+You are one of several workers executing tasks IN PARALLEL. You have special communication tools:
+- `check_other_workers_progress()`: See what other workers have done or are doing
+- `report_progress(message)`: Share your progress with other workers
+
+Use these tools when:
+- Your task might relate to other workers' output
+- You've completed a significant milestone worth sharing
+- You want to check if another worker has already done something relevant
+"""
+    full_system_prompt = workers_system_prompt + parallel_addon
+    worker_agent = create_agent(WORKER_MODEL, workers_parameter, all_tools, full_system_prompt)
+
+    other_progress = await board.get_updates(exclude_worker=worker_id)
+
+    prompt = f"[User's Ultimate Goal]\n{user_goal}\n\n"
+    if "No updates" not in other_progress:
+        prompt += f"[Other Workers' Current Progress]\n{other_progress}\n\n"
+
+    prompt += f"[Current Task]\nPlease execute the following task:\n\n{task.description}"
+
+    if task.retry_count > 0:
+        prompt += f"\n\nThis is retry attempt {task.retry_count}. Previous failures:\n"
+        for i, failure in enumerate(task.failure_history):
+            prompt += f"  Attempt {i+1}: {failure}\n"
+        prompt += "Please try an alternative approach."
+
+    try:
+        logger.info(f"{'='*50}")
+        logger.info(f"[{worker_id}] 开始执行: {task.description}")
+        logger.info(f"{'='*50}")
+
+        start_time = time.time()
+        result = await worker_agent.run(prompt)
+        elapsed = time.time() - start_time
+
+        logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
+
+        output = result.output
+        await board.post(worker_id, task.description, output[:500], "completed")
+
+        output_lines = output.strip().split('\n')
+        first_line = output_lines[0].upper() if output_lines else ""
+        output_upper = output.upper().strip()
+
+        if first_line.startswith("FAILED:") or first_line.startswith("FAILED："):
+            return False, output
+        elif output_upper.startswith("ERROR:") or output_upper.startswith("错误:") or "执行异常" in output:
+            return False, output
+        else:
+            return True, output
+
+    except Exception as e:
+        error_msg = f"Worker执行异常: {str(e)}"
+        logger.error(f"[{worker_id}] {error_msg}")
+        logger.error(traceback.format_exc())
+        return False, error_msg
+
+
+async def execute_all_tasks_parallel(user_goal: str, max_concurrent: int = 3) -> str:
+    """
+    并行执行所有任务。按照依赖关系分波执行，同一波内的任务由多个Worker并行运行。
+    Worker之间通过SharedMessageBoard进行实时通讯。
+
+    Parameters:
+        user_goal: 用户的最终目标描述
+        max_concurrent: 最大并行Worker数量
+    """
+    board = SharedMessageBoard()
+    max_waves = 15
+
+    for wave in range(1, max_waves + 1):
+        ready_tasks = task_manager.get_all_ready_tasks()
+
+        if not ready_tasks:
+            if task_manager.is_all_completed():
+                logger.info("~~~~~~~~~~~所有任务已完成！~~~~~~~~~")
+            elif task_manager.has_failed_tasks():
+                logger.info("！！！！！！！！部分任务失败，无法继续执行！！！！！！！！！")
+            else:
+                logger.info("！！！！！！！没有可执行的任务（可能存在循环依赖）！！！！！！！！")
+            break
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"第 {wave} 波并行执行 - 启动 {len(ready_tasks)} 个Worker")
+        logger.info(f"{'='*60}")
+
+        for t in ready_tasks:
+            task_manager.mark_task_in_progress(t.id)
+            logger.info(f"  📋 Worker-{t.id}: {t.description}")
+
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _run_one(task_to_run):
+            async with sem:
+                success, output = await _execute_worker_with_board(task_to_run, board, user_goal)
+                return task_to_run.id, success, output
+
+        results = await asyncio.gather(
+            *[_run_one(t) for t in ready_tasks],
+            return_exceptions=True,
+        )
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                failed_id = ready_tasks[i].id
+                task_manager.mark_task_failed(failed_id, f"异常: {result}")
+                logger.error(f"\n\n！！！！！！！！Worker-{failed_id} 异常: {result}！！！！！！！！\n\n")
+            else:
+                task_id, success, output = result
+                if success:
+                    task_manager.mark_task_complete(task_id, output)
+                    logger.info(f"Worker-{task_id} 完成")
+                else:
+                    task_manager.mark_task_failed(task_id, output)
+                    logger.warning(f"Worker-{task_id} 失败")
+
+        logger.info(f"\n{task_manager.get_todo_list()}")
+
+    return task_manager.get_final_summary()
+
+
 manager_tools = [
     create_todo_list,
     get_todo_list,
-    get_next_pending_task,
     ask_user,
-    mark_task_complete,
-    mark_task_failed,
-    get_final_summary,
-    check_task_can_retry,
-    execute_task_with_worker,
 ]

@@ -1,6 +1,6 @@
 from prompt import manager_system_prompt
 from tools.BasicTools import ask_user, set_task_directory, reset_task_directory
-from tools.ManagementTools import manager_tools, task_manager, execute_task_with_worker
+from tools.ManagementTools import manager_tools, task_manager, execute_task_with_worker, execute_all_tasks_parallel
 from ModelConfig import manager_parameter
 from BasicFunction import create_agent
 from ModelConfig import MANAGER_MODEL, COORDINATOR_MODEL
@@ -52,15 +52,25 @@ async def execute_task_with_manager(user_input: str, continue_from_previous: boo
     manager_agent = create_agent(MANAGER_MODEL, manager_parameter, manager_tools, manager_system_prompt)
 
     if not continue_from_previous:
-        logger.info("📌 当前步骤: 创建todo list")
+        logger.info("第一阶段: Manager 规划任务列表")
         planning_prompt = f"""
         Please analyze the following user request and create a detailed task list (Todo List).
         User Request: {user_input}
         
-        Use the create_todo_list tool to generate the task list. Tasks should be arranged in execution order, with dependencies taken into consideration.Each task description should be sufficiently detailed to enable the Worker Agent to understand and complete it.
+        Use the create_todo_list tool to generate the task list.
+        
+        IMPORTANT PARALLEL EXECUTION RULES:
+        - Tasks WITHOUT dependencies on each other will be executed IN PARALLEL by multiple workers simultaneously
+        - Only add dependencies when a task TRULY needs another task's output
+        - Maximize parallelism by minimizing unnecessary dependencies
+        - Each task description should be sufficiently detailed for the Worker Agent to complete independently
+        
+        Example of good parallel design:
+        - "Search for info about X" and "Search for info about Y" → NO dependencies (parallel)
+        - "Write report based on search results" → depends on both search tasks (sequential after them)
     """
     else:
-        logger.info("📌 当前步骤: 基于用户反馈调整任务")
+        logger.info("第一阶段: 基于用户反馈调整任务")
         current_todo = task_manager.get_todo_list()
         planning_prompt = f"""
         The user has provided additional requirements or feedback on the previous results.
@@ -70,26 +80,26 @@ async def execute_task_with_manager(user_input: str, continue_from_previous: boo
         
         User's New Requirements/Feedback: {user_input}
         
-        Please create an updated task list that addresses the user's new requirements. You can:
-        1. Add new tasks to handle the additional requirements
-        2. Modify existing pending tasks if needed
+        Please create an updated task list that addresses the user's new requirements.
         
-        Use the create_todo_list tool to generate the updated task list.
+        IMPORTANT: Tasks without dependencies will be executed IN PARALLEL.
+        Only add dependencies when truly needed.
     """
 
     result = await manager_agent.run(planning_prompt)
     logger.info(result.output)
-    manager_history = list(result.all_messages())
 
-    logger.info("")
     logger.info("=" * 60)
-    logger.info("当前步骤: 生成最终报告")
+    logger.info("第二阶段: 多Worker并行执行任务")
     logger.info("=" * 60)
 
-    final_summary = task_manager.get_final_summary()
+    final_summary = await execute_all_tasks_parallel(user_input)
     logger.info(final_summary)
 
-    
+    logger.info("=" * 60)
+    logger.info("第三阶段: 生成最终报告")
+    logger.info("=" * 60)
+
     summary_prompt = f"""Task execution completed. Please respond directly to the user's original question based on the execution report below.
 
 User's Original Question: {user_input}
