@@ -107,6 +107,55 @@ def setup_task_logger(task_name: str = "task") -> logging.Logger:
     return _logger
 
 
+_session_log_files = {}
+
+
+def setup_session_logger(session_name: str) -> logging.Logger:
+    """为会话设置日志，同一会话名复用同一日志文件（不含时间戳）"""
+    global _logger, _current_log_file
+
+    safe_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in session_name)[:50]
+
+    if safe_name in _session_log_files:
+        log_filepath = _session_log_files[safe_name]
+    else:
+        log_filepath = LOG_DIR / f"{safe_name}.log"
+        _session_log_files[safe_name] = log_filepath
+
+    if _current_log_file == log_filepath:
+        return _logger
+
+    _logger = logging.getLogger("AgentDemo")
+    _logger.setLevel(logging.DEBUG)
+    _logger.propagate = False
+
+    for h in _logger.handlers[:]:
+        if isinstance(h, logging.FileHandler):
+            h.close()
+    _logger.handlers.clear()
+
+    console_handler = ImmediateStreamHandler(sys.stderr)
+    console_handler.setLevel(logging.DEBUG)
+    console_format = ColorFormatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    _logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    _logger.addHandler(file_handler)
+
+    _current_log_file = log_filepath
+    return _logger
+
+
 def get_current_log_file() -> str:
     """获取当前日志文件路径"""
     global _current_log_file

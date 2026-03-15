@@ -367,49 +367,26 @@ def check_task_can_retry(task_id: str) -> str:
 
 async def execute_task_with_worker(task_description: str,
                                    user_goal: str = "",
-                                   retry_info: str = "", ) -> Tuple[bool, str]:
+                                   retry_info: str = "",
+                                   attachments: list | None = None) -> Tuple[bool, str]:
     """
-    Execute a single simple task using Worker Agen.
-
-    Description:
-        This function creates and runs a Worker Agent to execute straightforward, well-defined tasks
-        that don't require complex planning or multi-step coordination. The Worker Agent has access
-        to basic operational tools (search, file operations, web browsing, etc.) and executes tasks
-        independently. It includes retry mechanism support and automatic success/failure detection
-        based on the agent's output format.
+    Execute a single simple task using Worker Agent.
 
     Parameters:
-        task_description (str):
-            A clear and specific description of the task to be executed. Should contain enough
-            detail for the Worker Agent to understand and complete the task independently.
-
-        user_goal (str, optional):
-            The user's ultimate objective or broader context for this task. This helps the
-            Worker Agent understand the bigger picture and make better decisions.
-            Default: "" (empty string)
-
-        retry_info (str, optional):
-            Detailed information about previous failed attempts to execute this task. Used when
-            retrying a task after failure, providing context about what went wrong and helping
-            the agent avoid repeating the same mistakes.
-            Default: "" (empty string)
+        task_description: Task description for the Worker Agent.
+        user_goal: The user's ultimate objective or broader context.
+        retry_info: Information about previous failed attempts.
+        attachments: Optional multimodal attachments (images/videos) to include in the prompt.
 
     Returns:
-        Tuple[bool, str]: A tuple containing three elements:
-            - success (bool):
-                Indicates whether the task was completed successfully.
-                True: Task completed successfully
-                False: Task failed or encountered an error
-
-            - result (str):
-                The output message from the Worker Agent. Contains either:
-                - On success: A detailed description of what was accomplished and the results
-                - On failure: An explanation of what went wrong and why the task couldn't be completed
+        Tuple[bool, str]: (success, result_message)
     """
     worker_agent = create_agent(WORKER_MODEL, workers_parameter, workers_tools, workers_system_prompt)
-    prompt = f"[User's Ultimate Goal]\n{user_goal}\n\n[Current Task]\nPlease execute the following task:\n\n{task_description}"
+    prompt_text = f"[User's Ultimate Goal]\n{user_goal}\n\n[Current Task]\nPlease execute the following task:\n\n{task_description}"
     if retry_info:
-        prompt += f"\n\nThis is a retry attempt. Previous failure details:\n{retry_info}\nPlease try an alternative approach to complete the task."
+        prompt_text += f"\n\nThis is a retry attempt. Previous failure details:\n{retry_info}\nPlease try an alternative approach to complete the task."
+
+    prompt = [prompt_text, *attachments] if attachments else prompt_text
 
     try:
         logger.info("=" * 50)
@@ -474,7 +451,7 @@ class SharedMessageBoard:
             self._messages.append({
                 "worker_id": worker_id,
                 "task": task_desc,
-                "message": message[:500],
+                "message": message[:2000],
                 "status": status,
                 "timestamp": time.strftime("%H:%M:%S"),
             })
@@ -519,7 +496,8 @@ def _create_board_tools(board: SharedMessageBoard, worker_id: str, task_desc: st
     return [check_other_workers_progress, report_progress]
 
 
-async def _execute_worker_with_board(task: Task, board: SharedMessageBoard, user_goal: str):
+async def _execute_worker_with_board(task: Task, board: SharedMessageBoard, user_goal: str,
+                                     attachments: list | None = None):
     """执行单个Worker，支持通过消息板与其他Worker通讯"""
     worker_id = f"Worker-{task.id}"
 
@@ -545,6 +523,16 @@ Use these tools when:
     other_progress = await board.get_updates(exclude_worker=worker_id)
 
     prompt = f"[User's Ultimate Goal]\n{user_goal}\n\n"
+
+    if task.dependencies:
+        dep_parts = []
+        for dep_id in task.dependencies:
+            dep_task = task_manager.tasks.get(dep_id)
+            if dep_task and dep_task.status == TaskStatus.COMPLETED and dep_task.result:
+                dep_parts.append(f"[Task {dep_id}: {dep_task.description}]\n{dep_task.result}")
+        if dep_parts:
+            prompt += "[Results from Prerequisite Tasks]\n" + "\n---\n".join(dep_parts) + "\n\n"
+
     if "No updates" not in other_progress:
         prompt += f"[Other Workers' Current Progress]\n{other_progress}\n\n"
 
@@ -556,13 +544,15 @@ Use these tools when:
             prompt += f"  Attempt {i+1}: {failure}\n"
         prompt += "Please try an alternative approach."
 
+    prompt_input = [prompt, *attachments] if attachments else prompt
+
     try:
         logger.info(f"{'='*50}")
         logger.info(f"[{worker_id}] 开始执行: {task.description}")
         logger.info(f"{'='*50}")
 
         start_time = time.time()
-        result = await worker_agent.run(prompt)
+        result = await worker_agent.run(prompt_input)
         elapsed = time.time() - start_time
 
         logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
@@ -588,7 +578,8 @@ Use these tools when:
         return False, error_msg
 
 
-async def execute_all_tasks_parallel(user_goal: str, max_concurrent: int = 3) -> str:
+async def execute_all_tasks_parallel(user_goal: str, max_concurrent: int = 3,
+                                     attachments: list | None = None) -> str:
     """
     并行执行所有任务。按照依赖关系分波执行，同一波内的任务由多个Worker并行运行。
     Worker之间通过SharedMessageBoard进行实时通讯。
@@ -596,6 +587,7 @@ async def execute_all_tasks_parallel(user_goal: str, max_concurrent: int = 3) ->
     Parameters:
         user_goal: 用户的最终目标描述
         max_concurrent: 最大并行Worker数量
+        attachments: 可选的多模态附件列表
     """
     board = SharedMessageBoard()
     max_waves = 15
@@ -624,7 +616,9 @@ async def execute_all_tasks_parallel(user_goal: str, max_concurrent: int = 3) ->
 
         async def _run_one(task_to_run):
             async with sem:
-                success, output = await _execute_worker_with_board(task_to_run, board, user_goal)
+                success, output = await _execute_worker_with_board(
+                    task_to_run, board, user_goal, attachments=attachments
+                )
                 return task_to_run.id, success, output
 
         results = await asyncio.gather(
