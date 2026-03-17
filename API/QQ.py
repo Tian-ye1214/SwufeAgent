@@ -19,8 +19,6 @@ os.chdir(_ROOT)
 
 from main import AgentSystem
 from tools.memory import ChatHistory, UserMessage
-from tools.ManagementTools import task_manager
-from tools.BasicTools import set_task_directory, reset_task_directory, set_ask_user_handler
 import logger
 
 BOT_QQ = os.environ.get("QQBOT_ID", None)
@@ -39,8 +37,9 @@ class QQBot:
         self.__ctx = threading.local()
         self.__bot = BotClient()
         self.__agent_system = AgentSystem()
+        self.__last_session_id: str | None = None
 
-        set_ask_user_handler(self._qq_ask_user)
+        self.__agent_system.set_ask_user_handler(self._qq_ask_user)
 
     def run(self, *, debug: bool = True, remote_mode: bool = True,
             enable_webui_interaction: bool = False, **kwargs):
@@ -53,13 +52,19 @@ class QQBot:
             **kwargs,
         )
 
-    def _qq_ask_user(self, question: str) -> str:
+    def _qq_ask_user(self, question: str, timeout: int | None = None) -> str | None:
         """
         Agent 调用 ask_user 时执行：
         1. 通过 QQ 把问题发给用户
-        2. 阻塞等待用户回复（最长 120 秒）
-        3. 返回用户的回答
+        2. 阻塞等待用户回复
+        3. 返回用户的回答，超时返回 None
+
+        Parameters:
+            question: 要询问的问题
+            timeout: 等待超时秒数，None 则使用默认值 120 秒
         """
+        actual_timeout = timeout if timeout is not None else 120
+
         session_id: str | None = getattr(self.__ctx, "session_id", None)
         send_func = getattr(self.__ctx, "send_func", None)
         loop: asyncio.AbstractEventLoop | None = getattr(self.__ctx, "loop", None)
@@ -78,18 +83,21 @@ class QQBot:
         except Exception as e:
             logger.error(f"[QQ ask_user] 发送问题失败: {e}")
 
-        got_reply = event.wait(timeout=120)
+        got_reply = event.wait(timeout=actual_timeout)
         pending = self.__pending_questions.pop(session_id, {})
 
         if got_reply and pending.get("answer"):
             return pending["answer"]
-        return "(用户未在 120 秒内回复，已超时)"
+        return None
 
     def _reset_session(self, session_id: str):
         self.__sessions.pop(session_id, None)
         self.__is_first.pop(session_id, None)
         self.__pending_questions.pop(session_id, None)
+        self.__agent_system.reset_tasks()
+        self.__agent_system.reset_task_directory()
         self.__agent_system.reset_manager_history()
+        self.__last_session_id = None
         logger.info(f"[QQ] 会话 {session_id} 已重置")
 
     def _try_answer_pending(self, session_id: str, user_text: str) -> bool:
@@ -114,11 +122,16 @@ class QQBot:
             self.__ctx.send_func = send_func
             self.__ctx.loop = loop
 
+            if session_id != self.__last_session_id:
+                self.__agent_system.reset_manager_history()
+                self.__agent_system.reset_tasks()
+                self.__last_session_id = session_id
+
             history = self.__sessions.setdefault(session_id, ChatHistory())
 
             logger.setup_session_logger(session_id)
             if not self.__is_first.get(session_id, False):
-                set_task_directory(f"QQ_{session_id[:12]}")
+                self.__agent_system.set_task_directory(f"QQ_{session_id[:12]}")
                 self.__is_first[session_id] = True
 
             try:
@@ -239,8 +252,6 @@ class QQBot:
 
             if user_text in ("新任务", "/reset", "/新任务"):
                 bot._reset_session(session_id)
-                task_manager.reset()
-                reset_task_directory()
                 await event.reply(text="已开始新对话，上下文已清除。", at=False)
                 return
 

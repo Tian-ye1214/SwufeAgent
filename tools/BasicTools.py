@@ -11,7 +11,7 @@ import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
-from skills.SkillsTools import skills_tools
+from skills.SkillsTools import SkillsToolkit
 
 
 class BasicToolkit:
@@ -20,6 +20,7 @@ class BasicToolkit:
     def __init__(self):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
         self._ask_user_handler = None
+        self._skills_toolkit = SkillsToolkit()
         self._dangerous_patterns = [
             'rm -rf /',
             'rm -rf /*',
@@ -28,11 +29,10 @@ class BasicToolkit:
             ':(){:|:&};:',
             '> /dev/sda',
             'chmod -R 777 /',
-            'chown -R',
             '| sh',
             '| bash',
-            '`',
-            '$(',
+        ]
+        self._dangerous_start_patterns = [
             'eval ',
             'exec ',
         ]
@@ -74,7 +74,12 @@ class BasicToolkit:
     def _safe_path(self, name: str) -> Path:
         """Ensure path is within base_dir to prevent path traversal attacks"""
         path = (self._base_dir / name).resolve()
-        if not str(path).startswith(str(self._base_dir.resolve())):
+        path_str = str(path)
+        base_str = str(self._base_dir.resolve())
+        if _platform.system() == "Windows":
+            path_str = path_str.lower()
+            base_str = base_str.lower()
+        if not path_str.startswith(base_str):
             raise ValueError("Path traversal detected: access outside base_dir is not allowed")
         return path
 
@@ -83,6 +88,9 @@ class BasicToolkit:
         command_lower = command.lower().strip()
         for pattern in self._dangerous_patterns:
             if pattern.lower() in command_lower:
+                return False, f"Dangerous command pattern detected: '{pattern}'"
+        for pattern in self._dangerous_start_patterns:
+            if command_lower.startswith(pattern.lower()):
                 return False, f"Dangerous command pattern detected: '{pattern}'"
         return True, ""
 
@@ -103,7 +111,8 @@ class BasicToolkit:
             用户的回答
         """
         if self._ask_user_handler is not None:
-            return self._ask_user_handler(question)
+            result = self._ask_user_handler(question)
+            return result if result is not None else "(用户未回复)"
 
         logger.info("=" * 50)
         logger.info("🤔 Agent 需要您的帮助")
@@ -663,13 +672,5 @@ class BasicToolkit:
             self.ask_user,
             extract_text,
             # Agent Skills 工具
-            *skills_tools,
+            *self._skills_toolkit.tools,
         ]
-
-basic_toolkit = BasicToolkit()
-
-set_task_directory = basic_toolkit.set_task_directory
-reset_task_directory = basic_toolkit.reset_task_directory
-set_ask_user_handler = basic_toolkit.set_ask_user_handler
-ask_user = basic_toolkit.ask_user
-workers_tools = basic_toolkit.workers_tools

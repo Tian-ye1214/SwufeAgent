@@ -1,6 +1,7 @@
-from prompt import manager_system_prompt
-from tools.BasicTools import ask_user, set_task_directory, reset_task_directory
-from tools.ManagementTools import manager_tools, task_manager, execute_task_with_worker, execute_all_tasks_parallel
+from prompt import manager_system_prompt, load_prompt
+from tools.BasicTools import BasicToolkit
+from tools.ManagementTools import TaskManager
+from tools.WorkerOrchestrator import WorkerOrchestrator
 from tools.memory import ChatHistory, UserMessage
 from ModelConfig import manager_parameter
 from BasicFunction import create_agent
@@ -21,10 +22,24 @@ class AgentSystem:
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
 
+        self._toolkit = BasicToolkit()
+        self._task_manager = TaskManager()
+        self._orchestrator = WorkerOrchestrator(self._toolkit, self._task_manager)
+
+    def set_ask_user_handler(self, handler):
+        self._toolkit.set_ask_user_handler(handler)
+
+    def set_task_directory(self, task_name: str):
+        self._toolkit.set_task_directory(task_name)
+
+    def reset_task_directory(self):
+        self._toolkit.reset_task_directory()
+
+    def reset_tasks(self):
+        self._task_manager.reset()
+
     def reset_manager_history(self):
         self._manager_history.reset()
-
-    # ── Manager：复杂任务编排 ─────────────────────────────────────────────────
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -64,6 +79,11 @@ class AgentSystem:
                 implementation details like "task completed" or "file created" unless
                 directly relevant to the user's question.
         """
+        manager_tools = [
+            self._task_manager.create_todo_list,
+            self._task_manager.get_todo_list,
+            self._toolkit.ask_user,
+        ]
         manager_agent = create_agent(
             MANAGER_MODEL, manager_parameter, manager_tools, manager_system_prompt
         )
@@ -71,38 +91,16 @@ class AgentSystem:
 
         if not continue_from_previous:
             logger.info("第一阶段: Manager 规划任务列表")
-            planning_text = f"""
-        Please analyze the following user request and create a detailed task list (Todo List).
-        User Request: {user_input}
-        
-        Use the create_todo_list tool to generate the task list.
-        
-        IMPORTANT PARALLEL EXECUTION RULES:
-        - Tasks WITHOUT dependencies on each other will be executed IN PARALLEL by multiple workers simultaneously
-        - Only add dependencies when a task TRULY needs another task's output
-        - Maximize parallelism by minimizing unnecessary dependencies
-        - Each task description should be sufficiently detailed for the Worker Agent to complete independently
-        
-        Example of good parallel design:
-        - "Search for info about X" and "Search for info about Y" → NO dependencies (parallel)
-        - "Write report based on search results" → depends on both search tasks (sequential after them)
-    """
+            planning_text = load_prompt("manager_planning_new.md").format(
+                user_input=user_input
+            )
         else:
             logger.info("第一阶段: 基于用户反馈调整任务")
-            current_todo = task_manager.get_todo_list()
-            planning_text = f"""
-        The user has provided additional requirements or feedback on the previous results.
-        
-        Current Task List Status:
-        {current_todo}
-        
-        User's New Requirements/Feedback: {user_input}
-        
-        Please create an updated task list that addresses the user's new requirements.
-        
-        IMPORTANT: Tasks without dependencies will be executed IN PARALLEL.
-        Only add dependencies when truly needed.
-    """
+            current_todo = self._task_manager.get_todo_list()
+            planning_text = load_prompt("manager_planning_continue.md").format(
+                user_input=user_input,
+                current_todo=current_todo
+            )
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
         result = await manager_agent.run(
@@ -115,30 +113,19 @@ class AgentSystem:
         logger.info("第二阶段: 多Worker并行执行任务")
         logger.info("=" * 60)
 
-        final_summary = await execute_all_tasks_parallel(user_input, attachments=attachments)
+        final_summary = await self._orchestrator.execute_all_tasks_parallel(
+            user_input, attachments=attachments
+        )
         logger.info(final_summary)
 
         logger.info("=" * 60)
         logger.info("第三阶段: 生成最终报告")
         logger.info("=" * 60)
 
-        summary_text = f"""Task execution completed. Please respond directly to the user's original question based on the execution report below.
-
-User's Original Question: {user_input}
-
-Execution Report:
-{final_summary}
-
-Important Guidelines:
-- Do not report task execution status (e.g., "file created", "task completed successfully")
-- Respond directly to the user's question as if you were having a conversation
-- Extract key information from the task results in the execution report to answer the user
-- If task failures prevent a proper answer, briefly explain why the information could not be obtained
-
-Examples:
-- If the user asks "What's the weather like in Wenjiang?", respond with the weather conditions, not "Successfully queried the weather"
-- If the user asks "Write me a script", tell them where the script was saved and what its main functions are
-"""
+        summary_text = load_prompt("manager_summary.md").format(
+            user_input=user_input,
+            final_summary=final_summary
+        )
         summary_prompt = [summary_text, *attachments] if attachments else summary_text
         try:
             async with manager_agent.run_stream(
@@ -167,19 +154,6 @@ Examples:
                 return final_result.output
             except Exception:
                 return final_summary
-
-    # ── Coordinator：任务入口 ─────────────────────────────────────────────────
-
-    _COORDINATOR_SYSTEM_PROMPT = """
-    You are the task coordinating agent.
-    1. Determine task complexity:
-        - Simple tasks (single, explicit operation): Execute directly using `execute_task_with_worker`
-        - Complex tasks (requiring multiple steps or planning): Execute using `execute_task_with_manager`
-    2. After task execution, provide clear feedback on the results, then immediately end the current dialogue.
-    3. Do not proactively ask the user if they are satisfied; the user will proactively inform you of their next requirements.
-    4. If the tool call fails, clearly explain the reason for the failure to the user.
-    5. Important: After executing a task using the tool, immediately summarize the results and end the dialogue, awaiting the user's next instruction.
-"""
 
     async def _execute_task_with_worker(
         self, task_description: str, user_goal: str = "", retry_info: str = ""
@@ -215,7 +189,7 @@ Examples:
                 - success (bool): Whether the task completed successfully
                 - result (str): The output message from the Worker Agent
         """
-        return await execute_task_with_worker(
+        return await self._orchestrator.execute_task_with_worker(
             task_description, user_goal, retry_info, attachments=self._current_attachments
         )
 
@@ -242,8 +216,8 @@ Examples:
         agent = create_agent(
             COORDINATOR_MODEL,
             manager_parameter,
-            [self.execute_task_with_manager, self._execute_task_with_worker, ask_user],
-            self._COORDINATOR_SYSTEM_PROMPT,
+            [self.execute_task_with_manager, self._execute_task_with_worker, self._toolkit.ask_user],
+            load_prompt("coordinator_system.md"),
         )
 
         start_time = time.time()
@@ -254,8 +228,6 @@ Examples:
         logger.info(result.output)
         history.update(result)
         return history, result.output
-
-    # ── 交互式运行 ────────────────────────────────────────────────────────────
 
     def run_interactive(self):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
@@ -281,8 +253,8 @@ Examples:
                     break
 
                 if "新任务" in raw_input:
-                    task_manager.reset()
-                    reset_task_directory()
+                    self._task_manager.reset()
+                    self._toolkit.reset_task_directory()
                     self.reset_manager_history()
                     history.reset()
                     is_first_input = True
@@ -295,7 +267,7 @@ Examples:
                 if is_first_input:
                     task_name = message.text[:30].replace(" ", "_")
                     logger.setup_task_logger(task_name)
-                    set_task_directory(task_name)
+                    self._toolkit.set_task_directory(task_name)
                     is_first_input = False
 
                 history, _ = self.run_agent_system(message, history)
@@ -307,7 +279,7 @@ Examples:
             except Exception as e:
                 log.error(f"\n❌ 未预期的系统错误: {e}")
                 log.error(f"详细信息:\n{traceback.format_exc()}")
-                task_manager.reset()
+                self._task_manager.reset()
 
 
 if __name__ == "__main__":
