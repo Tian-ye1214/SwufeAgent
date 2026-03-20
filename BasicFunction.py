@@ -11,6 +11,9 @@ from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 import json_repair
 import os
+
+import logger as _logger_mod
+
 load_dotenv()
 
 
@@ -180,9 +183,10 @@ def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: s
         }
 
     model = create_model(model_name, parameter)
+    wrapped_tools = _logger_mod.wrap_tools_for_user_notify(list(tools)) if tools else tools
     agent = Agent(
         model,
-        tools=tools,
+        tools=wrapped_tools,
         system_prompt=system_prompt,
     )
     return agent
