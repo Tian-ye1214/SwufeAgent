@@ -1,6 +1,6 @@
-MANAGER_MODEL = "kimi-k2.5"
-WORKER_MODEL = "kimi-k2.5"
-COORDINATOR_MODEL = "kimi-k2.5"
+MANAGER_MODEL = "MiniMax-M2.7-highspeed"
+WORKER_MODEL = "MiniMax-M2.7-highspeed"
+COORDINATOR_MODEL = "MiniMax-M2.7-highspeed"
 
 workers_parameter = {
     "temperature": 1.0,
