@@ -9,10 +9,7 @@ from ModelConfig import MANAGER_MODEL, COORDINATOR_MODEL
 import logger
 import traceback
 import time
-import nest_asyncio
 from typing import Tuple
-
-nest_asyncio.apply()
 
 
 class AgentSystem:

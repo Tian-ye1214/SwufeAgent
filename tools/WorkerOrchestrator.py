@@ -31,7 +31,7 @@ class _SharedMessageBoard:
             self._messages.append({
                 "worker_id": worker_id,
                 "task": task_desc,
-                "message": message[:2000],
+                "message": message,
                 "status": status,
                 "timestamp": time.strftime("%H:%M:%S"),
             })
@@ -291,13 +291,13 @@ class WorkerOrchestrator:
             output_upper = output.upper().strip()
 
             if first_line.startswith("FAILED:") or first_line.startswith("FAILED："):
-                await board.post(worker_id, task.description, output[:500], "failed")
+                await board.post(worker_id, task.description, output, "failed")
                 return False, output
             elif output_upper.startswith("ERROR:") or output_upper.startswith("错误:") or "执行异常" in output:
-                await board.post(worker_id, task.description, output[:500], "failed")
+                await board.post(worker_id, task.description, output, "failed")
                 return False, output
             else:
-                await board.post(worker_id, task.description, output[:500], "completed")
+                await board.post(worker_id, task.description, output, "completed")
                 return True, output
 
         except Exception as e:
