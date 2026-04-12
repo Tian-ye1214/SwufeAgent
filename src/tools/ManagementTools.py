@@ -235,11 +235,8 @@ class TaskManager:
         for task in completed_tasks:
             lines.append(f"  [{task.id}] {task.description}")
             if task.result:
-                result_lines = task.result.split('\n')
-                for rl in result_lines[:5]:
+                for rl in task.result.split('\n'):
                     lines.append(f"      → {rl}")
-                if len(result_lines) > 5:
-                    lines.append(f"      ... ({len(result_lines) - 5} more lines)")
 
         if failed_tasks:
             lines.append("")

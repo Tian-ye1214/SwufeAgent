@@ -1,0 +1,21 @@
+pydantic-ai==1.80.0
+pydantic-ai-slim[anthropic]==1.80.0
+python-dotenv
+json-repair
+ddgs
+
+requests
+beautifulsoup4
+
+PyMuPDF
+python-docx
+pandas
+openpyxl
+
+PyYAML
+
+# QQ Bot SDK（NapCat 协议端，支持普通 QQ 账号）
+ncatbot
+
+# 微信 iLink Bot（官方 Python SDK：https://github.com/corespeed-io/wechatbot/tree/main/python）
+wechatbot-sdk

@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import logger
-from skills.SkillsManager import get_skills_manager
 
 if TYPE_CHECKING:
     from skills.SkillsManager import SkillsManager
@@ -12,8 +11,8 @@ if TYPE_CHECKING:
 
 class SkillsToolkit:
 
-    def __init__(self, manager: SkillsManager | None = None):
-        self._manager: SkillsManager = manager or get_skills_manager()
+    def __init__(self, manager: "SkillsManager"):
+        self._manager: SkillsManager = manager
 
 
     def list_available_skills(self) -> str:

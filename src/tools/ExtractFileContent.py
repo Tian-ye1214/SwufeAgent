@@ -6,6 +6,16 @@ import re
 from pathlib import Path
 
 base_dir = Path("./WorkDatabase")
+
+
+def _clean_extracted_text(content: str) -> str:
+    content = re.sub(r'[ \t]{2,}', ' ', content)
+    content = re.sub(r'^[ \t]+|[ \t]+$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'\n{2,}', '\n', content).strip('\n')
+    content = re.sub(r'([,?!;:。.])\1+', r'\1', content)
+    return content.strip()
+
+
 def _safe_path(name: str) -> Path:
     path = (base_dir / name).resolve()
     if not str(path).startswith(str(base_dir.resolve())):
@@ -28,6 +38,25 @@ def extract_text_from_pdf(file_path):
         return content
     except Exception as e:
         print(f"PDF处理错误：{str(e)}")
+        return None
+
+
+def extract_text_from_pdf_bytes(data: bytes) -> str | None:
+    """从 PDF 字节流提取并清洗文本（供微信等无落盘路径的场景）。"""
+    if not data:
+        return None
+    try:
+        content = ""
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            for page in pdf:
+                text = page.get_text()
+                if text:
+                    content += text + "\n"
+        if not content.strip():
+            raise ValueError("无法从PDF中提取文本内容")
+        return _clean_extracted_text(content)
+    except Exception as e:
+        print(f"PDF字节流处理错误：{str(e)}")
         return None
 
 
@@ -93,11 +122,7 @@ def extract_text(file_path):
         if content is None:
             raise ValueError("无法提取文件内容")
 
-        content = re.sub(r'[ \t]{2,}', ' ', content)
-        content = re.sub(r'^[ \t]+|[ \t]+$', '', content, flags=re.MULTILINE)
-        content = re.sub(r'\n{2,}', '\n', content).strip('\n')
-        content = re.sub(r'([,?!;:。.])\1+', r'\1', content)
-        return content
+        return _clean_extracted_text(content)
     except ValueError as e:
         print(f"安全错误：{str(e)}")
         return None

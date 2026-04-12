@@ -1,16 +1,20 @@
+from __future__ import annotations
+
 import datetime
 import platform
 import os
 import subprocess
 import shutil
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skills.SkillsManager import SkillsManager
 
 
-def get_skills_summary() -> str:
+def get_skills_summary(skills_manager: SkillsManager) -> str:
     """获取 Skills 摘要，用于系统提示"""
     try:
-        from skills.SkillsManager import get_skills_manager
-        manager = get_skills_manager()
-        return manager.get_skills_summary()
+        return skills_manager.get_skills_summary()
     except Exception:
         return ""
 
@@ -164,9 +168,6 @@ def format_system_info():
 
 
 system_info = format_system_info()
-skills_summary = get_skills_summary()
-
-
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 
 
@@ -177,23 +178,52 @@ def load_prompt(filename: str) -> str:
         return f.read()
 
 
-def get_manager_system_prompt() -> str:
-    """构建 Manager Agent 的系统提示"""
+def get_skills_layout_text(skills_manager: SkillsManager) -> str:
+    """从 prompts/skills_layout.md 加载 Skills 目录说明，并填入本机 skills 路径。"""
+    try:
+        root = skills_manager.skills_dir.resolve()
+        skills_root_path = f"本机绝对路径：`{root}`"
+    except Exception:
+        skills_root_path = "相对项目根目录：`skills/`"
+    return load_prompt("skills_layout.md").format(skills_root_path=skills_root_path)
+
+
+def get_skills_as_in_system_prompt(skills_manager: SkillsManager) -> str:
+    layout = get_skills_layout_text(skills_manager).rstrip()
+    summary = get_skills_summary(skills_manager).rstrip()
+    if not layout and not summary:
+        return ""
+    if not layout:
+        return summary
+    if not summary:
+        return layout
+    return f"{layout}\n\n{summary}"
+
+
+def get_manager_system_prompt(skills_manager: SkillsManager) -> str:
+    """构建 Manager Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("manager_system.md")
     return template.format(
         current_time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         system_info=system_info,
-        skills_summary=skills_summary,
+        skills_layout=get_skills_layout_text(skills_manager),
+        skills_summary=get_skills_summary(skills_manager),
     )
 
 
-def get_worker_system_prompt() -> str:
-    """构建 Worker Agent 的系统提示"""
+def get_worker_system_prompt(skills_manager: SkillsManager) -> str:
+    """构建 Worker Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("worker_system.md")
     return template.format(
-        skills_summary=skills_summary,
+        skills_layout=get_skills_layout_text(skills_manager),
+        skills_summary=get_skills_summary(skills_manager),
     )
 
 
-manager_system_prompt = get_manager_system_prompt()
-workers_system_prompt = get_worker_system_prompt()
+def get_coordinator_system_prompt(skills_manager: SkillsManager) -> str:
+    """构建 Coordinator 的系统提示（含 Skills 目录说明与当前摘要）。"""
+    template = load_prompt("coordinator_system.md")
+    return template.format(
+        skills_layout=get_skills_layout_text(skills_manager),
+        skills_summary=get_skills_summary(skills_manager),
+    )

@@ -6,9 +6,9 @@ import time
 import traceback
 
 import logger
-from prompt import workers_system_prompt, load_prompt
+from prompt import get_worker_system_prompt, load_prompt
 from BasicFunction import create_agent
-from ModelConfig import WORKER_MODEL, workers_parameter
+from app_config import get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ class _SharedMessageBoard:
             self._messages.append({
                 "worker_id": worker_id,
                 "task": task_desc,
-                "message": message[:2000],
+                "message": message,
                 "status": status,
                 "timestamp": time.strftime("%H:%M:%S"),
             })
@@ -78,8 +78,12 @@ class WorkerOrchestrator:
         Returns:
             Tuple[bool, str]: (success, result_message)
         """
+        w_name, w_params = get_model_and_params("worker")
         worker_agent = create_agent(
-            WORKER_MODEL, workers_parameter, self._toolkit.workers_tools, workers_system_prompt
+            w_name,
+            w_params,
+            self._toolkit.workers_tools,
+            get_worker_system_prompt(self._toolkit.skills_manager),
         )
         prompt_text = (
             f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -244,8 +248,9 @@ class WorkerOrchestrator:
         board_tools = self._create_board_tools(board, worker_id, task.description)
         all_tools = self._toolkit.workers_tools + board_tools
 
-        full_system_prompt = workers_system_prompt + load_prompt("worker_parallel_addon.md")
-        worker_agent = create_agent(WORKER_MODEL, workers_parameter, all_tools, full_system_prompt)
+        full_system_prompt = get_worker_system_prompt(self._toolkit.skills_manager) + load_prompt("worker_parallel_addon.md")
+        w_name, w_params = get_model_and_params("worker")
+        worker_agent = create_agent(w_name, w_params, all_tools, full_system_prompt)
 
         other_progress = await board.get_updates(exclude_worker=worker_id)
 
@@ -291,13 +296,13 @@ class WorkerOrchestrator:
             output_upper = output.upper().strip()
 
             if first_line.startswith("FAILED:") or first_line.startswith("FAILED："):
-                await board.post(worker_id, task.description, output[:500], "failed")
+                await board.post(worker_id, task.description, output, "failed")
                 return False, output
             elif output_upper.startswith("ERROR:") or output_upper.startswith("错误:") or "执行异常" in output:
-                await board.post(worker_id, task.description, output[:500], "failed")
+                await board.post(worker_id, task.description, output, "failed")
                 return False, output
             else:
-                await board.post(worker_id, task.description, output[:500], "completed")
+                await board.post(worker_id, task.description, output, "completed")
                 return True, output
 
         except Exception as e:
