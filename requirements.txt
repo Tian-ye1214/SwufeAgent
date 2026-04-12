@@ -5,7 +5,7 @@ json-repair
 ddgs
 
 requests
-beautifulsoup4
+playwright>=1.49.0
 
 PyMuPDF
 python-docx

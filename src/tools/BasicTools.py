@@ -5,7 +5,6 @@ import time
 import mimetypes
 from ddgs import DDGS
 import requests
-from bs4 import BeautifulSoup
 import logger
 import shlex
 import platform as _platform
@@ -13,6 +12,7 @@ from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
+from tools.browser_session import PlaywrightBrowserSession
 
 
 class BasicToolkit:
@@ -23,6 +23,7 @@ class BasicToolkit:
         self._ask_user_handler = None
         self._skills_manager = skills_manager
         self._skills_toolkit = SkillsToolkit(skills_manager)
+        self._browser_session = PlaywrightBrowserSession()
 
     def set_skills_manager(self, skills_manager: SkillsManager) -> None:
         self._skills_manager = skills_manager
@@ -72,14 +73,125 @@ class BasicToolkit:
         task_dir = self._WORK_DATABASE_ROOT / safe_name
         task_dir.mkdir(parents=True, exist_ok=True)
 
+        self._browser_session.close()
         self._base_dir = task_dir
         logger.info(f"📁 任务工作目录已设置: {task_dir}")
 
         return task_dir
 
     def reset_task_directory(self):
+        self._browser_session.close()
         self._base_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
+
+    @staticmethod
+    def _browser_headless_from_env() -> bool:
+        v = (os.environ.get("BROWSER_HEADLESS") or "").strip().lower()
+        if v in ("0", "false", "no"):
+            return False
+        return True
+
+    def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
+        """
+        使用真实浏览器（Chromium）打开 URL。静态页与动态页均可：先 navigate，再按需 browser_get_content /截图等。
+
+        需已安装: pip install playwright && playwright install chromium
+        显示浏览器窗口: 环境变量 BROWSER_HEADLESS=0
+
+        Parameters:
+            url: 完整网址（https://...）
+            wait_until: 加载等待策略，可选 domcontentloaded、load、networkidle（默认 domcontentloaded）
+        """
+        h = self._browser_headless_from_env()
+        logger.debug(f"(browser_navigate {url} headless={h})")
+        return self._browser_session.navigate(url, headless=h, wait_until=wait_until)
+
+    def browser_get_content(self) -> str:
+        """
+        获取当前浏览器页面中可见文本（body innerText），用于阅读动态渲染后的正文。
+        返回完整文本，不做长度截断。
+        """
+        h = self._browser_headless_from_env()
+        logger.debug("(browser_get_content)")
+        return self._browser_session.get_content(headless=h)
+
+    def browser_screenshot(self, name: str, full_page: bool = False) -> str:
+        """
+        对当前页面截图，保存到当前任务工作目录（WorkDatabase 下相对路径）。
+
+        Parameters:
+            name: 文件名，如 page.png
+            full_page: 是否截取整页（可滚动区域）
+        """
+        h = self._browser_headless_from_env()
+        logger.debug(f"(browser_screenshot {name})")
+        try:
+            path = self._safe_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except ValueError as e:
+            return f"Security error: {e}"
+        return self._browser_session.screenshot(headless=h, filename=str(path), full_page=full_page)
+
+    def browser_click(self, selector: str) -> str:
+        """
+        点击当前页面上的元素。selector 使用 Playwright 语法（CSS、text=... 等）。
+
+        Parameters:
+            selector: 例如 #submit、text=登录
+        """
+        h = self._browser_headless_from_env()
+        logger.debug(f"(browser_click {selector})")
+        return self._browser_session.click(headless=h, selector=selector)
+
+    def browser_fill(self, selector: str, text: str) -> str:
+        """
+        在输入框中填入文本（会先清空再输入）。
+
+        Parameters:
+            selector: 输入框的 CSS 或其它 Playwright 选择器
+            text: 要填入的内容
+        """
+        h = self._browser_headless_from_env()
+        return self._browser_session.fill(headless=h, selector=selector, text=text)
+
+    def browser_press_key(self, key: str) -> str:
+        """
+        向当前页面发送键盘按键（如 Enter、Tab）。
+
+        Parameters:
+            key: Playwright 键名，例如 Enter、ArrowDown
+        """
+        h = self._browser_headless_from_env()
+        return self._browser_session.press(headless=h, key=key)
+
+    def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
+        """
+        等待元素出现在 DOM 中（适合 SPA、异步加载）。
+
+        Parameters:
+            selector: Playwright 选择器
+            timeout_ms: 超时毫秒数
+        """
+        h = self._browser_headless_from_env()
+        return self._browser_session.wait_for_selector(
+            headless=h, selector=selector, timeout_ms=timeout_ms
+        )
+
+    def browser_evaluate(self, javascript_expression: str) -> str:
+        """
+        在当前页面上下文执行 JavaScript 表达式并返回结果（page.evaluate）。
+        例如: document.querySelector('h1')?.innerText
+
+        Parameters:
+            javascript_expression: 单行可求值脚本
+        """
+        h = self._browser_headless_from_env()
+        return self._browser_session.run_javascript(headless=h, expression=javascript_expression)
+
+    def browser_close(self) -> str:
+        """关闭 Playwright 浏览器进程并释放资源；下次操作会重新启动。"""
+        self._browser_session.close()
+        return "浏览器已关闭"
 
     def _safe_path(self, name: str) -> Path:
         """Ensure path is within base_dir to prevent path traversal attacks"""
@@ -297,15 +409,12 @@ class BasicToolkit:
                         for line_num, line in enumerate(f, 1):
                             if keyword.lower() in line.lower():
                                 rel_path = file_path.relative_to(self._base_dir)
-                                results.append(f"{rel_path}:{line_num}: {line.strip()[:100]}")
+                                results.append(f"{rel_path}:{line_num}: {line.strip()}")
                 except:
                     continue
 
             if results:
-                output = f"Found {len(results)} matches:\n" + "\n".join(results[:50])
-                if len(results) > 50:
-                    output += f"\n... {len(results) - 50} more matches not shown"
-                return output
+                return f"Found {len(results)} matches:\n" + "\n".join(results)
             return "No matches found"
         except Exception as e:
             return f"Search error: {e}"
@@ -338,42 +447,6 @@ class BasicToolkit:
         except Exception as e:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
-
-    def fetch_webpage(self, url: str, extract_text_only: bool = True) -> str:
-        """
-        Fetch webpage content. Can return plain text or HTML content.
-        Parameters:
-            url: The URL of the webpage to fetch
-            extract_text_only: If True, returns the extracted plain text; if False, returns the raw HTML
-        """
-        logger.debug(f"(fetch_webpage url='{url}', extract_text={extract_text_only})")
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            response.encoding = response.apparent_encoding
-
-            if extract_text_only:
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                for script in soup(['script', 'style', 'meta', 'link']):
-                    script.decompose()
-
-                text = soup.get_text()
-                lines = (line.strip() for line in text.splitlines())
-                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                text = '\n'.join(chunk for chunk in chunks if chunk)
-
-                return f"Page Title: {soup.title.string if soup.title else 'No title'}\n\nContent:\n{text[:10000]}{'...' if len(text) > 10000 else ''}"
-            else:
-                return response.text[:10000] + ('...' if len(response.text) > 10000 else '')
-
-        except requests.exceptions.RequestException as e:
-            return f"Error fetching webpage: {e}"
-        except Exception as e:
-            return f"Error processing webpage content: {e}"
 
     def execute_file(self, name: str, args: str = "") -> str:
         """
@@ -672,8 +745,16 @@ class BasicToolkit:
             # 搜索操作
             self.search_in_files,
             self.search_web,
-            # 网络操作
-            self.fetch_webpage,
+            # 浏览器自动化（Playwright / Chromium）
+            self.browser_navigate,
+            self.browser_get_content,
+            self.browser_screenshot,
+            self.browser_click,
+            self.browser_fill,
+            self.browser_press_key,
+            self.browser_wait_for_selector,
+            self.browser_evaluate,
+            self.browser_close,
             # 执行操作
             self.run_command,
             self.execute_file,

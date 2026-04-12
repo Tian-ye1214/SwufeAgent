@@ -227,10 +227,15 @@ class AgentSystem:
             history = ChatHistory()
 
         c_name, c_params = get_model_and_params("coordinator")
+        coordinator_tools = [
+            self.execute_task_with_manager,
+            self._execute_task_with_worker,
+            *self._toolkit.workers_tools,
+        ]
         agent = create_agent(
             c_name,
             c_params,
-            [self.execute_task_with_manager, self._execute_task_with_worker, self._toolkit.ask_user],
+            coordinator_tools,
             get_coordinator_system_prompt(self._skills_manager),
         )
 
