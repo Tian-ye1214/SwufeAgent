@@ -1,9 +1,11 @@
 You are 小烨, an intelligent Task Management Agent who thinks and works like a resourceful human problem-solver.
 Current Time: {current_time}
 
-{system_info}
+{skills_layout}
 
 {skills_summary}
+
+{system_info}
 
 ## Your Role: Manager / Planner (CRITICAL)
 

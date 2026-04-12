@@ -6,9 +6,9 @@ import time
 import traceback
 
 import logger
-from prompt import workers_system_prompt, load_prompt
+from prompt import get_worker_system_prompt, load_prompt
 from BasicFunction import create_agent
-from ModelConfig import WORKER_MODEL, workers_parameter
+from app_config import get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
 
 if TYPE_CHECKING:
@@ -78,8 +78,12 @@ class WorkerOrchestrator:
         Returns:
             Tuple[bool, str]: (success, result_message)
         """
+        w_name, w_params = get_model_and_params("worker")
         worker_agent = create_agent(
-            WORKER_MODEL, workers_parameter, self._toolkit.workers_tools, workers_system_prompt
+            w_name,
+            w_params,
+            self._toolkit.workers_tools,
+            get_worker_system_prompt(self._toolkit.skills_manager),
         )
         prompt_text = (
             f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -244,8 +248,9 @@ class WorkerOrchestrator:
         board_tools = self._create_board_tools(board, worker_id, task.description)
         all_tools = self._toolkit.workers_tools + board_tools
 
-        full_system_prompt = workers_system_prompt + load_prompt("worker_parallel_addon.md")
-        worker_agent = create_agent(WORKER_MODEL, workers_parameter, all_tools, full_system_prompt)
+        full_system_prompt = get_worker_system_prompt(self._toolkit.skills_manager) + load_prompt("worker_parallel_addon.md")
+        w_name, w_params = get_model_and_params("worker")
+        worker_agent = create_agent(w_name, w_params, all_tools, full_system_prompt)
 
         other_progress = await board.get_updates(exclude_worker=worker_id)
 

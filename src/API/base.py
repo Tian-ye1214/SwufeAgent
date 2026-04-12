@@ -9,14 +9,15 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SRC = os.path.join(_REPO_ROOT, "src")
 _API_DIR = os.path.dirname(os.path.abspath(__file__))
-for _p in (_ROOT, _API_DIR):
+for _p in (_SRC, _API_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-os.chdir(_ROOT)
+os.chdir(_REPO_ROOT)
 
-from main import AgentSystem
+from agent_app import AgentSystem
 from tools.memory import ChatHistory, UserMessage
 import logger
 

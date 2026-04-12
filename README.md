@@ -104,12 +104,15 @@ python main.py
 ## 📦 项目结构
 
 ```
-AgentDemo/
-├── main.py              # 主程序入口，Multi-Agent调度核心
-├── tools.py             # 工作Agent工具集（17个工具函数）
-├── ManagementTools.py   # 管理Agent任务管理工具
-├── prompt.py            # Agent系统提示词
-├── WorkDatabase/        # 工作目录（Agent文件操作的沙箱）
+Agent/
+├── main.py              # 根目录启动器（把 src 加入路径后运行 agent_app）
+├── src/
+│   ├── agent_app.py     # 交互式 Agent 与 AgentSystem（原 main逻辑）
+│   ├── tools/           # 工具与编排
+│   ├── API/             # QQ/微信等接入
+│   ├── skills/          # Skills 包与 SKILL 资源
+│   └── prompts/         # 系统提示 Markdown
+├── WorkDatabase/        # 工作目录（Agent 文件操作沙箱）
 └── README.md
 ```
 

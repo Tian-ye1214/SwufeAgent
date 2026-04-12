@@ -10,9 +10,9 @@ from pydantic_ai import Agent, ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 import json_repair
-import os
 
 import logger as _logger_mod
+from app_config import get_api_base, get_api_key
 
 load_dotenv()
 
@@ -145,16 +145,18 @@ class ThinkingProvider(OpenAIProvider):
 
 
 def create_model(model_name: str, parameter: dict):
+    api_key = get_api_key() or None
+    api_base = get_api_base() or None
     if 'gemini' in model_name:
         provider = GoogleProvider(
             base_url='https://api.zhizengzeng.com/google',
-            api_key=os.environ.get('API_KEY')
+            api_key=api_key,
         )
         return GoogleModel(model_name, provider=provider, settings=ModelSettings(**parameter))
     elif 'claude' in model_name:
         provider = AnthropicProvider(
             base_url='https://api.zhizengzeng.com/anthropic',
-            api_key=os.environ.get('API_KEY')
+            api_key=api_key,
         )
         return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**parameter))
     else:
@@ -162,11 +164,11 @@ def create_model(model_name: str, parameter: dict):
         use_thinking_provider = any(m in model_name.lower() for m in thinking_models)
         
         if use_thinking_provider:
-            provider = ThinkingProvider(base_url=os.environ.get('BASE_URL'), api_key=os.environ.get('API_KEY'))
+            provider = ThinkingProvider(base_url=api_base, api_key=api_key)
         else:
             provider = OpenAIProvider(
-                base_url=os.environ.get('BASE_URL'),
-                api_key=os.environ.get('API_KEY')
+                base_url=api_base,
+                api_key=api_key,
             )
         return JsonRepairOpenAIChatModel(
             model_name,

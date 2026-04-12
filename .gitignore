@@ -11,3 +11,5 @@ __pycache__/
 .ipynb_checkpoints
 logs/
 WorkDatabase/
+build/
+dist/

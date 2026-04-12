@@ -11,16 +11,22 @@ import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
+from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
 
 
 class BasicToolkit:
     _WORK_DATABASE_ROOT = Path("./WorkDatabase")
 
-    def __init__(self):
+    def __init__(self, skills_manager: SkillsManager):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
         self._ask_user_handler = None
-        self._skills_toolkit = SkillsToolkit()
+        self._skills_manager = skills_manager
+        self._skills_toolkit = SkillsToolkit(skills_manager)
+
+    def set_skills_manager(self, skills_manager: SkillsManager) -> None:
+        self._skills_manager = skills_manager
+        self._skills_toolkit = SkillsToolkit(skills_manager)
         self._dangerous_patterns = [
             'rm -rf /',
             'rm -rf /*',
@@ -36,6 +42,10 @@ class BasicToolkit:
             'eval ',
             'exec ',
         ]
+
+    @property
+    def skills_manager(self) -> SkillsManager:
+        return self._skills_manager
 
     @property
     def base_dir(self) -> Path:
