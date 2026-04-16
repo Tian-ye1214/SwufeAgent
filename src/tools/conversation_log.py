@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from tools.Memory import ChatHistory
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
@@ -73,9 +74,7 @@ class ConversationLog:
                 for p in parts:
                     pk = p.get("part_kind")
                     if pk == "user-prompt":
-                        simple.append(
-                            {"role": "user", "content": self._stringify_user_content(p.get("content"))}
-                        )
+                        simple.append({"role": "user", "content": self._stringify_user_content(p.get("content"))})
                     elif pk == "tool-return":
                         simple.append(
                             {
@@ -109,34 +108,6 @@ class ConversationLog:
                 if text or tool_calls:
                     simple.append(entry)
         return simple
-
-    def build_conversation_record(
-        self,
-        model_messages: list[Any],
-        *,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """仅生成可读快照（不含 model_messages）。兼容旧调用方。"""
-        raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
-        saved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        record: dict[str, Any] = {
-            "saved_at": saved_at,
-            "messages": self.simple_messages_from_raw(raw),
-        }
-        if extra:
-            record["meta"] = extra
-        return record
-
-    async def abuild_conversation_record(
-        self,
-        model_messages: list[Any],
-        *,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """在线程中执行序列化与摘要，避免在事件循环中阻塞。"""
-        return await asyncio.to_thread(
-            partial(self.build_conversation_record, model_messages, extra=extra)
-        )
 
     def _build_model_messages_record(
         self,
@@ -172,9 +143,7 @@ class ConversationLog:
         log = logger_mod.get_logger()
         log.debug("conversation_log · %s + %s", readable_path.name, raw_path.name)
 
-    def _build_and_write_locked(
-        self, base_path: Path, model_messages: list[Any], extra: dict[str, Any] | None
-    ) -> None:
+    def _build_and_write_locked(self, base_path: Path, model_messages: list[Any], extra: dict[str, Any] | None) -> None:
         with self._disk_write_lock:
             self._build_and_write(base_path, model_messages, extra)
 
@@ -196,8 +165,6 @@ class ConversationLog:
 
     def load_chat_history_from_file(self, path: str | Path) -> "ChatHistory":
         """读取含 ``model_messages`` 的快照，或可读 ``*.json`` 时自动查找同 stem 的配对文件。"""
-        from tools.Memory import ChatHistory
-
         p = Path(path)
         with p.open(encoding="utf-8") as f:
             payload = json.load(f)
