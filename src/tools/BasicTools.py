@@ -1,5 +1,8 @@
 from pathlib import Path
+import asyncio
+import inspect
 import os
+import re
 import subprocess
 import time
 import mimetypes
@@ -14,9 +17,11 @@ from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
 from tools.browser_session import PlaywrightBrowserSession
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 class BasicToolkit:
-    _WORK_DATABASE_ROOT = Path("./WorkDatabase")
+    _WORK_DATABASE_ROOT = _REPO_ROOT / "WorkDatabase"
 
     def __init__(self, skills_manager: SkillsManager):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
@@ -24,10 +29,6 @@ class BasicToolkit:
         self._skills_manager = skills_manager
         self._skills_toolkit = SkillsToolkit(skills_manager)
         self._browser_session = PlaywrightBrowserSession()
-
-    def set_skills_manager(self, skills_manager: SkillsManager) -> None:
-        self._skills_manager = skills_manager
-        self._skills_toolkit = SkillsToolkit(skills_manager)
         self._dangerous_patterns = [
             'rm -rf /',
             'rm -rf /*',
@@ -44,6 +45,10 @@ class BasicToolkit:
             'exec ',
         ]
 
+    def set_skills_manager(self, skills_manager: SkillsManager) -> None:
+        self._skills_manager = skills_manager
+        self._skills_toolkit = SkillsToolkit(skills_manager)
+
     @property
     def skills_manager(self) -> SkillsManager:
         return self._skills_manager
@@ -54,13 +59,13 @@ class BasicToolkit:
 
     def set_task_directory(self, task_name: str) -> Path:
         """
-        为当前任务设置独立的工作目录
+        Set a dedicated work directory for the current task.
 
         Parameters:
-            task_name: 任务名称，将用于创建子文件夹
+            task_name: Task name; used to create a subdirectory under WorkDatabase.
 
         Returns:
-            Path: 任务工作目录的路径
+            Path to the task work directory.
         """
         safe_name = "".join(
             c if c.isalnum() or c in ('_', '-', ' ') else '_' for c in task_name
@@ -93,84 +98,82 @@ class BasicToolkit:
 
     def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """
-        使用真实浏览器（Chromium）打开 URL。静态页与动态页均可：先 navigate，再按需 browser_get_content /截图等。
+        Open a URL in a real Chromium browser. Works for static and dynamic pages: navigate first,
+        then use browser_get_content, screenshots, etc. as needed.
 
-        需已安装: pip install playwright && playwright install chromium
-        显示浏览器窗口: 环境变量 BROWSER_HEADLESS=0
+        Requires: pip install playwright && playwright install chromium
+        Show the browser window: set env BROWSER_HEADLESS=0
 
         Parameters:
-            url: 完整网址（https://...）
-            wait_until: 加载等待策略，可选 domcontentloaded、load、networkidle（默认 domcontentloaded）
+            url: Full URL (https://...)
+            wait_until: Load wait strategy; one of domcontentloaded, load, networkidle (default domcontentloaded)
         """
         h = self._browser_headless_from_env()
-        logger.debug(f"(browser_navigate {url} headless={h})")
         return self._browser_session.navigate(url, headless=h, wait_until=wait_until)
 
     def browser_get_content(self) -> str:
         """
-        获取当前浏览器页面中可见文本（body innerText），用于阅读动态渲染后的正文。
-        返回完整文本，不做长度截断。
+        Return visible text from the current page (body innerText), for reading dynamically rendered content.
+        Returns the full text with no length truncation.
         """
         h = self._browser_headless_from_env()
-        logger.debug("(browser_get_content)")
         return self._browser_session.get_content(headless=h)
 
     def browser_screenshot(self, name: str, full_page: bool = False) -> str:
         """
-        对当前页面截图，保存到当前任务工作目录（WorkDatabase 下相对路径）。
+        Capture a screenshot of the current page and save it to the given path.
+        Relative paths use the same rules as read_file (WorkDatabase or src/ under repo).
 
         Parameters:
-            name: 文件名，如 page.png
-            full_page: 是否截取整页（可滚动区域）
+            name: File path, e.g. page.png or an absolute path
+            full_page: If True, capture the full scrollable page
         """
         h = self._browser_headless_from_env()
-        logger.debug(f"(browser_screenshot {name})")
         try:
-            path = self._safe_path(name)
+            path = self._resolve_path_candidate(name)
             path.parent.mkdir(parents=True, exist_ok=True)
         except ValueError as e:
-            return f"Security error: {e}"
+            return str(e)
         return self._browser_session.screenshot(headless=h, filename=str(path), full_page=full_page)
 
     def browser_click(self, selector: str) -> str:
         """
-        点击当前页面上的元素。selector 使用 Playwright 语法（CSS、text=... 等）。
+        Click an element on the current page. selector uses Playwright syntax (CSS, text=..., etc.).
 
         Parameters:
-            selector: 例如 #submit、text=登录
+            selector: e.g. #submit, text=Sign in
         """
         h = self._browser_headless_from_env()
-        logger.debug(f"(browser_click {selector})")
         return self._browser_session.click(headless=h, selector=selector)
 
     def browser_fill(self, selector: str, text: str) -> str:
         """
-        在输入框中填入文本（会先清空再输入）。
+        Fill an input field with text (clears the field first, then types the value).
 
         Parameters:
-            selector: 输入框的 CSS 或其它 Playwright 选择器
-            text: 要填入的内容
+            selector: CSS or other Playwright selector for the input
+            text: Text to enter
         """
         h = self._browser_headless_from_env()
         return self._browser_session.fill(headless=h, selector=selector, text=text)
 
     def browser_press_key(self, key: str) -> str:
         """
-        向当前页面发送键盘按键（如 Enter、Tab）。
+        Send a keyboard key to the current page (e.g. Enter, Tab).
 
         Parameters:
-            key: Playwright 键名，例如 Enter、ArrowDown
+            key: Playwright key name, e.g. Enter, ArrowDown
         """
         h = self._browser_headless_from_env()
         return self._browser_session.press(headless=h, key=key)
 
     def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
         """
-        等待元素出现在 DOM 中（适合 SPA、异步加载）。
+        Wait until an element appears in the DOM (useful for SPAs and async-loaded UI).
 
         Parameters:
-            selector: Playwright 选择器
-            timeout_ms: 超时毫秒数
+            selector: Playwright selector
+            timeout_ms: Timeout in milliseconds
         """
         h = self._browser_headless_from_env()
         return self._browser_session.wait_for_selector(
@@ -179,30 +182,48 @@ class BasicToolkit:
 
     def browser_evaluate(self, javascript_expression: str) -> str:
         """
-        在当前页面上下文执行 JavaScript 表达式并返回结果（page.evaluate）。
-        例如: document.querySelector('h1')?.innerText
+        Evaluate a JavaScript expression in the page context and return the result (page.evaluate).
+        Example: document.querySelector('h1')?.innerText
 
         Parameters:
-            javascript_expression: 单行可求值脚本
+            javascript_expression: A single-line expression to evaluate
         """
         h = self._browser_headless_from_env()
         return self._browser_session.run_javascript(headless=h, expression=javascript_expression)
 
     def browser_close(self) -> str:
-        """关闭 Playwright 浏览器进程并释放资源；下次操作会重新启动。"""
+        """Close the Playwright browser process and release resources; the next action will start a new browser."""
         self._browser_session.close()
-        return "浏览器已关闭"
+        return "Browser closed"
+
+    def _resolve_path_candidate(self, name: str) -> Path:
+        """Resolve path (same rules as _safe_path) without workspace/repo boundary check — for read/list only."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Path name must not be empty")
+        # Align with system prompt: bare "skills" means src/skills under the repo
+        if name.replace("\\", "/").strip("/").rstrip("/") == "skills":
+            name = "src/skills"
+
+        base_r = self._base_dir.resolve()
+        repo_r = _REPO_ROOT.resolve()
+        p_in = Path(name).expanduser()
+        if p_in.is_absolute():
+            return p_in.resolve()
+        norm = name.replace("\\", "/")
+        anchor = repo_r if norm == "src" or norm.startswith("src/") else base_r
+        return (anchor / name).resolve()
 
     def _safe_path(self, name: str) -> Path:
-        """Ensure path is within base_dir to prevent path traversal attacks"""
-        path = (self._base_dir / name).resolve()
-        path_str = str(path)
-        base_str = str(self._base_dir.resolve())
-        if _platform.system() == "Windows":
-            path_str = path_str.lower()
-            base_str = base_str.lower()
-        if not path_str.startswith(base_str):
-            raise ValueError("Path traversal detected: access outside base_dir is not allowed")
+        """Resolve path and confine to task workspace or Agent repo root (write/delete/move/execute)."""
+        path = self._resolve_path_candidate(name)
+        base_r = self._base_dir.resolve()
+        repo_r = _REPO_ROOT.resolve()
+        if not (path.is_relative_to(base_r) or path.is_relative_to(repo_r)):
+            raise ValueError(
+                "Path traversal detected: path must be inside the task workspace "
+                f"({base_r}) or the Agent project directory ({repo_r})"
+            )
         return path
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
@@ -214,34 +235,48 @@ class BasicToolkit:
         for pattern in self._dangerous_start_patterns:
             if command_lower.startswith(pattern.lower()):
                 return False, f"Dangerous command pattern detected: '{pattern}'"
+        if "npx" in command_lower and "clawhub" in command_lower:
+            if re.search(r"\bclawhub\s+install(?:\s|$)", command_lower):
+                return False, (
+                    "Blocked bare `npx clawhub install`. Use: "
+                    f"`npx clawhub --dir src/skills install <slug>`. Repo root: {_REPO_ROOT}"
+                )
+            if re.search(r'--dir(?:=|\s+)["\']?[a-zA-Z]:', command):
+                return False, (
+                    "Blocked `--dir` with a drive letter; use `--dir src/skills` relative to repo root. "
+                    f"Repo root: {_REPO_ROOT}"
+                )
         return True, ""
 
     def set_ask_user_handler(self, handler):
         """
-        替换 ask_user 的底层实现（用于非终端场景，如 QQ Bot、Web API 等）。
-        handler 签名：(question: str) -> str
-        传入 None 可恢复默认终端输入。
+        Replace the underlying implementation of ask_user (for non-terminal use, e.g. QQ Bot, Web API).
+        handler may be sync or async: (question: str) -> str | None, or async (question: str) -> str | None.
+        Pass None to restore the default terminal input.
         """
         self._ask_user_handler = handler
 
-    def ask_user(self, question: str) -> str:
+    async def ask_user(self, question: str) -> str:
         """
-        主动询问用户问题并获取回答
+        Ask the user a question and return their reply.
         Parameters:
-            question: 要询问用户的问题
+            question: The question to ask
         Returns:
-            用户的回答
+            The user's answer
         """
         if self._ask_user_handler is not None:
-            result = self._ask_user_handler(question)
-            return result if result is not None else "(用户未回复)"
+            if inspect.iscoroutinefunction(self._ask_user_handler):
+                result = await self._ask_user_handler(question)
+            else:
+                result = await asyncio.to_thread(self._ask_user_handler, question)
+            return result if result is not None else "(User did not reply)"
 
         logger.info("=" * 50)
         logger.info("🤔 Agent 需要您的帮助")
         logger.info("=" * 50)
         logger.info(f"问题: {question}")
 
-        user_response = input("📝 您的回复: ").strip()
+        user_response = (await asyncio.to_thread(input, "📝 您的回复: ")).strip()
         logger.info(f"用户回答: {user_response}")
 
         return user_response
@@ -252,14 +287,13 @@ class BasicToolkit:
         Parameters:
             name: File name/path
         """
-        logger.debug(f"(read_file {name})")
         try:
-            file_path = self._safe_path(name)
+            file_path = self._resolve_path_candidate(name)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             return content if content else "File is empty"
         except ValueError as e:
-            return f"Security error: {e}"
+            return str(e)
         except Exception as e:
             return f"Read error: {e}"
 
@@ -269,15 +303,20 @@ class BasicToolkit:
         Parameters:
             directory: Optional, subdirectory path, defaults to root directory
         """
-        logger.debug(f"(list_files {directory})")
         try:
-            target_dir = self._safe_path(directory) if directory else self._base_dir
+            target_dir = (
+                self._resolve_path_candidate(directory) if directory else self._base_dir
+            )
             if not target_dir.exists():
                 return f"Error: Directory '{directory}' does not exist"
 
             items = []
+            base_r = self._base_dir.resolve()
             for item in sorted(target_dir.iterdir()):
-                rel_path = str(item.relative_to(self._base_dir))
+                try:
+                    rel_path = str(item.relative_to(base_r))
+                except ValueError:
+                    rel_path = str(item)
                 if item.is_dir():
                     items.append(f"{rel_path}/")
                 else:
@@ -286,7 +325,7 @@ class BasicToolkit:
 
             return "\n".join(items) if items else "Directory is empty"
         except ValueError as e:
-            return f"Security error: {e}"
+            return str(e)
         except Exception as e:
             return f"Error listing files: {e}"
 
@@ -314,7 +353,6 @@ class BasicToolkit:
         3. Split content into multiple smaller files
         """
         content_len = len(content) if content else 0
-        logger.debug(f"(write_file {name}, content_length={content_len})")
         try:
             if content is None:
                 return "Write error: content cannot be None"
@@ -351,7 +389,6 @@ class BasicToolkit:
         3. Continue until done
         """
         content_len = len(content) if content else 0
-        logger.debug(f"(append_to_file {name}, content_length={content_len})")
         try:
             if content is None:
                 return "Append error: content cannot be None"
@@ -379,7 +416,6 @@ class BasicToolkit:
         Parameters:
             name: Directory name/path
         """
-        logger.debug(f"(create_directory {name})")
         try:
             dir_path = self._safe_path(name)
             os.makedirs(dir_path, exist_ok=True)
@@ -396,7 +432,6 @@ class BasicToolkit:
             keyword: Keyword to search for
             file_extension: Optional, limit search to specific file types, e.g., ".py", ".txt"
         """
-        logger.debug(f"(search_in_files keyword='{keyword}', ext={file_extension})")
         results = []
         try:
             for file_path in self._base_dir.rglob("*"):
@@ -426,7 +461,6 @@ class BasicToolkit:
             query: Search keywords
             max_results: Maximum number of results to return, defaults to 5
         """
-        logger.debug(f"(search_web query='{query}', max_results={max_results})")
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results, region='cn-zh'))
@@ -455,7 +489,6 @@ class BasicToolkit:
             name: File name/path to execute
             args: Optional, command-line arguments to pass to the script
         """
-        logger.debug(f"(execute_file {name} {args})")
         try:
             file_path = self._safe_path(name)
             if not file_path.exists():
@@ -502,48 +535,33 @@ class BasicToolkit:
             command: Command to execute
             timeout: Timeout in seconds, defaults to 60
         """
-        logger.debug(f"(run_command: {command})")
         is_safe, reason = self._is_command_safe(command)
         if not is_safe:
             return f"Security error: {reason}"
 
         try:
             use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
+            cwd = str(self._base_dir.resolve())
+            sub_kw: dict = {}
+            if re.search(r"\bclawhub\b", command, re.I):
+                cwd = str(_REPO_ROOT)
+                if "--workdir" not in command:
+                    sub_kw["env"] = os.environ | {"CLAWHUB_WORKDIR": cwd}
+            sub_kw.update(
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                cwd=cwd,
+            )
 
             if use_shell:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    cwd=str(self._base_dir)
-                )
+                result = subprocess.run(command, shell=True, **sub_kw)
+            elif _platform.system() == "Windows":
+                result = subprocess.run(command, shell=True, **sub_kw)
             else:
-                if _platform.system() == "Windows":
-                    result = subprocess.run(
-                        command,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                        cwd=str(self._base_dir)
-                    )
-                else:
-                    cmd_parts = shlex.split(command)
-                    result = subprocess.run(
-                        cmd_parts,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                        cwd=str(self._base_dir)
-                    )
+                result = subprocess.run(shlex.split(command), **sub_kw)
 
             output = result.stdout + result.stderr
             return_code = result.returncode
@@ -573,8 +591,6 @@ class BasicToolkit:
                 - Local: absolute (C:\\Users\\PC\\Desktop\\photo.jpg) or relative path within WorkDatabase.
                 - URL: http/https link to an image (e.g., https://example.com/photo.jpg).
         """
-        logger.debug(f"(read_image {image_path})")
-
         is_url = image_path.startswith(('http://', 'https://'))
 
         try:
@@ -586,7 +602,7 @@ class BasicToolkit:
             return f"Error reading image: {type(e).__name__} - {e}"
 
     def _read_image_from_file(self, image_path: str) -> ToolReturn | str:
-        """从本地文件路径读取图片"""
+        """Load an image from a local file path."""
         path = Path(image_path)
         if not path.is_absolute():
             path = (self._base_dir / image_path).resolve()
@@ -615,7 +631,7 @@ class BasicToolkit:
 
     @staticmethod
     def _read_image_from_url(url: str) -> ToolReturn:
-        """直接将图片 URL 传递给模型进行分析，无需下载"""
+        """Pass the image URL to the model for analysis without downloading the file."""
         return ToolReturn(
             return_value=f"Image URL passed to model: {url}",
             content=[
@@ -629,11 +645,9 @@ class BasicToolkit:
         Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
 
         This is the PRIMARY tool for ALL image generation requests. Keywords that should trigger this tool:
-        - "生成图片" / "生成图像" / "create image" / "generate image" / "make a picture"
-        - "画一张" / "draw" / "paint" / "illustrate"
-        - "给我一张" / "给我一个图片" / "give me an image"
-        - "创建图片" / "制作图片" / "produce image"
-        - Any request involving creating visual content, artwork, diagrams, or images
+        - "create image" / "generate image" / "make a picture" / "draw" / "paint" / "illustrate"
+        - "give me an image" / "produce image"
+        - Any request involving creating visual content, artwork, diagrams, or images (any language)
 
         Parameters:
             prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
@@ -645,8 +659,6 @@ class BasicToolkit:
             Success: Returns the image URL and generation details.
             Failure: Returns an error message.
         """
-        logger.debug(f"(generate_image prompt='{prompt}', width={width}, height={height})")
-
         bfl_base_url = os.environ.get('BFL_BASE_URL')
         bfl_api_key = os.environ.get("BFL_API_KEY")
         if not bfl_api_key:
@@ -731,21 +743,21 @@ class BasicToolkit:
 
     @property
     def workers_tools(self) -> list:
-        """返回所有可供 Worker Agent 使用的工具函数列表"""
+        """List of tool callables exposed to the Worker Agent."""
         return [
-            # 查
+            # Read / list
             self.list_files,
             self.read_file,
             self.read_image,
-            # 增
+            # Write
             self.write_file,
             self.append_to_file,
-            # 目录操作
+            # Directories
             self.create_directory,
-            # 搜索操作
+            # Search
             self.search_in_files,
             self.search_web,
-            # 浏览器自动化（Playwright / Chromium）
+            # Browser automation (Playwright / Chromium)
             self.browser_navigate,
             self.browser_get_content,
             self.browser_screenshot,
@@ -755,13 +767,13 @@ class BasicToolkit:
             self.browser_wait_for_selector,
             self.browser_evaluate,
             self.browser_close,
-            # 执行操作
+            # Execute
             self.run_command,
             self.execute_file,
-            # 图像生成与识别
+            # Images and user input
             self.generate_image,
             self.ask_user,
             extract_text,
-            # Agent Skills 工具
+            # Agent Skills tools
             *self._skills_toolkit.tools,
         ]

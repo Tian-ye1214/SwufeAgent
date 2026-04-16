@@ -1,6 +1,7 @@
 pydantic-ai==1.80.0
 pydantic-ai-slim[anthropic]==1.80.0
 python-dotenv
+httpx
 json-repair
 ddgs
 
@@ -11,6 +12,8 @@ PyMuPDF
 python-docx
 pandas
 openpyxl
+
+lancedb
 
 PyYAML
 

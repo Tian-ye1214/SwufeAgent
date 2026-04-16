@@ -113,7 +113,6 @@ class QQBot(BotBase):
     def run(self, *, debug: bool = True, remote_mode: bool = True,
             enable_webui_interaction: bool = False, **kwargs):
         self._released = False
-        self._init_executor("QQ_AGENT_THREAD_WORKERS")
         self._register_handlers()
         try:
             self._bot_client.run_frontend(

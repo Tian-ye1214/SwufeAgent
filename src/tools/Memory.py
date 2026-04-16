@@ -1,8 +1,16 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import os
 import re
 import mimetypes
+from typing import TYPE_CHECKING, Any
+
 from pydantic_ai import BinaryContent
+from pydantic_ai.messages import ModelMessagesTypeAdapter
+
+if TYPE_CHECKING:
+    from RAG.RAG import RAG as RAGEngine
 
 @dataclass
 class UserMessage:
@@ -83,6 +91,13 @@ class ChatHistory:
     def reset(self) -> None:
         self._messages = []
 
+    @classmethod
+    def from_model_messages_json(cls, data: list[Any]) -> ChatHistory:
+        """由 conversation_log 保存的 model_messages 字段恢复可继续对话的历史。"""
+        h = cls()
+        h._messages = list(ModelMessagesTypeAdapter.validate_python(data))
+        return h
+
     @property
     def messages(self) -> list:
         """传入 agent.run(message_history=...) 的只读引用。"""
@@ -93,3 +108,36 @@ class ChatHistory:
 
     def __bool__(self) -> bool:
         return bool(self._messages)
+
+
+class Retriever:
+    """RAG 入口：在送入 Agent 前对用户文本做向量检索与上下文拼接。"""
+
+    def __init__(self, history: ChatHistory, rag: RAGEngine | None = None):
+        self._history = history
+        self._rag = rag
+
+    def _get_rag(self) -> RAGEngine:
+        if self._rag is None:
+            from RAG.RAG import RAG as RAGEngineCls
+
+            self._rag = RAGEngineCls()
+        return self._rag
+
+    async def run(self, prompt: UserMessage) -> UserMessage:
+        query = (prompt.text or "").strip()
+        if not query:
+            return prompt
+
+        rag = self._get_rag()
+        await rag.connect()
+        hits = await rag.retrieve(query)
+        if not hits:
+            return prompt
+
+        ctx = "\n\n".join(f"[{i + 1}] {h.get('text', '')}" for i, h in enumerate(hits))
+        augmented = (
+            "以下为检索到的参考资料（按相关性排序），请结合其作答；若无相关可忽略。\n\n"
+            f"{ctx}\n\n---\n用户问题：\n{query}"
+        )
+        return UserMessage(text=augmented, attachments=list(prompt.attachments))

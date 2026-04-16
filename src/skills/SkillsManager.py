@@ -94,10 +94,9 @@ class SkillsManager:
         )
         return metadata, instructions
 
-    def _discover_skills(self, *, quiet: bool = False) -> None:
+    def _discover_skills(self) -> None:
         if not self.skills_dir.exists():
-            if not quiet:
-                logger.info(f"Skills 目录不存在: {self.skills_dir}")
+            logger.info(f"Skills 目录不存在: {self.skills_dir}")
             self.skills_dir.mkdir(parents=True, exist_ok=True)
             return
 
@@ -118,16 +117,11 @@ class SkillsManager:
                     loaded=False,
                 )
                 discovered += 1
-                if not quiet:
-                    logger.debug(f"发现 Skill: {metadata.name}")
 
-        if not quiet:
-            logger.info(f"共发现 {discovered} 个 Skills")
-
-    def refresh(self, *, quiet: bool = False) -> None:
+    def refresh(self) -> None:
         with self._refresh_lock:
             self.skills.clear()
-            self._discover_skills(quiet=quiet)
+            self._discover_skills()
 
     def _skill_markdown_path(self, name: str) -> Optional[Path]:
         skill = self.skills.get(name)
@@ -157,7 +151,7 @@ class SkillsManager:
                 skill_file.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
             except OSError as e:
                 return False, str(e)
-            self.refresh(quiet=True)
+            self.refresh()
         return True, ""
 
     def update_skill(
@@ -194,7 +188,7 @@ class SkillsManager:
                 path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
             except OSError as e:
                 return False, str(e)
-            self.refresh(quiet=True)
+            self.refresh()
         return True, ""
 
     def delete_skill(self, name: str) -> Tuple[bool, str]:
@@ -207,7 +201,7 @@ class SkillsManager:
                 shutil.rmtree(skill.path)
             except OSError as e:
                 return False, str(e)
-            self.refresh(quiet=True)
+            self.refresh()
         return True, ""
 
     def get_skill(self, name: str) -> Optional[Skill]:

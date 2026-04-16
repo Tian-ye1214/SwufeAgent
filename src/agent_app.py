@@ -7,13 +7,15 @@ from prompt import get_manager_system_prompt, get_coordinator_system_prompt, loa
 from tools.BasicTools import BasicToolkit
 from tools.ManagementTools import TaskManager
 from tools.WorkerOrchestrator import WorkerOrchestrator
-from tools.memory import ChatHistory, UserMessage
+from tools.Memory import ChatHistory, UserMessage
+from tools.conversation_log import ConversationLogFactory
 from BasicFunction import create_agent
 from app_config import get_model_and_params
 from cli_commands import handle_slash_command
 import logger
 import traceback
 import time
+import asyncio
 from typing import Tuple
 
 from skills.SkillsManager import SkillsManager
@@ -23,18 +25,18 @@ class AgentSystem:
     """Agent 任务协调系统，管理 Manager/Coordinator 的对话历史与执行流程。"""
 
     def __init__(self):
-        # 会话开始：初始化 SkillsManager 并完成首次加载
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
+        self._conversation_log = ConversationLogFactory().default()
 
         self._toolkit = BasicToolkit(self._skills_manager)
         self._task_manager = TaskManager()
         self._orchestrator = WorkerOrchestrator(self._toolkit, self._task_manager)
 
-    def _sync_skills_for_user_turn(self) -> None:
-        """每次用户输入：在同一实例上重新扫描 skills（静默），避免重复构造与刷屏。"""
-        self._skills_manager.refresh(quiet=True)
+    async def _sync_skills_for_user_turn(self) -> None:
+        """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
+        await asyncio.to_thread(self._skills_manager.refresh)
 
     def set_ask_user_handler(self, handler):
         self._toolkit.set_ask_user_handler(handler)
@@ -95,20 +97,19 @@ class AgentSystem:
             self._toolkit.ask_user,
         ]
         m_name, m_params = get_model_and_params("manager")
-        manager_agent = create_agent(
-            m_name, m_params, manager_tools, get_manager_system_prompt(self._skills_manager)
-        )
+        mgr_prompt = await asyncio.to_thread(get_manager_system_prompt, self._skills_manager)
+        manager_agent = create_agent(m_name, m_params, manager_tools, mgr_prompt)
         attachments = self._current_attachments
 
         if not continue_from_previous:
             logger.info("第一阶段: Manager 规划任务列表")
-            planning_text = load_prompt("manager_planning_new.md").format(
-                user_input=user_input
-            )
+            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
+            planning_text = tmpl.format(user_input=user_input)
         else:
             logger.info("第一阶段: 基于用户反馈调整任务")
             current_todo = self._task_manager.get_todo_list()
-            planning_text = load_prompt("manager_planning_continue.md").format(
+            tmpl = await asyncio.to_thread(load_prompt, "manager_planning_continue.md")
+            planning_text = tmpl.format(
                 user_input=user_input,
                 current_todo=current_todo
             )
@@ -133,7 +134,8 @@ class AgentSystem:
         logger.info("第三阶段: 生成最终报告")
         logger.info("=" * 60)
 
-        summary_text = load_prompt("manager_summary.md").format(
+        summary_tmpl = await asyncio.to_thread(load_prompt, "manager_summary.md")
+        summary_text = summary_tmpl.format(
             user_input=user_input,
             final_summary=final_summary
         )
@@ -204,8 +206,13 @@ class AgentSystem:
             task_description, user_goal, retry_info, attachments=self._current_attachments
         )
 
-    def run_agent_system(
-        self, message: "str | UserMessage", history: "ChatHistory | None" = None
+    async def run_agent_system(
+        self,
+        message: "str | UserMessage",
+        history: "ChatHistory | None" = None,
+        *,
+        conversation_log_hint: str = "",
+        conversation_log_extra: dict | None = None,
     ) -> tuple["ChatHistory", str]:
         """
         任务协调系统入口，负责判断任务复杂度并调用相应的执行器。
@@ -221,7 +228,7 @@ class AgentSystem:
             message = UserMessage.from_text(message)
         self._current_attachments = message.attachments
 
-        self._sync_skills_for_user_turn()
+        await self._sync_skills_for_user_turn()
 
         if history is None:
             history = ChatHistory()
@@ -232,23 +239,31 @@ class AgentSystem:
             self._execute_task_with_worker,
             *self._toolkit.workers_tools,
         ]
+        coord_prompt = await asyncio.to_thread(get_coordinator_system_prompt, self._skills_manager)
         agent = create_agent(
             c_name,
             c_params,
             coordinator_tools,
-            get_coordinator_system_prompt(self._skills_manager),
+            coord_prompt,
         )
 
         start_time = time.time()
-        result = agent.run_sync(message.to_prompt(), message_history=history.messages)
+        result = await agent.run(message.to_prompt(), message_history=history.messages)
         elapsed = time.time() - start_time
 
-        logger.info(f"[DEBUG] run_agent_system agent.run_sync() 完成，耗时 {elapsed:.2f} 秒")
+        logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
         logger.info(result.output)
         history.update(result)
+        hint = conversation_log_hint or (message.text or "")
+        extra = {"kind": "coordinator", "hint": hint}
+        if conversation_log_extra:
+            extra.update(conversation_log_extra)
+        self._conversation_log.schedule_save_conversation_turn(
+            history.messages, name_hint=hint, extra=extra
+        )
         return history, result.output
 
-    def run_interactive(self):
+    async def run_interactive(self):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
         log = logger.get_logger()
         log.info("=" * 60)
@@ -261,14 +276,13 @@ class AgentSystem:
 
         while True:
             try:
-                raw_input = input("\n📝 请输入您的任务: ").strip()
-
+                raw_input = (await asyncio.to_thread(input, "\n\U0001f4dd 请输入您的任务: ")).strip()
                 if not raw_input:
                     continue
 
                 if raw_input.startswith("/"):
-                    self._sync_skills_for_user_turn()
-                    handle_slash_command(raw_input, self._skills_manager)
+                    await self._sync_skills_for_user_turn()
+                    await asyncio.to_thread(handle_slash_command, raw_input, self._skills_manager)
                     continue
 
                 if raw_input.lower() in ["quit", "exit", "退出"]:
@@ -279,11 +293,12 @@ class AgentSystem:
                     self._task_manager.reset()
                     self._toolkit.reset_task_directory()
                     self.reset_manager_history()
+                    self._conversation_log.reset_session()
                     history.reset()
                     is_first_input = True
                     continue
 
-                message = UserMessage.from_cli_input(raw_input)
+                message = await asyncio.to_thread(UserMessage.from_cli_input, raw_input)
                 if message.attachments:
                     log.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
 
@@ -293,7 +308,9 @@ class AgentSystem:
                     self._toolkit.set_task_directory(task_name)
                     is_first_input = False
 
-                history, _ = self.run_agent_system(message, history)
+                history, _ = await self.run_agent_system(
+                    message, history, conversation_log_hint=message.text[:40]
+                )
 
             except KeyboardInterrupt:
                 log.info("\n\n👋 程序已中断，再见！")
@@ -308,7 +325,7 @@ class AgentSystem:
 def main() -> None:
     """CLI 入口：实例化 Agent 并进入交互循环（供仓库根 `main.py` 或 `python -m agent_app` 调用）。"""
     system = AgentSystem()
-    system.run_interactive()
+    asyncio.run(system.run_interactive())
 
 
 if __name__ == "__main__":
