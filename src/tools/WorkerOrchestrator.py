@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, TYPE_CHECKING
+from typing import List, Dict, Tuple, TYPE_CHECKING, Any
 import asyncio
 import time
 import traceback
@@ -10,6 +10,7 @@ from prompt import get_worker_system_prompt, load_prompt
 from BasicFunction import create_agent
 from app_config import get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
+from tools.conversation_log import ConversationLog
 
 if TYPE_CHECKING:
     from tools.BasicTools import BasicToolkit
@@ -84,6 +85,29 @@ class WorkerOrchestrator:
     def __init__(self, toolkit: BasicToolkit, task_manager: TaskManager):
         self._toolkit = toolkit
         self._task_manager = task_manager
+        self._conversation_date: str | None = None
+        self._conversation_topic: str | None = None
+        self._worker_adhoc_seq = 0
+
+    def set_conversation_session(self, date: str, topic: str) -> None:
+        self._conversation_date = date
+        self._conversation_topic = topic
+
+    def clear_conversation_session(self) -> None:
+        self._conversation_date = None
+        self._conversation_topic = None
+        self._worker_adhoc_seq = 0
+
+    def _save_worker_messages(
+        self, messages: list[Any], sub_id: str, extra: dict[str, Any] | None = None
+    ) -> None:
+        if not self._conversation_date or not self._conversation_topic:
+            return
+        wl = ConversationLog("worker", self._conversation_date, self._conversation_topic, sub_id=sub_id)
+        merged: dict[str, Any] = {"kind": "worker"}
+        if extra:
+            merged.update(extra)
+        wl.save(messages, extra=merged)
 
     async def execute_task_with_worker(
         self,
@@ -136,6 +160,13 @@ class WorkerOrchestrator:
             result = await worker_agent.run(prompt)
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
+
+            self._worker_adhoc_seq += 1
+            self._save_worker_messages(
+                list(result.all_messages()),
+                sub_id=f"adhoc-{self._worker_adhoc_seq}",
+                extra={"mode": "simple"},
+            )
 
             output = result.output
             output_upper = output.upper().strip()
@@ -295,6 +326,12 @@ class WorkerOrchestrator:
             elapsed = time.time() - start_time
 
             logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
+
+            self._save_worker_messages(
+                list(result.all_messages()),
+                sub_id=f"task-{task.id}",
+                extra={"mode": "parallel", "task_id": task.id},
+            )
 
             output = result.output
 

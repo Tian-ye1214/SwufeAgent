@@ -8,7 +8,8 @@ from tools.BasicTools import BasicToolkit
 from tools.ManagementTools import TaskManager
 from tools.WorkerOrchestrator import WorkerOrchestrator
 from tools.Memory import ChatHistory, UserMessage
-from tools.conversation_log import ConversationLogFactory
+
+from tools.conversation_log import SessionConversationLogs
 from BasicFunction import create_agent
 from app_config import get_model_and_params
 from cli_commands import handle_slash_command
@@ -17,6 +18,8 @@ import traceback
 import time
 import asyncio
 from typing import Tuple
+
+from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
 
@@ -28,11 +31,13 @@ class AgentSystem:
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
-        self._conversation_log = ConversationLogFactory().default()
-
         self._toolkit = BasicToolkit(self._skills_manager)
         self._task_manager = TaskManager()
         self._orchestrator = WorkerOrchestrator(self._toolkit, self._task_manager)
+        self._session_logs = SessionConversationLogs(
+            on_activate=self._orchestrator.set_conversation_session,
+            on_reset=self._orchestrator.clear_conversation_session,
+        )
 
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
@@ -91,6 +96,8 @@ class AgentSystem:
                 implementation details like "task completed" or "file created" unless
                 directly relevant to the user's question.
         """
+        self._session_logs.ensure(user_input or "task")
+
         manager_tools = [
             self._task_manager.create_todo_list,
             self._task_manager.get_todo_list,
@@ -119,6 +126,9 @@ class AgentSystem:
             planning_prompt, message_history=self._manager_history.messages
         )
         self._manager_history.update(result)
+        self._session_logs.for_agent("manager").save(
+            self._manager_history.messages, extra={"kind": "manager", "phase": "planning"}
+        )
         logger.info(result.output)
 
         logger.info("=" * 60)
@@ -151,6 +161,9 @@ class AgentSystem:
                 print(flush=True)
                 final_text = "".join(collected)
                 self._manager_history.update(stream)
+            self._session_logs.for_agent("manager").save(
+                self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
+            )
             logger.info("")
             logger.info("=" * 60)
             logger.info("🎯 最终回复")
@@ -164,6 +177,9 @@ class AgentSystem:
                     summary_prompt, message_history=self._manager_history.messages
                 )
                 self._manager_history.update(final_result)
+                self._session_logs.for_agent("manager").save(
+                    self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
+                )
                 return final_result.output
             except Exception:
                 return final_summary
@@ -233,6 +249,8 @@ class AgentSystem:
         if history is None:
             history = ChatHistory()
 
+        self._session_logs.ensure(conversation_log_hint or message.text or "")
+
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
             self.execute_task_with_manager,
@@ -254,13 +272,10 @@ class AgentSystem:
         logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
         logger.info(result.output)
         history.update(result)
-        hint = conversation_log_hint or (message.text or "")
-        extra = {"kind": "coordinator", "hint": hint}
+        extra: dict = {"kind": "coordinator"}
         if conversation_log_extra:
             extra.update(conversation_log_extra)
-        self._conversation_log.schedule_save_conversation_turn(
-            history.messages, name_hint=hint, extra=extra
-        )
+        self._session_logs.for_agent("coordinator").save(history.messages, extra=extra)
         return history, result.output
 
     async def run_interactive(self):
@@ -293,7 +308,7 @@ class AgentSystem:
                     self._task_manager.reset()
                     self._toolkit.reset_task_directory()
                     self.reset_manager_history()
-                    self._conversation_log.reset_session()
+                    self._session_logs.reset()
                     history.reset()
                     is_first_input = True
                     continue
@@ -315,6 +330,19 @@ class AgentSystem:
             except KeyboardInterrupt:
                 log.info("\n\n👋 程序已中断，再见！")
                 break
+
+            except ModelHTTPError as e:
+                body = e.body or {}
+                code = body.get("code", "") if isinstance(body, dict) else ""
+                if code == "data_inspection_failed":
+                    log.warning(
+                        "\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n"
+                        '   请尝试换一种表达方式重新输入，或输入"新任务"清空上下文后重试。'
+                    )
+                else:
+                    log.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
+                    log.error(f"详细信息:\n{traceback.format_exc()}")
+                    self._task_manager.reset()
 
             except Exception as e:
                 log.error(f"\n❌ 未预期的系统错误: {e}")
