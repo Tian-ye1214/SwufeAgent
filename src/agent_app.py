@@ -7,13 +7,21 @@ from prompt import get_manager_system_prompt, get_coordinator_system_prompt, loa
 from tools.BasicTools import BasicToolkit
 from tools.ManagementTools import TaskManager
 from tools.WorkerOrchestrator import WorkerOrchestrator
-from tools.Memory import ChatHistory, UserMessage
+from tools.Memory import (
+    ChatHistory,
+    LongTermMemory,
+    ShortTermMemory,
+    UserMessage,
+    user_message_from_cli_input,
+    user_message_from_text,
+)
 
 from tools.conversation_log import SessionConversationLogs
 from BasicFunction import create_agent
 from app_config import get_model_and_params
 from cli_commands import handle_slash_command
 import logger
+from logger import LOG_DIR
 import traceback
 import time
 import asyncio
@@ -31,9 +39,24 @@ class AgentSystem:
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
-        self._toolkit = BasicToolkit(self._skills_manager)
+        self._long_term_memory = LongTermMemory()
+        self._long_term_memory.refresh_from_disk_sync()
+        self._short_term_memory = ShortTermMemory(log_root=LOG_DIR)
+        self._toolkit = BasicToolkit(
+            self._skills_manager,
+            extra_worker_tools=[
+                self._short_term_memory.recall,
+                self._long_term_memory.add,
+                self._long_term_memory.remove,
+                self._long_term_memory.list_memory,
+            ],
+        )
         self._task_manager = TaskManager()
-        self._orchestrator = WorkerOrchestrator(self._toolkit, self._task_manager)
+        self._orchestrator = WorkerOrchestrator(
+            self._toolkit,
+            self._task_manager,
+            memory_injection_getter=lambda: self._long_term_memory.get_injection(),
+        )
         self._session_logs = SessionConversationLogs(
             on_activate=self._orchestrator.set_conversation_session,
             on_reset=self._orchestrator.clear_conversation_session,
@@ -52,11 +75,14 @@ class AgentSystem:
     def reset_task_directory(self):
         self._toolkit.reset_task_directory()
 
-    def reset_tasks(self):
-        self._task_manager.reset()
-
     def reset_manager_history(self):
         self._manager_history.reset()
+
+    async def _after_coordinator_turn(self, history: ChatHistory) -> None:
+        """每轮 Coordinator 结束后：后台静默合并长期记忆（不阻塞当前回复）。"""
+        msgs = list(history.messages)
+        asyncio.create_task(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
+        asyncio.create_task(self._long_term_memory.consolidate_from_logs(LOG_DIR, silent=True))
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -104,7 +130,10 @@ class AgentSystem:
             self._toolkit.ask_user,
         ]
         m_name, m_params = get_model_and_params("manager")
-        mgr_prompt = await asyncio.to_thread(get_manager_system_prompt, self._skills_manager)
+        mem_inj = self._long_term_memory.get_injection()
+        mgr_prompt = await asyncio.to_thread(
+            get_manager_system_prompt, self._skills_manager, mem_inj
+        )
         manager_agent = create_agent(m_name, m_params, manager_tools, mgr_prompt)
         attachments = self._current_attachments
 
@@ -241,7 +270,7 @@ class AgentSystem:
             tuple[ChatHistory, str]: (更新后的对话历史, Agent 输出)
         """
         if isinstance(message, str):
-            message = UserMessage.from_text(message)
+            message = user_message_from_text(message)
         self._current_attachments = message.attachments
 
         await self._sync_skills_for_user_turn()
@@ -257,7 +286,10 @@ class AgentSystem:
             self._execute_task_with_worker,
             *self._toolkit.workers_tools,
         ]
-        coord_prompt = await asyncio.to_thread(get_coordinator_system_prompt, self._skills_manager)
+        mem_inj = self._long_term_memory.get_injection()
+        coord_prompt = await asyncio.to_thread(
+            get_coordinator_system_prompt, self._skills_manager, mem_inj
+        )
         agent = create_agent(
             c_name,
             c_params,
@@ -276,6 +308,7 @@ class AgentSystem:
         if conversation_log_extra:
             extra.update(conversation_log_extra)
         self._session_logs.for_agent("coordinator").save(history.messages, extra=extra)
+        await self._after_coordinator_turn(history)
         return history, result.output
 
     async def run_interactive(self):
@@ -313,7 +346,7 @@ class AgentSystem:
                     is_first_input = True
                     continue
 
-                message = await asyncio.to_thread(UserMessage.from_cli_input, raw_input)
+                message = await asyncio.to_thread(user_message_from_cli_input, raw_input)
                 if message.attachments:
                     log.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
 

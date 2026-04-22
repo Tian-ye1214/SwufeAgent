@@ -56,12 +56,6 @@ async def embed_texts(
     return [row["embedding"] for row in items]
 
 
-async def embedding(query: str, **kwargs: Any) -> list[float]:
-    """兼容旧接口名：单查询 -> 单向量。"""
-    vecs = await embed_texts(query, **kwargs)
-    return vecs[0]
-
-
 async def rerank_documents(
     query: str,
     documents: list[str],
@@ -116,11 +110,3 @@ async def rerank_documents(
             }
         )
     return out
-
-
-async def reranker(query: str, document: list[str], **kwargs: Any) -> str:
-    """兼容旧接口：返回相关性最高的单段文本。"""
-    ranked = await rerank_documents(query, document, **kwargs)
-    if not ranked:
-        return document[0] if document else ""
-    return ranked[0]["text"]

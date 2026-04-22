@@ -23,8 +23,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 class BasicToolkit:
     _WORK_DATABASE_ROOT = _REPO_ROOT / "WorkDatabase"
 
-    def __init__(self, skills_manager: SkillsManager):
+    def __init__(
+        self,
+        skills_manager: SkillsManager,
+        *,
+        extra_worker_tools: list | None = None,
+    ):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
+        self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
         self._skills_manager = skills_manager
         self._skills_toolkit = SkillsToolkit(skills_manager)
@@ -44,10 +50,6 @@ class BasicToolkit:
             'eval ',
             'exec ',
         ]
-
-    def set_skills_manager(self, skills_manager: SkillsManager) -> None:
-        self._skills_manager = skills_manager
-        self._skills_toolkit = SkillsToolkit(skills_manager)
 
     @property
     def skills_manager(self) -> SkillsManager:
@@ -89,8 +91,7 @@ class BasicToolkit:
         self._base_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
 
-    @staticmethod
-    def _browser_headless_from_env() -> bool:
+    def _browser_headless_from_env(self) -> bool:
         v = (os.environ.get("BROWSER_HEADLESS") or "").strip().lower()
         if v in ("0", "false", "no"):
             return False
@@ -629,8 +630,7 @@ class BasicToolkit:
             ]
         )
 
-    @staticmethod
-    def _read_image_from_url(url: str) -> ToolReturn:
+    def _read_image_from_url(self, url: str) -> ToolReturn:
         """Pass the image URL to the model for analysis without downloading the file."""
         return ToolReturn(
             return_value=f"Image URL passed to model: {url}",
@@ -774,6 +774,7 @@ class BasicToolkit:
             self.generate_image,
             self.ask_user,
             extract_text,
+            *self._extra_worker_tools,
             # Agent Skills tools
             *self._skills_toolkit.tools,
         ]

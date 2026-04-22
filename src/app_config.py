@@ -27,12 +27,6 @@ def get_config() -> dict[str, Any]:
     return _CONFIG
 
 
-def reload_config() -> dict[str, Any]:
-    global _CONFIG
-    _CONFIG = None
-    return load_config()
-
-
 def save_config(cfg: dict[str, Any] | None = None) -> None:
     global _CONFIG
     cfg = cfg if cfg is not None else get_config()

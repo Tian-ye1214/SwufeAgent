@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, TYPE_CHECKING, Any
+from typing import List, Dict, Tuple, TYPE_CHECKING, Any, Callable
 import asyncio
 import time
 import traceback
@@ -82,9 +82,16 @@ class _BoardWorkerTools:
 class WorkerOrchestrator:
     """Worker 执行编排器，负责单任务执行与多任务并行调度。"""
 
-    def __init__(self, toolkit: BasicToolkit, task_manager: TaskManager):
+    def __init__(
+        self,
+        toolkit: BasicToolkit,
+        task_manager: TaskManager,
+        *,
+        memory_injection_getter: Callable[[], str] | None = None,
+    ):
         self._toolkit = toolkit
         self._task_manager = task_manager
+        self._memory_injection_getter = memory_injection_getter or (lambda: "")
         self._conversation_date: str | None = None
         self._conversation_topic: str | None = None
         self._worker_adhoc_seq = 0
@@ -129,7 +136,10 @@ class WorkerOrchestrator:
             Tuple[bool, str]: (success, result_message)
         """
         w_name, w_params = get_model_and_params("worker")
-        worker_sysprompt = await asyncio.to_thread(get_worker_system_prompt, self._toolkit.skills_manager)
+        mem = self._memory_injection_getter()
+        worker_sysprompt = await asyncio.to_thread(
+            get_worker_system_prompt, self._toolkit.skills_manager, mem
+        )
         worker_agent = create_agent(
             w_name,
             w_params,
@@ -284,7 +294,10 @@ class WorkerOrchestrator:
         all_tools = self._toolkit.workers_tools + board_tools
 
         def _parallel_worker_prompt():
-            return get_worker_system_prompt(self._toolkit.skills_manager) + load_prompt("worker_parallel_addon.md")
+            mem = self._memory_injection_getter()
+            return get_worker_system_prompt(self._toolkit.skills_manager, mem) + load_prompt(
+                "worker_parallel_addon.md"
+            )
 
         full_system_prompt = await asyncio.to_thread(_parallel_worker_prompt)
         w_name, w_params = get_model_and_params("worker")

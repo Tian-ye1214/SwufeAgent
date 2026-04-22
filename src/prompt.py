@@ -188,6 +188,14 @@ def get_skills_layout_text(skills_manager: SkillsManager) -> str:
     return load_prompt("skills_layout.md").format(skills_root_path=skills_root_path)
 
 
+def format_long_term_memory_for_prompt(memory_injection: str) -> str:
+    """将 LongTermMemory.get_injection() 的文本格式化为可嵌入各 Agent system prompt 的区块。"""
+    t = (memory_injection or "").strip()
+    if not t:
+        return ""
+    return f"## Persistent memory (SOUL & USER)\n\n{t}\n"
+
+
 def get_skills_as_in_system_prompt(skills_manager: SkillsManager) -> str:
     layout = get_skills_layout_text(skills_manager).rstrip()
     summary = get_skills_summary(skills_manager).rstrip()
@@ -200,7 +208,10 @@ def get_skills_as_in_system_prompt(skills_manager: SkillsManager) -> str:
     return f"{layout}\n\n{summary}"
 
 
-def get_manager_system_prompt(skills_manager: SkillsManager) -> str:
+def get_manager_system_prompt(
+    skills_manager: SkillsManager,
+    memory_injection: str = "",
+) -> str:
     """构建 Manager Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("manager_system.md")
     return template.format(
@@ -208,22 +219,31 @@ def get_manager_system_prompt(skills_manager: SkillsManager) -> str:
         system_info=system_info,
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
+        long_term_memory=format_long_term_memory_for_prompt(memory_injection),
     )
 
 
-def get_worker_system_prompt(skills_manager: SkillsManager) -> str:
+def get_worker_system_prompt(
+    skills_manager: SkillsManager,
+    memory_injection: str = "",
+) -> str:
     """构建 Worker Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("worker_system.md")
     return template.format(
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
+        long_term_memory=format_long_term_memory_for_prompt(memory_injection),
     )
 
 
-def get_coordinator_system_prompt(skills_manager: SkillsManager) -> str:
+def get_coordinator_system_prompt(
+    skills_manager: SkillsManager,
+    memory_injection: str = "",
+) -> str:
     """构建 Coordinator 的系统提示（含 Skills 目录说明与当前摘要）。"""
     template = load_prompt("coordinator_system.md")
     return template.format(
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
+        long_term_memory=format_long_term_memory_for_prompt(memory_injection),
     )

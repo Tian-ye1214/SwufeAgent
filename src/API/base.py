@@ -36,7 +36,6 @@ class BotBase:
     """
     AGENT_RUN_TIMEOUT_S = 900.0
     SEND_REPLY_TIMEOUT_S = 120.0
-    DEFAULT_MEDIA_PROMPT = "请分析这些内容。"
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
     END_TASK_COMMANDS = frozenset({"结束任务", "/结束任务", "结束当前任务", "/结束当前任务"})
 

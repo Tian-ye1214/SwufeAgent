@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 from typing import Any
 
@@ -109,22 +108,20 @@ class RAG:
             self.split_text, text, chunk_size, special_chars, overlap
         )
 
-    @staticmethod
-    def file_hash(file_bytes: bytes) -> str:
-        return hashlib.md5(file_bytes).hexdigest()
-
-    async def file_hash_async(self, file_bytes: bytes) -> str:
-        h = await asyncio.to_thread(hashlib.md5, file_bytes)
-        return h.hexdigest()
-
     async def _embed_query(self, query: str) -> list[float]:
         instruct_text = self.format_instruction(None, query, None, type="embedding")
         vectors = await embed_texts(instruct_text)
         return vectors[0]
 
-    async def ingest_text(self, text: str, source: str = "inline") -> int:
+    async def ingest_text(
+        self,
+        text: str,
+        source: str = "inline",
+        *,
+        special_chars: list[str] | None = None,
+    ) -> int:
         """将长文本分块、取向量并写入库；返回写入块数。"""
-        chunks = await self.split_text_async(text)
+        chunks = await self.split_text_async(text, special_chars=special_chars)
         if not chunks:
             return 0
         await self._db.ensure_connected()
@@ -135,25 +132,6 @@ class RAG:
         ]
         await self._db.add_vectors(rows)
         return len(chunks)
-
-    async def ingest_path(self, path: str, *, encoding: str = "utf-8") -> int:
-        """异步读文件并入库（磁盘 IO 在 worker 线程）。"""
-
-        def _read() -> str:
-            with open(path, encoding=encoding, errors="replace") as f:
-                return f.read()
-
-        text = await asyncio.to_thread(_read)
-        return await self.ingest_text(text, source=path)
-
-    async def ingest_bytes(self, data: bytes, source: str, *, encoding: str = "utf-8") -> int:
-        """字节解码后入库（解码在 worker 线程）。"""
-
-        def _decode() -> str:
-            return data.decode(encoding, errors="replace")
-
-        text = await asyncio.to_thread(_decode)
-        return await self.ingest_text(text, source=source)
 
     async def retrieve(
         self,

@@ -160,8 +160,7 @@ class AppLogger:
         self._py_logger = lg
         self._current_log_file = log_filepath
 
-    @staticmethod
-    def _run_notify(fn: Optional[Callable[[str], None]], text: str) -> None:
+    def _run_notify(self, fn: Optional[Callable[[str], None]], text: str) -> None:
         if not fn:
             return
         try:
@@ -169,8 +168,7 @@ class AppLogger:
         except Exception:
             pass
 
-    @staticmethod
-    def _truncate_repr(v: Any, max_len: int = 96) -> str:
+    def _truncate_repr(self, v: Any, max_len: int = 96) -> str:
         s = repr(v)
         if len(s) > max_len:
             return s[: max_len - 1] + "…"
@@ -186,8 +184,7 @@ class AppLogger:
             parts.append(f"{k}={sv}")
         return ", ".join(parts)
 
-    @staticmethod
-    def _is_likely_bound_self(x: Any) -> bool:
+    def _is_likely_bound_self(self, x: Any) -> bool:
         n = getattr(x.__class__, "__name__", "")
         return n in ("BasicToolkit", "TaskManager", "SkillsToolkit", "AgentSystem")
 
