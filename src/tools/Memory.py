@@ -137,7 +137,7 @@ def _pydantic_messages_to_text(messages: list) -> str:
 class ShortTermMemory:
     """短期记忆：以 RAG 索引 `logs` 下全部 `.log`，供 Worker 按查询检索。
 
-    流程：静默增量写入向量库 → 向量检索 → 返回后再增量扫尾（拾取检索期间新增的日志）。
+    流程：静默增量写入向量库 → 向量检索（检索前一次 ingest；省略检索后扫尾以降低延迟）。
     分块策略与 RAG 默认一致（chunk_size、overlap），日志按行优先切分再滑窗。
     """
 
@@ -253,7 +253,7 @@ class ShortTermMemory:
     async def recall(self, query: str) -> str:
         """
         在运行日志（logs 目录下 .log 文件）的向量索引中检索与查询相关的片段。
-        会先静默同步未索引的日志增量，检索结束后再同步一次以纳入新写入的日志。
+        会先静默同步未索引的日志增量，再检索。
 
         Parameters:
             query: 要检索的主题或问题（针对历史日志内容）
@@ -268,7 +268,6 @@ class ShortTermMemory:
                 rag = self._get_rag()
                 await rag.connect()
                 hits = await rag.retrieve(q)
-                await self._ingest_log_delta_unlocked()
             except Exception as e:
                 return f"短期记忆（日志 RAG）检索失败: {e}"
 

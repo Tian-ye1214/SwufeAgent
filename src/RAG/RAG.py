@@ -9,17 +9,17 @@ from RAG.embedding_function import embed_texts, rerank_documents
 
 
 class RAG:
-    """分块、写入 LanceDB、向量检索 + 异步重排序；对外均为 async，CPU/同步 IO 走 to_thread。"""
-
     def __init__(
         self,
         db_path: str | None = None,
         table_name: str = "knowledge_chunks",
         chunk_size: int = 1024,
         overlap: int = 128,
-        vector_search_limit: int = 20,
-        final_top_k: int = 5,
-        vector_dim: int | None = None,
+        vector_search_limit: int | None = 50,
+        final_top_k: int | None = 10,
+        vector_dim: int | None = 1024,
+        *,
+        use_rerank: bool | None = None,
     ):
         base = db_path or os.environ.get("RAG_DB_PATH") or os.path.join(
             os.getcwd(), "data", "rag_lancedb"
@@ -29,6 +29,7 @@ class RAG:
         self.overlap = overlap
         self.vector_search_limit = vector_search_limit
         self.final_top_k = final_top_k
+        self._use_rerank = use_rerank
 
     async def connect(self) -> None:
         await self._db.connect()
@@ -133,27 +134,26 @@ class RAG:
         await self._db.add_vectors(rows)
         return len(chunks)
 
-    async def retrieve(
-        self,
-        query: str,
-        *,
-        vector_top_k: int | None = None,
-        rerank_top_n: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """向量召回 + 异步 rerank，返回带分数的段落列表。"""
+    async def retrieve(self, query: str) -> list[dict[str, Any]]:
         if not query.strip():
             return []
 
-        top_vec = vector_top_k or self.vector_search_limit
-        top_final = rerank_top_n or self.final_top_k
-
         query_vector = await self._embed_query(query)
-        candidates = await self._db.vector_search(query_vector, top_k=top_vec)
+        candidates = await self._db.vector_search(query_vector, top_k=self.vector_search_limit)
         if not candidates:
             return []
 
+        if not self._use_rerank:
+            return [
+                {
+                    **candidates[i],
+                    "relevance_score": 1.0 - (i / max(self.vector_search_limit, 1)) * 0.01,
+                }
+                for i in range(self.vector_search_limit)
+            ]
+
         texts = [c["text"] for c in candidates]
-        ranked = await rerank_documents(query, texts, top_n=min(top_final, len(texts)))
+        ranked = await rerank_documents(query, texts, top_n=min(self.final_top_k, len(texts)))
 
         results: list[dict[str, Any]] = []
         for r in ranked:

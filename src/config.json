@@ -1,6 +1,12 @@
 {
   "api_base": "",
   "api_key": "",
+  "SILICONFLOW_base": "",
+  "SILICONFLOW_key": "",
+  "RAG_models": {
+    "embedding": "Qwen/Qwen3-Embedding-0.6B",
+    "reranker": "Qwen/Qwen3-Reranker-0.6B"
+  },
   "models": {
     "manager": {
       "name": "qwen3.5-397b-a17b",

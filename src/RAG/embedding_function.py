@@ -1,58 +1,78 @@
 from __future__ import annotations
 
-import os
+import asyncio
+import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from app_config import get_config
+except ModuleNotFoundError:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from app_config import get_config
 
-_SILICONFLOW_BASE = os.environ.get("SILICONFLOW_API_BASE", "https://api.siliconflow.cn/v1").rstrip(
-    "/"
-)
-_DEFAULT_EMBED_MODEL = os.environ.get("SILICONFLOW_EMBED_MODEL", "BAAI/bge-m3")
-_DEFAULT_RERANK_MODEL = os.environ.get("SILICONFLOW_RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B")
+_http_state: tuple[httpx.AsyncClient, str] | None = None
 
 
-def _api_key() -> str:
-    key = os.environ.get("API_KEY") or os.environ.get("SILICONFLOW_API_KEY")
-    if not key:
-        raise RuntimeError("未配置 API_KEY 或 SILICONFLOW_API_KEY，无法调用 SiliconFlow。")
-    return key
+def _require_rag_model(role: str) -> str:
+    m = get_config().get("RAG_models")
+    if not isinstance(m, dict):
+        raise RuntimeError("config.json 中须包含 RAG_models 对象。")
+    name = (m.get(role) or "").strip()
+    if not name:
+        raise RuntimeError(f"config.json 的 RAG_models 中须配置非空的 {role!r}。")
+    return name
+
+
+async def _get_http_client() -> httpx.AsyncClient:
+    global _http_state
+    base = get_config().get("SILICONFLOW_base").strip().rstrip("/")
+    if _http_state is not None and _http_state[1] == base:
+        return _http_state[0]
+    async with asyncio.Lock():
+        if _http_state is not None and _http_state[1] == base:
+            return _http_state[0]
+        if _http_state is not None:
+            await _http_state[0].aclose()
+        client = httpx.AsyncClient(
+            base_url=base,
+            http2=True,
+            timeout=httpx.Timeout(60.0),
+        )
+        _http_state = (client, base)
+    return _http_state[0]
 
 
 async def embed_texts(
     texts: str | list[str],
     *,
-    model: str | None = None,
     timeout: float = 60.0,
 ) -> list[list[float]]:
     """异步获取文本向量；支持单条字符串或多条批量。"""
     if isinstance(texts, str):
-        payload_input: str | list[str] = texts
-    else:
-        if not texts:
-            return []
-        payload_input = texts
+       texts = [texts]
 
-    url = f"{_SILICONFLOW_BASE}/embeddings"
-    body = {"model": model or _DEFAULT_EMBED_MODEL, "input": payload_input}
-
-    async with httpx.AsyncClient(http2=True, timeout=timeout) as client:
-        response = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {_api_key()}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-        )
-        response.raise_for_status()
-        data = response.json()
+    model = _require_rag_model("embedding")
+    body = {"model": model, "input": texts}
+    client = await _get_http_client()
+    response = await client.post(
+        "/embeddings",
+        headers={
+            "Authorization": f"Bearer {get_config().get('SILICONFLOW_key').strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
 
     items = data.get("data") or []
-    items = sorted(items, key=lambda x: x.get("index", 0))
+    n = len(items)
+    if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
+        items = sorted(items, key=lambda x: x.get("index", 0))
     return [row["embedding"] for row in items]
 
 
@@ -60,38 +80,35 @@ async def rerank_documents(
     query: str,
     documents: list[str],
     *,
-    model: str | None = None,
     top_n: int | None = None,
-    instruction: str | None = None,
     timeout: float = 60.0,
 ) -> list[dict[str, Any]]:
-    """调用 SiliconFlow /v1/rerank，返回按相关度排序的结果（含原始下标与分数）。"""
+    """调用与 OpenAI 兼容的 /v1/rerank，返回按相关度排序的结果（含原始下标与分数）。"""
     if not documents:
         return []
 
-    url = f"{_SILICONFLOW_BASE}/rerank"
+    model = _require_rag_model("reranker")
     body: dict[str, Any] = {
-        "model": model or _DEFAULT_RERANK_MODEL,
+        "model": model,
         "query": query,
         "documents": documents,
         "return_documents": False,
     }
     if top_n is not None:
         body["top_n"] = top_n
-    if instruction:
-        body["instruction"] = instruction
 
-    async with httpx.AsyncClient(http2=True, timeout=timeout) as client:
-        response = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {_api_key()}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-        )
-        response.raise_for_status()
-        data = response.json()
+    client = await _get_http_client()
+    response = await client.post(
+        "/rerank",
+        headers={
+            "Authorization": f"Bearer {get_config().get('SILICONFLOW_key').strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
 
     out: list[dict[str, Any]] = []
     for row in data.get("results", []):
@@ -110,3 +127,16 @@ async def rerank_documents(
             }
         )
     return out
+
+if __name__ == "__main__":
+    async def _demo() -> None:
+        text = "Silicon flow embedding online: fast, affordable, and high-quality embedding services. come try it out!"
+        embedding = await embed_texts(text)
+        print(embedding)
+
+        query = "Apple"
+        documents = ["apple", "banana", "fruit", "vegetable"]
+        result = await rerank_documents(query, documents)
+        print(result)
+
+    asyncio.run(_demo())
