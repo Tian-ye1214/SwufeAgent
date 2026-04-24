@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from typing import List, Dict, Optional
+from typing import List, Dict
 from dataclasses import dataclass, field
 from enum import Enum
 import json_repair as json
 import logger
+
+from tools.Memory import ChatHistory
 
 
 class TaskStatus(Enum):
@@ -25,6 +27,7 @@ class Task:
     max_retries: int = 3
     dependencies: List[str] = field(default_factory=list)
     failure_history: List[str] = field(default_factory=list)
+    worker_chat_history: ChatHistory = field(default_factory=ChatHistory)
 
 
 class TaskManager:
@@ -99,24 +102,6 @@ class TaskManager:
         
         return todo_list
     
-    def get_next_task(self) -> Optional[Task]:
-        """Get the next executable task"""
-        for task_id in self.task_order:
-            task = self.tasks[task_id]
-            if task.status == TaskStatus.PENDING:
-                deps_satisfied = True
-                for dep_id in task.dependencies:
-                    if dep_id not in self.tasks:
-                        logger.warning(f"Warning: Dependency task '{dep_id}' does not exist, ignoring this dependency")
-                        continue
-                    if self.tasks[dep_id].status != TaskStatus.COMPLETED:
-                        deps_satisfied = False
-                        break
-                
-                if deps_satisfied:
-                    return task
-        return None
-    
     def get_all_ready_tasks(self) -> List[Task]:
         """获取所有可以并行执行的任务（依赖已满足且状态为PENDING）"""
         ready = []
@@ -183,13 +168,6 @@ class TaskManager:
             return f"Task [{task_id}] execution failed, preparing retry attempt {task.retry_count + 1}\n" + \
                    f"Failure reason: {reason}\n" + \
                    f"Remaining retries: {task.max_retries - task.retry_count}"
-    
-    def can_retry(self, task_id: str) -> bool:
-        """Check if a task can still be retried"""
-        if task_id not in self.tasks:
-            return False
-        task = self.tasks[task_id]
-        return task.retry_count <= task.max_retries
     
     def get_todo_list(self) -> str:
         """Get current Todo List status. """

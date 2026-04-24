@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import app_config
-from app_config import get_model_and_params, set_api, set_model_name
+from app_config import get_context_config, get_model_and_params, set_api, set_model_name
+from ModelGateway.ModelChecker import (
+    compress_history_async,
+    estimate_history_tokens_async,
+    format_context_usage_line,
+    get_effective_max_context_async,
+)
 from prompt import get_skills_as_in_system_prompt
 from skills.SkillsManager import SkillsManager
+from tools.Memory import ChatHistory
 
 
 def print_cli_help() -> None:
@@ -16,6 +23,7 @@ def print_cli_help() -> None:
         "/agent    查看 Manager / Worker / Coordinator 的模型名与 temperature、max_tokens；\n"
         "          切换: /agent <manager|worker|coordinator> <模型名称>\n"
         "/api      按提示修改 api_base 与 api_key（写入 config.json，回车跳过单项）\n"
+        "/compress 主动压缩当前 Coordinator 对话上下文（Markdown 摘要）\n"
         "\n── 其他 ─────────────────────────────────────────────\n"
         "新任务     清空任务与对话上下文\n"
         "quit/exit  退出程序\n"
@@ -60,7 +68,12 @@ def print_loaded_skills(skills_manager: SkillsManager) -> None:
     print(block if block.strip() else "(无：layout 与 summary 均为空)\n")
 
 
-def handle_slash_command(raw: str, skills_manager: SkillsManager) -> bool:
+async def handle_slash_command(
+    raw: str,
+    skills_manager: SkillsManager,
+    *,
+    coordinator_history: ChatHistory | None = None,
+) -> bool:
     """
     处理以 / 开头的输入行。
     返回 True 表示已消费该输入，不应作为普通任务发送。
@@ -92,6 +105,43 @@ def handle_slash_command(raw: str, skills_manager: SkillsManager) -> bool:
         return True
     if cmd == "/api":
         interactive_set_api()
+        return True
+    if cmd == "/compress":
+        if coordinator_history is None:
+            print("当前环境未绑定 Coordinator 历史，无法压缩。\n")
+            return True
+        msgs = list(coordinator_history.messages)
+        if not msgs:
+            print("对话历史为空，无需压缩。\n")
+            return True
+        ctx = get_context_config("coordinator")
+        cpt = float(ctx["token_estimate_fallback_chars_per_token"])
+        max_t = await get_effective_max_context_async(role="coordinator")
+        before = await estimate_history_tokens_async(
+            msgs, chars_per_token=cpt, role="coordinator"
+        )
+        try:
+            did = await compress_history_async(
+                coordinator_history, role="coordinator", force=True
+            )
+        except Exception as e:
+            print(f"压缩失败: {e}\n")
+            return True
+        after = await estimate_history_tokens_async(
+            list(coordinator_history.messages),
+            chars_per_token=cpt,
+            role="coordinator",
+        )
+        if did:
+            print(
+                f"已压缩上下文: {format_context_usage_line(before, max_t)} → "
+                f"{format_context_usage_line(after, max_t)}\n"
+            )
+        else:
+            print(
+                f"未执行压缩（可能历史过短或头尾保护区重叠）。"
+                f"当前 {format_context_usage_line(after, max_t)}\n"
+            )
         return True
 
     print(f"未知命令 {cmd}，输入 /help 查看可用命令\n")

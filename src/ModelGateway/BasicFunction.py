@@ -1,3 +1,6 @@
+import json
+import re
+
 from dotenv import load_dotenv
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.anthropic import AnthropicModel
@@ -8,20 +11,47 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai import Agent, ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
-import logger as _logger_mod
+import logger
 from app_config import get_api_base, get_api_key
 
 load_dotenv()
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
-    async def request(self, *args, **kwargs) -> ModelResponse:
-        response = await super().request(*args, **kwargs)
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: _ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        response = await super().request(messages, model_settings, model_request_parameters)
         return self._repair_tool_calls_json(response)
-    
+
+    def _ensure_valid_json(self, args_str: str, tool_name: str) -> str:
+        """保证返回的字符串一定是合法 JSON。先校验，再 json_repair，最后 fallback 标记。"""
+        try:
+            json.loads(args_str)
+            return args_str
+        except json.JSONDecodeError:
+            pass
+
+        logger.warning("tool=%s args 非法JSON: %s", tool_name, args_str)
+
+        try:
+            fixed = json_repair.loads(args_str)
+            return json.dumps(fixed, ensure_ascii=False)
+        except Exception:
+            pass
+
+        logger.error("tool=%s args 无法修复，fallback 为 _args_corrupted 标记", tool_name)
+        return json.dumps({"_args_corrupted": True, "tool": tool_name}, ensure_ascii=False)
+
     def _truncate_long_content(self, json_str: str, max_content_length: int = 8000) -> str:
         """对于 write_file 等工具，截断过长的 content 字段"""
         try:
@@ -33,12 +63,9 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
             return json_repair.dumps(data)
         except Exception:
             return json_str
-    
+
     def _repair_truncated_json(self, json_str: str, tool_name: str) -> str:
-        """
-        尝试修复被截断的 JSON 字符串。
-        当模型输出被截断时，JSON 可能是不完整的。
-        """
+        """尝试修复被截断的 JSON 字符串。"""
         if not json_str or not isinstance(json_str, str):
             return json_str
 
@@ -51,7 +78,6 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         json_str = json_str.strip()
         if tool_name == 'write_file':
             try:
-                import re
                 name_match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
                 if name_match:
                     file_name = name_match.group(1)
@@ -88,23 +114,23 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
             pass
 
         return json_str
-    
+
     def _repair_tool_calls_json(self, response: ModelResponse) -> ModelResponse:
         """修复响应中所有工具调用的 JSON 参数"""
         repaired_parts = []
-        
+
         for part in response.parts:
             if isinstance(part, ToolCallPart):
                 try:
                     original_args = part.args
                     if isinstance(original_args, str):
                         repaired_args = self._repair_truncated_json(original_args, part.tool_name)
-
                         if part.tool_name == 'write_file':
                             repaired_args = self._truncate_long_content(repaired_args)
-                            
+                        # 最终保证合法 JSON，防止存入 history 后下轮触发 400
+                        repaired_args = self._ensure_valid_json(repaired_args, part.tool_name)
                     elif isinstance(original_args, dict):
-                        repaired_args = json_repair.dumps(original_args)
+                        repaired_args = json.dumps(original_args, ensure_ascii=False)
                     else:
                         repaired_args = original_args
                     part = ToolCallPart(
@@ -115,8 +141,17 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
                         provider_details=part.provider_details,
                     )
                 except Exception as e:
-                    import logging
-                    logging.warning(f"Failed to repair tool call JSON for {part.tool_name}: {e}")
+                    logger.warning("repair tool call JSON failed for %s: %s", part.tool_name, e)
+                    # fallback：用 _ensure_valid_json 保证不存入坏数据
+                    if isinstance(part.args, str):
+                        safe_args = self._ensure_valid_json(part.args, part.tool_name)
+                        part = ToolCallPart(
+                            tool_name=part.tool_name,
+                            args=safe_args,
+                            tool_call_id=part.tool_call_id,
+                            id=part.id,
+                            provider_details=part.provider_details,
+                        )
             repaired_parts.append(part)
 
         return ModelResponse(
@@ -185,7 +220,7 @@ def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: s
         }
 
     model = create_model(model_name, parameter)
-    wrapped_tools = _logger_mod.wrap_tools_for_user_notify(list(tools)) if tools else tools
+    wrapped_tools = logger.wrap_tools_for_user_notify(list(tools)) if tools else tools
     agent = Agent(
         model,
         tools=wrapped_tools,

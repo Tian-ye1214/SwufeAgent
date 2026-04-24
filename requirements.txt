@@ -1,16 +1,20 @@
 pydantic-ai==1.80.0
+tiktoken==0.12.0
 pydantic-ai-slim[anthropic]==1.80.0
 python-dotenv
+httpx
 json-repair
 ddgs
 
 requests
-beautifulsoup4
+playwright>=1.49.0
 
 PyMuPDF
 python-docx
 pandas
 openpyxl
+
+lancedb
 
 PyYAML
 

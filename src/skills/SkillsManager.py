@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import re
-import shutil
 import threading
 import yaml
 from pathlib import Path
@@ -25,7 +24,6 @@ class Skill:
     metadata: SkillMetadata
     instructions: str = ""
     resources: Dict[str, str] = field(default_factory=dict)
-    loaded: bool = False
 
     @property
     def name(self) -> str:
@@ -94,14 +92,11 @@ class SkillsManager:
         )
         return metadata, instructions
 
-    def _discover_skills(self, *, quiet: bool = False) -> None:
+    def _discover_skills(self) -> None:
         if not self.skills_dir.exists():
-            if not quiet:
-                logger.info(f"Skills 目录不存在: {self.skills_dir}")
+            logger.info(f"Skills 目录不存在: {self.skills_dir}")
             self.skills_dir.mkdir(parents=True, exist_ok=True)
             return
-
-        discovered = 0
 
         for item in self.skills_dir.iterdir():
             if not item.is_dir():
@@ -115,100 +110,12 @@ class SkillsManager:
                 self.skills[metadata.name] = Skill(
                     metadata=metadata,
                     instructions=instructions,
-                    loaded=False,
                 )
-                discovered += 1
-                if not quiet:
-                    logger.debug(f"发现 Skill: {metadata.name}")
 
-        if not quiet:
-            logger.info(f"共发现 {discovered} 个 Skills")
-
-    def refresh(self, *, quiet: bool = False) -> None:
+    def refresh(self) -> None:
         with self._refresh_lock:
             self.skills.clear()
-            self._discover_skills(quiet=quiet)
-
-    def _skill_markdown_path(self, name: str) -> Optional[Path]:
-        skill = self.skills.get(name)
-        if not skill:
-            return None
-        p = skill.path / self.SKILL_FILENAME
-        return p if p.is_file() else None
-
-    def create_skill(
-        self, name: str, description: str, instructions: str = ""
-    ) -> Tuple[bool, str]:
-        skill_dir = self.skills_dir / name
-        skill_file = skill_dir / self.SKILL_FILENAME
-
-        with self._refresh_lock:
-            if skill_dir.exists() or skill_file.exists():
-                return False, f"Skill '{name}' 已存在"
-            try:
-                skill_dir.mkdir(parents=True, exist_ok=False)
-                fm = yaml.dump(
-                    {"name": name, "description": description},
-                    allow_unicode=True,
-                    default_flow_style=False,
-                    sort_keys=False,
-                ).strip()
-                body = instructions.strip()
-                skill_file.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
-            except OSError as e:
-                return False, str(e)
-            self.refresh(quiet=True)
-        return True, ""
-
-    def update_skill(
-        self,
-        name: str,
-        *,
-        description: Optional[str] = None,
-        instructions: Optional[str] = None,
-    ) -> Tuple[bool, str]:
-        with self._refresh_lock:
-            if description is None and instructions is None:
-                return True, ""
-
-            path = self._skill_markdown_path(name)
-            if path is None:
-                return False, f"Skill '{name}' 不存在"
-
-            parsed = self._parse_skill_file(path)
-            if not parsed:
-                return False, f"无法解析 {path}"
-
-            meta, cur_instructions = parsed
-            new_desc = description if description is not None else meta.description
-            new_instr = instructions if instructions is not None else cur_instructions
-
-            try:
-                fm = yaml.dump(
-                    {"name": meta.name, "description": new_desc},
-                    allow_unicode=True,
-                    default_flow_style=False,
-                    sort_keys=False,
-                ).strip()
-                body = new_instr.strip()
-                path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
-            except OSError as e:
-                return False, str(e)
-            self.refresh(quiet=True)
-        return True, ""
-
-    def delete_skill(self, name: str) -> Tuple[bool, str]:
-        with self._refresh_lock:
-            skill = self.skills.get(name)
-            if not skill:
-                return False, f"Skill '{name}' 不存在"
-
-            try:
-                shutil.rmtree(skill.path)
-            except OSError as e:
-                return False, str(e)
-            self.refresh(quiet=True)
-        return True, ""
+            self._discover_skills()
 
     def get_skill(self, name: str) -> Optional[Skill]:
         return self.skills.get(name)
@@ -231,7 +138,6 @@ class SkillsManager:
         skill = self.skills.get(name)
         if not skill:
             return None
-        skill.loaded = True
         logger.info(f"加载 Skill 指令: {name}")
         return skill.instructions
 

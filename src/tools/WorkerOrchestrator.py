@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, TYPE_CHECKING
+from typing import List, Dict, Tuple, TYPE_CHECKING, Any, Callable
 import asyncio
 import time
 import traceback
 
 import logger
 from prompt import get_worker_system_prompt, load_prompt
-from BasicFunction import create_agent
+from ModelGateway.BasicFunction import create_agent
+from ModelGateway.ModelChecker import maybe_auto_compress_async
 from app_config import get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
+from tools.Memory import ChatHistory
+from tools.conversation_log import ConversationLog
 
 if TYPE_CHECKING:
     from tools.BasicTools import BasicToolkit
@@ -52,12 +55,68 @@ class _SharedMessageBoard:
         return "\n".join(lines)
 
 
+class _BoardWorkerTools:
+    """并行 Worker 在消息板上的两个工具，用实例属性替代嵌套闭包。"""
+    def __init__(self, board: _SharedMessageBoard, worker_id: str, task_desc: str):
+        self._board = board
+        self._worker_id = worker_id
+        self._task_desc = task_desc
+
+    async def check_other_workers_progress(self) -> str:
+        """
+        Check the progress and results of other parallel workers.
+        Use this when you need to know what other workers have accomplished,
+        to avoid duplicate work or to build upon their results.
+        """
+        return await self._board.get_updates(exclude_worker=self._worker_id)
+
+    async def report_progress(self, message: str) -> str:
+        """
+        Report your current progress to other workers via the shared message board.
+        Use this to share intermediate results or important findings.
+        Parameters:
+            message: Summary of what you've accomplished so far
+        """
+        await self._board.post(self._worker_id, self._task_desc, message, status="in_progress")
+        return "Progress update posted to the message board."
+
+
 class WorkerOrchestrator:
     """Worker 执行编排器，负责单任务执行与多任务并行调度。"""
 
-    def __init__(self, toolkit: BasicToolkit, task_manager: TaskManager):
+    def __init__(
+        self,
+        toolkit: BasicToolkit,
+        task_manager: TaskManager,
+        *,
+        memory_injection_getter: Callable[[], str] | None = None,
+    ):
         self._toolkit = toolkit
         self._task_manager = task_manager
+        self._memory_injection_getter = memory_injection_getter or (lambda: "")
+        self._conversation_date: str | None = None
+        self._conversation_topic: str | None = None
+        self._worker_adhoc_seq = 0
+
+    def set_conversation_session(self, date: str, topic: str) -> None:
+        self._conversation_date = date
+        self._conversation_topic = topic
+
+    def clear_conversation_session(self) -> None:
+        self._conversation_date = None
+        self._conversation_topic = None
+        self._worker_adhoc_seq = 0
+
+    def _save_worker_messages(
+        self, messages: list[Any], sub_id: str, extra: dict[str, Any] | None = None
+    ) -> None:
+        if not self._conversation_date or not self._conversation_topic:
+            return
+        wl = ConversationLog("worker", self._conversation_date, self._conversation_topic, sub_id=sub_id)
+        merged: dict[str, Any] = {"kind": "worker"}
+        if extra:
+            merged.update(extra)
+        wl.save(messages, extra=merged)
 
     async def execute_task_with_worker(
         self,
@@ -79,11 +138,15 @@ class WorkerOrchestrator:
             Tuple[bool, str]: (success, result_message)
         """
         w_name, w_params = get_model_and_params("worker")
+        mem = self._memory_injection_getter()
+        worker_sysprompt = await asyncio.to_thread(
+            get_worker_system_prompt, self._toolkit.skills_manager, mem
+        )
         worker_agent = create_agent(
             w_name,
             w_params,
             self._toolkit.workers_tools,
-            get_worker_system_prompt(self._toolkit.skills_manager),
+            worker_sysprompt,
         )
         prompt_text = (
             f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -96,6 +159,7 @@ class WorkerOrchestrator:
             )
 
         prompt = [prompt_text, *attachments] if attachments else prompt_text
+        adhoc_history = ChatHistory()
 
         try:
             logger.info("=" * 50)
@@ -106,9 +170,22 @@ class WorkerOrchestrator:
             logger.info("=" * 50)
 
             start_time = time.time()
-            result = await worker_agent.run(prompt)
+            result = await worker_agent.run(prompt, message_history=adhoc_history.messages)
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
+
+            adhoc_history.update(result)
+            try:
+                await maybe_auto_compress_async(adhoc_history, role="worker")
+            except Exception as ce:
+                logger.warning("Worker 上下文自动压缩失败: %s", ce)
+
+            self._worker_adhoc_seq += 1
+            self._save_worker_messages(
+                list(adhoc_history.messages),
+                sub_id=f"adhoc-{self._worker_adhoc_seq}",
+                extra={"mode": "simple"},
+            )
 
             output = result.output
             output_upper = output.upper().strip()
@@ -185,10 +262,7 @@ class WorkerOrchestrator:
                     )
                     return task_to_run.id, success, output
 
-            results = await asyncio.gather(
-                *[_run_one(t) for t in ready_tasks],
-                return_exceptions=True,
-            )
+            results = await asyncio.gather(*[_run_one(t) for t in ready_tasks], return_exceptions=True)
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -208,31 +282,11 @@ class WorkerOrchestrator:
 
         return tm.get_final_summary()
 
-    # ── 内部方法 ─────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _create_board_tools(board: _SharedMessageBoard, worker_id: str, task_desc: str):
-        """为Worker创建消息板通讯工具（闭包绑定到具体board和worker）"""
-
-        async def check_other_workers_progress() -> str:
-            """
-            Check the progress and results of other parallel workers.
-            Use this when you need to know what other workers have accomplished,
-            to avoid duplicate work or to build upon their results.
-            """
-            return await board.get_updates(exclude_worker=worker_id)
-
-        async def report_progress(message: str) -> str:
-            """
-            Report your current progress to other workers via the shared message board.
-            Use this to share intermediate results or important findings.
-            Parameters:
-                message: Summary of what you've accomplished so far
-            """
-            await board.post(worker_id, task_desc, message, status="in_progress")
-            return "Progress update posted to the message board."
-
-        return [check_other_workers_progress, report_progress]
+    def _create_board_tools(
+        self, board: _SharedMessageBoard, worker_id: str, task_desc: str
+    ) -> list:
+        tools = _BoardWorkerTools(board, worker_id, task_desc)
+        return [tools.check_other_workers_progress, tools.report_progress]
 
     async def _execute_worker_with_board(
         self,
@@ -248,7 +302,13 @@ class WorkerOrchestrator:
         board_tools = self._create_board_tools(board, worker_id, task.description)
         all_tools = self._toolkit.workers_tools + board_tools
 
-        full_system_prompt = get_worker_system_prompt(self._toolkit.skills_manager) + load_prompt("worker_parallel_addon.md")
+        def _parallel_worker_prompt():
+            mem = self._memory_injection_getter()
+            return get_worker_system_prompt(self._toolkit.skills_manager, mem) + load_prompt(
+                "worker_parallel_addon.md"
+            )
+
+        full_system_prompt = await asyncio.to_thread(_parallel_worker_prompt)
         w_name, w_params = get_model_and_params("worker")
         worker_agent = create_agent(w_name, w_params, all_tools, full_system_prompt)
 
@@ -284,10 +344,24 @@ class WorkerOrchestrator:
             logger.info(f"{'='*50}")
 
             start_time = time.time()
-            result = await worker_agent.run(prompt_input)
+            result = await worker_agent.run(
+                prompt_input, message_history=task.worker_chat_history.messages
+            )
             elapsed = time.time() - start_time
 
             logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
+
+            task.worker_chat_history.update(result)
+            try:
+                await maybe_auto_compress_async(task.worker_chat_history, role="worker")
+            except Exception as ce:
+                logger.warning("[%s] Worker 上下文自动压缩失败: %s", worker_id, ce)
+
+            self._save_worker_messages(
+                list(task.worker_chat_history.messages),
+                sub_id=f"task-{task.id}",
+                extra={"mode": "parallel", "task_id": task.id},
+            )
 
             output = result.output
 

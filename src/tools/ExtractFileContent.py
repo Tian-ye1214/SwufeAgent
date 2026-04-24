@@ -16,11 +16,15 @@ def _clean_extracted_text(content: str) -> str:
     return content.strip()
 
 
-def _safe_path(name: str) -> Path:
-    path = (base_dir / name).resolve()
-    if not str(path).startswith(str(base_dir.resolve())):
-        raise ValueError("检测到路径遍历：不允许访问 base_dir 之外的目录")
-    return path
+def _resolve_read_path(name: str) -> Path:
+    """读取用路径解析：绝对路径任意可读；相对路径相对于 WorkDatabase。"""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("路径不能为空")
+    p = Path(name).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (base_dir / name).resolve()
 
 
 def extract_text_from_pdf(file_path):
@@ -92,39 +96,38 @@ def extract_text(file_path):
     line breaks, and duplicate punctuation marks.
 
     Args:
-        file_path (str): The path to the file to extract text from (relative to WorkDatabase directory). 
-                         Must include the file extension.
+        file_path (str): 本地文件路径（绝对路径任意；相对路径相对于 WorkDatabase）。需含扩展名。
 
     Returns:
         str: The extracted and cleaned text content. Returns None if an error
              occurs during processing.
     """
     try:
-        safe_file_path = _safe_path(file_path)
-        
-        if not safe_file_path.exists():
-            print(f"文件不存在：{safe_file_path}")
+        resolved = _resolve_read_path(file_path)
+
+        if not resolved.exists():
+            print(f"文件不存在：{resolved}")
             return None
-        
-        file_type = safe_file_path.suffix.lstrip('.').lower()
-        
+
+        file_type = resolved.suffix.lstrip('.').lower()
+
         if file_type == 'pdf':
-            content = extract_text_from_pdf(safe_file_path)
+            content = extract_text_from_pdf(resolved)
         elif file_type in ['doc', 'docx']:
-            content = extract_text_from_docx(safe_file_path)
+            content = extract_text_from_docx(resolved)
         elif file_type in ['xlsx', 'xls']:
-            content = extract_text_from_excel(safe_file_path)
+            content = extract_text_from_excel(resolved)
         elif file_type == 'txt':
-            content = extract_text_from_txt(safe_file_path)
+            content = extract_text_from_txt(resolved)
         else:
             raise ValueError(f"不支持的文件格式：{file_type}")
 
-        if content is None:
-            raise ValueError("无法提取文件内容")
+        if content is None or len(content) == 0:
+            raise ValueError("提取内容为空，请检查文件情况")
 
         return _clean_extracted_text(content)
     except ValueError as e:
-        print(f"安全错误：{str(e)}")
+        print(f"路径错误：{str(e)}")
         return None
     except Exception as e:
         print(f"处理文件时出错：{str(e)}")

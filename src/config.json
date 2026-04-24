@@ -1,6 +1,12 @@
 {
   "api_base": "",
   "api_key": "",
+  "SILICONFLOW_base": "",
+  "SILICONFLOW_key": "",
+  "RAG_models": {
+    "embedding": "Qwen/Qwen3-Embedding-0.6B",
+    "reranker": "Qwen/Qwen3-Reranker-0.6B"
+  },
   "models": {
     "manager": {
       "name": "qwen3.5-397b-a17b",
@@ -16,6 +22,51 @@
       "name": "qwen3.5-397b-a17b",
       "temperature": 1.0,
       "max_tokens": 32768
+    }
+  },
+  "context": {
+    "defaults": {
+      "models_api_path": "v1/models",
+      "token_estimate_fallback_chars_per_token": 4
+    },
+    "coordinator": {
+      "max_context_tokens": null,
+      "default_context_tokens": 131072,
+      "auto_compress_ratio": 0.5,
+      "tail_reserve_ratio": 0.2,
+      "head_turns": 2,
+      "head_max_ratio": 0.12,
+      "compressor": {
+        "model": null,
+        "max_tokens": 4096,
+        "temperature": 0.2
+      }
+    },
+    "manager": {
+      "max_context_tokens": null,
+      "default_context_tokens": 131072,
+      "auto_compress_ratio": 0.5,
+      "tail_reserve_ratio": 0.2,
+      "head_turns": 2,
+      "head_max_ratio": 0.12,
+      "compressor": {
+        "model": null,
+        "max_tokens": 4096,
+        "temperature": 0.2
+      }
+    },
+    "worker": {
+      "max_context_tokens": null,
+      "default_context_tokens": 131072,
+      "auto_compress_ratio": 0.5,
+      "tail_reserve_ratio": 0.2,
+      "head_turns": 2,
+      "head_max_ratio": 0.12,
+      "compressor": {
+        "model": null,
+        "max_tokens": 4096,
+        "temperature": 0.2
+      }
     }
   }
 }

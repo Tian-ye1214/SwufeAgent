@@ -25,7 +25,6 @@ class SkillsToolkit:
         Returns:
             格式化的 Skills 列表，包含每个 Skill 的名称和描述
         """
-        logger.debug("(list_available_skills)")
         metadata_list = self._manager.get_all_metadata()
 
         if not metadata_list:
@@ -54,7 +53,6 @@ class SkillsToolkit:
         Returns:
             Skill 的完整指令内容，包含使用方法和代码示例
         """
-        logger.debug(f"(get_skill_instructions {skill_name})")
         instructions = self._manager.load_skill_instructions(skill_name)
 
         if instructions is None:
@@ -98,7 +96,6 @@ class SkillsToolkit:
         Returns:
             资源文件的内容
         """
-        logger.debug(f"(load_skill_resource {skill_name}/{resource_name})")
         content = self._manager.load_skill_resource(skill_name, resource_name)
 
         if content is None:
@@ -124,7 +121,6 @@ class SkillsToolkit:
         Returns:
             Skill 指令内容
         """
-        logger.debug(f"(request_skill_usage {skill_name})")
         skill = self._manager.get_skill(skill_name)
         if skill is None:
             available = [m.name for m in self._manager.get_all_metadata()]
@@ -159,7 +155,6 @@ class SkillsToolkit:
         Returns:
             推荐的 Skill 信息，如果没有匹配则返回提示
         """
-        logger.debug("(suggest_skill_for_task)")
         matched_skill = self._manager.match_skill(task_description)
 
         if matched_skill:
@@ -189,7 +184,6 @@ class SkillsToolkit:
         Returns:
             刷新结果信息
         """
-        logger.debug("(refresh_skills)")
         self._manager.refresh()
         metadata_list = self._manager.get_all_metadata()
         return f"Skills 已刷新。当前共有 {len(metadata_list)} 个 Skills 可用。"
@@ -209,7 +203,6 @@ class SkillsToolkit:
         Returns:
             脚本执行的输出结果
         """
-        logger.debug(f"(execute_skill_script {skill_name}/{script_name} {args})")
         return self._manager.execute_skill_script(skill_name, script_name, args)
 
     @property

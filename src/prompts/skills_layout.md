@@ -1,7 +1,11 @@
-## Skills 目录说明
+## Skills Directory Description
 
-- 所有 Skills 位于项目根目录下的 **`skills/`** 文件夹（{skills_root_path}）。
-- **按 Skill 分目录存放**：`skills/` 下每个**子文件夹**对应一个 Skill；子文件夹名可与 `SKILL.md` 里 YAML 的 `name` 字段不同，系统以 `name` 为准注册。
-- 每个 Skill 目录内须有 **`SKILL.md`**：文件开头为 YAML 前置元数据（含 `name`、`description` 等），其后为正文指令。
-- 同一 Skill 目录下可放参考资料、规则、脚本等（如 `references/`、`rules/`），按需通过工具加载。
-- 变更文件后系统会重新扫描（含热加载）；下列「可用 Skills」列表会随扫描结果更新。
+- All Skills are located in the **`skills/` folder ({skills_root_path}) under the project root directory.
+
+- **Stored by Skill directory:** Each **subfolder** under `skills/` corresponds to one Skill; the subfolder name can differ from the `name` field in the YAML file `SKILL.md`, but the system uses `name` for registration.
+
+- Each Skill directory must contain a **`SKILL.md`: The file begins with YAML metadata (including `name`, `description`, etc.), followed by the main instructions.
+
+- Reference materials, rules, scripts, etc. (such as `references/`, `rules/`) can be placed in the same Skill directory, and loaded as needed using tools.
+
+- The system will rescan after file changes (including hot reloading); the following "Available Skills" list will be updated with the scan results.

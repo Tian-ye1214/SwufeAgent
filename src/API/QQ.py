@@ -60,8 +60,7 @@ class QQBot(BotBase):
     async def _extract_attachments(self, event: BaseMessageEvent) -> list:
         return await extract_media(self._bot_client.api, event, _FILE_ALLOW_EXT)
 
-    @staticmethod
-    def _is_pdf_binary(att: BinaryContent) -> bool:
+    def _is_pdf_binary(self, att: BinaryContent) -> bool:
         mt = (att.media_type or "").split(";")[0].strip().lower()
         if mt in ("application/pdf", "application/x-pdf"):
             return True
@@ -113,7 +112,6 @@ class QQBot(BotBase):
     def run(self, *, debug: bool = True, remote_mode: bool = True,
             enable_webui_interaction: bool = False, **kwargs):
         self._released = False
-        self._init_executor("QQ_AGENT_THREAD_WORKERS")
         self._register_handlers()
         try:
             self._bot_client.run_frontend(

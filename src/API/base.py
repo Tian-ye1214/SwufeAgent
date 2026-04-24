@@ -3,8 +3,6 @@ import sys
 import re
 import asyncio
 import contextvars
-import threading
-import concurrent.futures
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
@@ -18,7 +16,7 @@ for _p in (_SRC, _API_DIR):
 os.chdir(_REPO_ROOT)
 
 from agent_app import AgentSystem
-from tools.memory import ChatHistory, UserMessage
+from tools.Memory import ChatHistory, UserMessage
 import logger
 
 
@@ -38,7 +36,6 @@ class BotBase:
     """
     AGENT_RUN_TIMEOUT_S = 900.0
     SEND_REPLY_TIMEOUT_S = 120.0
-    DEFAULT_MEDIA_PROMPT = "请分析这些内容。"
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
     END_TASK_COMMANDS = frozenset({"结束任务", "/结束任务", "结束当前任务", "/结束当前任务"})
 
@@ -57,7 +54,6 @@ class BotBase:
         self._pending_questions: dict[str, dict] = {}
         self._last_attachments: dict[str, list] = {}
         self._released = False
-        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._agent_ctx: contextvars.ContextVar = contextvars.ContextVar(
             f"{self.__class__.__name__}_ctx", default=None
         )
@@ -186,11 +182,8 @@ class BotBase:
                     merged = self._merge_turns(batch)
                     if len(batch) > 1:
                         logger.info(f"[{self.platform_tag}] {session_id} 合并 {len(batch)} 条消息，一次调用 Agent")
-                    if self._executor is None:
-                        raise RuntimeError("Agent 线程池未初始化")
-                    run_coro = merged.loop.run_in_executor(
-                        self._executor,
-                        partial(self._call_agent, session_id, merged.user_message, merged.send_reply, merged.loop),
+                    run_coro = self._call_agent_async(
+                        session_id, merged.user_message, merged.send_reply, merged.loop
                     )
                     try:
                         reply = await asyncio.wait_for(run_coro, timeout=self.AGENT_RUN_TIMEOUT_S)
@@ -235,16 +228,24 @@ class BotBase:
 
     def _notify_user(self, text: str, session_id: str, run_gen: int,
                      send_reply: Callable[..., Awaitable[Any]], loop: asyncio.AbstractEventLoop) -> None:
-        """从线程池向用户推送中间通知，过期轮次直接忽略。"""
+        """向用户推送中间通知；与 Bot 同事件循环时用 create_task，避免阻塞。"""
         if run_gen != self._current_generation(session_id):
             return
-        fut = asyncio.run_coroutine_threadsafe(send_reply(text), loop)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        coro = self._safe_send(send_reply, text)
+        if running is loop:
+            asyncio.create_task(coro)
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             fut.result(timeout=12)
         except Exception:
             pass
 
-    def _call_agent(
+    async def _call_agent_async(
         self,
         session_id: str,
         message: UserMessage,
@@ -264,7 +265,15 @@ class BotBase:
             partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
         )
         try:
-            _, output = agent_system.run_agent_system(message, history)
+            _, output = await agent_system.run_agent_system(
+                message,
+                history,
+                conversation_log_hint=session_id,
+                conversation_log_extra={
+                    "session_id": session_id,
+                    "platform": self.platform_tag,
+                },
+            )
         except Exception as e:
             logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
             output = f"抱歉，处理您的请求时出现了错误：{e}"
@@ -273,25 +282,27 @@ class BotBase:
             self._agent_ctx.set(None)
         return output
 
-    def _ask_user(self, question: str, timeout: int | None = None) -> str | None:
+    async def _ask_user(self, question: str, timeout: int | None = None) -> str | None:
         actual_timeout = timeout if timeout is not None else 120
         ctx = self._agent_ctx.get()
         if not ctx:
-            return input(f"[ask_user] {question}\n回复: ").strip()
+            return (
+                await asyncio.to_thread(input, f"[ask_user] {question}\n回复: ")
+            ).strip()
         session_id, run_gen, send_func, loop = ctx
         if run_gen != self._current_generation(session_id):
             return None
-        event = threading.Event()
-        self._pending_questions[session_id] = {"event": event, "answer": None}
+        answer_fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_questions[session_id] = {"future": answer_fut}
         try:
-            fut = asyncio.run_coroutine_threadsafe(send_func(f"🤔 {question}"), loop)
             try:
-                fut.result(timeout=15)
+                await asyncio.wait_for(send_func(f"🤔 {question}"), timeout=15)
             except Exception as e:
                 logger.error(f"[{self.platform_tag} ask_user] 发送问题失败: {e}")
-            got_reply = event.wait(timeout=actual_timeout)
-            pending = self._pending_questions.pop(session_id, {})
-            return pending.get("answer") if got_reply and pending.get("answer") else None
+            try:
+                return await asyncio.wait_for(answer_fut, timeout=actual_timeout)
+            except asyncio.TimeoutError:
+                return None
         finally:
             self._pending_questions.pop(session_id, None)
 
@@ -319,9 +330,9 @@ class BotBase:
         )
 
         pending = self._pending_questions.get(session_id)
-        if pending and not pending["event"].is_set():
-            pending["answer"] = user_text
-            pending["event"].set()
+        pf = pending.get("future") if pending else None
+        if pf is not None and not pf.done():
+            pf.set_result(user_text)
             logger.info(f"[{self.platform_tag}] {session_id} 本条消息已作为 ask_user 的回复投递")
             await self._safe_send(send_reply, "✓ 已收到你的回复，正在继续处理…")
             return
@@ -353,10 +364,9 @@ class BotBase:
         self._released = True
         n = len(self._agent_systems)
         for pending in list(self._pending_questions.values()):
-            ev = pending.get("event")
-            if ev and not ev.is_set():
-                pending["answer"] = None
-                ev.set()
+            pf = pending.get("future")
+            if pf is not None and not pf.done():
+                pf.cancel()
         for attr in (
             self._pending_questions,
             self._sessions,
@@ -371,20 +381,7 @@ class BotBase:
         self._consumer_tasks.clear()
         self._session_queues.clear()
         self._session_generation.clear()
-        ex, self._executor = self._executor, None
-        if ex is not None:
-            try:
-                ex.shutdown(wait=False, cancel_futures=True)
-            except Exception as e:
-                logger.warning(f"[{self.platform_tag}] 关闭 Agent 线程池: {e}")
         logger.info(f"[{self.platform_tag}] 已释放全部会话与 Agent 资源（共 {n} 个 Agent 实例）")
-
-    def _init_executor(self, env_workers: str, default: int = 4) -> None:
-        workers = max(2, int(os.environ.get(env_workers, str(default))))
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix=f"{self.platform_tag.lower()}-agent",
-        )
 
     def clean_text(self, raw: str) -> str:
         return re.sub(r"\s+", " ", (raw or "").strip())

@@ -9,7 +9,7 @@ from wechatbot import WeChatBot
 import logger
 from base import BotBase
 from tools.ExtractFileContent import extract_text_from_pdf_bytes
-from tools.memory import UserMessage
+from tools.Memory import UserMessage
 
 _MIME_MAP = {
     "image": "image/jpeg",
@@ -100,7 +100,6 @@ class WeChatAgentBot(BotBase):
         }
 
         bot = WeChatBot(**kwargs)
-        self._init_executor("WECHAT_AGENT_THREAD_WORKERS")
         await bot.login()
         bot.on_message(partial(self._handle_message, bot))
         try:

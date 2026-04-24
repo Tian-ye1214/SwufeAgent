@@ -1,188 +1,34 @@
-import logging
-import sys
-import os
-import contextvars
-from datetime import datetime
-from pathlib import Path
+from __future__ import annotations
+
 import functools
 import inspect
+import logging
+import os
+import sys
+from contextvars import ContextVar
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
-os.environ["PYTHONUNBUFFERED"] = "1"
-LOG_DIR = Path("./logs")
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-_logger: logging.Logger | None = None
-_current_log_file: Path | None = None
-
-_user_notify_cv: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
-    "user_notify_callback", default=None
-)
-_MAX_NOTIFY_LEN = 400
-
-_FMT_CONSOLE = "%(asctime)s | %(levelname)-8s | %(message)s"
-_FMT_FILE = "%(asctime)s | %(levelname)-8s | %(message)s"
-
-
-def set_user_notify_callback(fn: Optional[Callable[[str], None]]) -> None:
-    """注册或清除（传 None）用户可见进度回调，如 QQ 发消息。"""
-    _user_notify_cv.set(fn)
-
-
-def _run_user_notify(fn: Optional[Callable[[str], None]], text: str) -> None:
-    """第三方回调失败时不应打断 Agent；仅此一处吞异常。"""
-    if not fn:
-        return
-    try:
-        fn(text)
-    except Exception:
-        pass
-
-
-def notify_user(msg: str) -> None:
-    """INFO 日志；若已注册回调则同步推送（如 QQ）。"""
-    if not (msg and str(msg).strip()):
-        return
-    text = str(msg).strip()
-    if len(text) > _MAX_NOTIFY_LEN:
-        text = text[: _MAX_NOTIFY_LEN - 1] + "…"
-    get_logger().info(text)
-    _run_user_notify(_user_notify_cv.get(), text)
-
-
-# 大字段参数名：摘要里用长度代替正文，避免刷屏与超长 QQ 消息
-_LARGE_KW_KEYS = frozenset(
-    {
-        "content",
-        "tasks_json",
-        "text",
-        "body",
-        "html",
-        "message",
-        "prompt",
-        "user_input",
-        "task_description",
-        "question",
-    }
-)
-
-
-def _truncate_repr(v: Any, max_len: int = 96) -> str:
-    s = repr(v)
-    if len(s) > max_len:
-        return s[: max_len - 1] + "…"
-    return s
-
-
-def _format_kwargs_for_notify(kwargs: dict) -> str:
-    parts: list[str] = []
-    for k, v in list(kwargs.items())[:10]:
-        if k in _LARGE_KW_KEYS and isinstance(v, str) and len(v) > 120:
-            sv = f"<{len(v)} chars>"
-        else:
-            sv = _truncate_repr(v, 100)
-        parts.append(f"{k}={sv}")
-    return ", ".join(parts)
-
-
-def _is_likely_tool_self(x: Any) -> bool:
-    n = getattr(x.__class__, "__name__", "")
-    return n in ("BasicToolkit", "TaskManager", "SkillsToolkit", "AgentSystem")
-
-
-def _format_tool_args_for_notify(args: tuple, kwargs: dict) -> str:
-    if kwargs:
-        return _format_kwargs_for_notify(kwargs)
-    if not args:
-        return ""
-    args = list(args)
-    if args and _is_likely_tool_self(args[0]):
-        args = args[1:]
-    if not args:
-        return ""
-    if len(args) == 1:
-        return _truncate_repr(args[0], 120)
-    return f"({len(args)} args) " + ", ".join(_truncate_repr(a, 60) for a in args[:4])
-
-
-def notify_tool_usage(tool_name: str, detail: str = "") -> None:
-    """有 QQ 回调时 INFO+推送；否则 DEBUG，避免 CLI 刷屏。"""
-    detail = (detail or "").strip()
-    line = f"🔧 {tool_name}"
-    if detail:
-        if len(detail) > 280:
-            detail = detail[:277] + "…"
-        line += f" · {detail}"
-    if len(line) > _MAX_NOTIFY_LEN:
-        line = line[: _MAX_NOTIFY_LEN - 1] + "…"
-    fn = _user_notify_cv.get()
-    log = get_logger()
-    if fn:
-        log.info(line)
-        _run_user_notify(fn, line)
-    else:
-        log.debug(line)
-
-
-def _wrap_one_tool_for_notify(fn: Callable) -> Callable:
-    if getattr(fn, "_notify_tool_wrapped", False):
-        return fn
-    name = getattr(fn, "__name__", "tool")
-
-    def _emit(args: tuple, kwargs: dict) -> None:
-        detail = _format_tool_args_for_notify(args, kwargs)
-        notify_tool_usage(name, detail)
-
-    if inspect.iscoroutinefunction(fn):
-
-        @functools.wraps(fn)
-        async def async_wrapper(*args: Any, **kwargs: Any):
-            _emit(args, kwargs)
-            return await fn(*args, **kwargs)
-
-        async_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
-        return async_wrapper
-
-    @functools.wraps(fn)
-    def sync_wrapper(*args: Any, **kwargs: Any):
-        _emit(args, kwargs)
-        return fn(*args, **kwargs)
-
-    sync_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
-    return sync_wrapper
-
-
-def wrap_tools_for_user_notify(tools: List[Any]) -> List[Any]:
-    """包装 Agent 工具列表，调用时 notify_tool_usage。"""
-    if not tools:
-        return tools
-    out: List[Any] = []
-    for t in tools:
-        if t is not None and callable(t) and not inspect.isclass(t):
-            out.append(_wrap_one_tool_for_notify(t))
-        else:
-            out.append(t)
-    return out
-
-
-class ImmediateStreamHandler(logging.StreamHandler):
-    def emit(self, record):
+class _ImmediateStreamHandler(logging.StreamHandler):
+    def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
         self.flush()
 
 
-class ColorFormatter(logging.Formatter):
-    COLORS = {
+class _ColorFormatter(logging.Formatter):
+    _COLORS = {
         logging.DEBUG: "\033[36m",
         logging.INFO: "\033[0m",
         logging.WARNING: "\033[33m",
         logging.ERROR: "\033[31m",
         logging.CRITICAL: "\033[91m",
     }
-    RESET = "\033[0m"
+    _RESET = "\033[0m"
 
-    def __init__(self, fmt=None, datefmt=None):
+    def __init__(self, fmt: str | None = None, datefmt: str | None = None) -> None:
         super().__init__(fmt, datefmt)
         if sys.platform == "win32":
             try:
@@ -194,99 +40,265 @@ class ColorFormatter(logging.Formatter):
             except Exception:
                 pass
 
-    def format(self, record):
-        color = self.COLORS.get(record.levelno, self.RESET)
-        message = super().format(record)
-        return f"{color}{message}{self.RESET}"
+    def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, self._RESET)
+        return f"{color}{super().format(record)}{self._RESET}"
 
 
-def _make_console_handler() -> logging.Handler:
-    h = ImmediateStreamHandler(sys.stderr)
-    h.setLevel(logging.DEBUG)
-    h.setFormatter(ColorFormatter(_FMT_CONSOLE, datefmt="%H:%M:%S"))
-    return h
+class AppLogger:
+    _LOGGER_NAME = "NanoClaw"
+    _FMT_CONSOLE = "%(asctime)s | %(levelname)-8s | %(message)s"
+    _FMT_FILE = "%(asctime)s | %(levelname)-8s | %(message)s"
+    _MAX_NOTIFY_LEN = 400
+    _LARGE_KW_KEYS = frozenset(
+        {
+            "content",
+            "tasks_json",
+            "text",
+            "body",
+            "html",
+            "message",
+            "prompt",
+            "user_input",
+            "task_description",
+            "question",
+        }
+    )
+
+    def __init__(self, log_dir: Path | str | None = None) -> None:
+        self._log_dir = Path(log_dir) if log_dir else Path("./logs")
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._py_logger: logging.Logger | None = None
+        self._current_log_file: Path | None = None
+        self._session_files: dict[str, Path] = {}
+        self._notify_cv: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
+            "user_notify_callback", default=None
+        )
+
+    @property
+    def log_dir(self) -> Path:
+        return self._log_dir
+
+    def debug(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        self.get_logger().debug(msg, *args, **kwargs)
+
+    def info(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        self.get_logger().info(msg, *args, **kwargs)
+
+    def warning(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        self.get_logger().warning(msg, *args, **kwargs)
+
+    def error(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        self.get_logger().error(msg, *args, **kwargs)
+
+    def get_logger(self) -> logging.Logger:
+        """返回已配置好的标准库 `Logger`（懒初始化，仅控制台）。"""
+        if self._py_logger is None:
+            lg = logging.getLogger(self._LOGGER_NAME)
+            lg.setLevel(logging.DEBUG)
+            lg.propagate = False
+            if not lg.handlers:
+                lg.addHandler(self._make_console_handler())
+            self._py_logger = lg
+        return self._py_logger
+
+    def set_user_notify_callback(self, fn: Optional[Callable[[str], None]]) -> None:
+        """注册或清除（``None``）进度回调；回调异常会被吞掉，不中断主流程。"""
+        self._notify_cv.set(fn)
+
+    def setup_task_logger(self, task_name: str = "task") -> logging.Logger:
+        """按任务名创建带时间戳的日志文件，并重置为「控制台 + 该文件」。"""
+        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in task_name)[:50]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = self._log_dir / f"{safe}_{ts}.log"
+        self._rebuild_handlers(path)
+        self.get_logger().info("日志文件已创建: %s", path)
+        return self.get_logger()
+
+    def setup_session_logger(self, session_name: str) -> logging.Logger:
+        """同一会话名复用同一日志文件（不含时间戳）。"""
+        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in session_name)[:50]
+        if safe not in self._session_files:
+            self._session_files[safe] = self._log_dir / f"{safe}.log"
+        path = self._session_files[safe]
+        if self._current_log_file == path and self._py_logger is not None:
+            return self.get_logger()
+        self._rebuild_handlers(path)
+        return self.get_logger()
+
+    def wrap_tools_for_user_notify(self, tools: List[Any]) -> List[Any]:
+        """包装可调用工具：每次调用前记录「工具名 + 参数摘要」。"""
+        if not tools:
+            return tools
+        out: List[Any] = []
+        for t in tools:
+            if t is not None and callable(t) and not inspect.isclass(t):
+                out.append(self._wrap_tool(t))
+            else:
+                out.append(t)
+        return out
+
+    def _make_console_handler(self) -> logging.Handler:
+        h = _ImmediateStreamHandler(sys.stderr)
+        h.setLevel(logging.DEBUG)
+        h.setFormatter(_ColorFormatter(self._FMT_CONSOLE, datefmt="%H:%M:%S"))
+        return h
+
+    def _make_file_handler(self, log_filepath: Path) -> logging.Handler:
+        h = logging.FileHandler(log_filepath, encoding="utf-8")
+        h.setLevel(logging.DEBUG)
+        h.setFormatter(logging.Formatter(self._FMT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
+        return h
+
+    def _rebuild_handlers(self, log_filepath: Path) -> None:
+        lg = logging.getLogger(self._LOGGER_NAME)
+        lg.setLevel(logging.DEBUG)
+        lg.propagate = False
+        lg.handlers.clear()
+        lg.addHandler(self._make_console_handler())
+        lg.addHandler(self._make_file_handler(log_filepath))
+        self._py_logger = lg
+        self._current_log_file = log_filepath
+
+    def _run_notify(self, fn: Optional[Callable[[str], None]], text: str) -> None:
+        if not fn:
+            return
+        try:
+            fn(text)
+        except Exception:
+            pass
+
+    def _truncate_repr(self, v: Any, max_len: int = 96) -> str:
+        s = repr(v)
+        if len(s) > max_len:
+            return s[: max_len - 1] + "…"
+        return s
+
+    def _format_kwargs_for_notify(self, kwargs: dict) -> str:
+        parts: list[str] = []
+        for k, v in list(kwargs.items())[:10]:
+            if k in self._LARGE_KW_KEYS and isinstance(v, str) and len(v) > 120:
+                sv = f"<{len(v)} chars>"
+            else:
+                sv = self._truncate_repr(v, 100)
+            parts.append(f"{k}={sv}")
+        return ", ".join(parts)
+
+    def _is_likely_bound_self(self, x: Any) -> bool:
+        n = getattr(x.__class__, "__name__", "")
+        return n in ("BasicToolkit", "TaskManager", "SkillsToolkit", "AgentSystem")
+
+    def _format_tool_args_for_notify(self, args: tuple, kwargs: dict) -> str:
+        if kwargs:
+            return self._format_kwargs_for_notify(kwargs)
+        if not args:
+            return ""
+        al = list(args)
+        if al and self._is_likely_bound_self(al[0]):
+            al = al[1:]
+        if not al:
+            return ""
+        if len(al) == 1:
+            return self._truncate_repr(al[0], 120)
+        return f"({len(al)} args) " + ", ".join(self._truncate_repr(a, 60) for a in al[:4])
+
+    def _emit_tool_line(self, tool_name: str, detail: str) -> None:
+        detail = (detail or "").strip()
+        line = f"\U0001f527 {tool_name}"
+        if detail:
+            if len(detail) > 280:
+                detail = detail[:277] + "…"
+            line += f" · {detail}"
+        if len(line) > self._MAX_NOTIFY_LEN:
+            line = line[: self._MAX_NOTIFY_LEN - 1] + "…"
+        cb = self._notify_cv.get()
+        logger = self.get_logger()
+        if cb:
+            logger.info(line)
+            self._run_notify(cb, line)
+        else:
+            logger.debug(line)
+
+    def _wrap_tool(self, fn: Callable) -> Callable:
+        if getattr(fn, "_notify_tool_wrapped", False):
+            return fn
+        name = getattr(fn, "__name__", "tool")
+
+        def emit(args: tuple, kwargs: dict) -> None:
+            self._emit_tool_line(name, self._format_tool_args_for_notify(args, kwargs))
+
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def async_wrapper(*args: Any, **kwargs: Any):
+                emit(args, kwargs)
+                return await fn(*args, **kwargs)
+
+            async_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
+            return async_wrapper
+
+        @functools.wraps(fn)
+        def sync_wrapper(*args: Any, **kwargs: Any):
+            emit(args, kwargs)
+            return fn(*args, **kwargs)
+
+        sync_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
+        return sync_wrapper
 
 
-def _make_file_handler(log_filepath: Path) -> logging.Handler:
-    h = logging.FileHandler(log_filepath, encoding="utf-8")
-    h.setLevel(logging.DEBUG)
-    h.setFormatter(logging.Formatter(_FMT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
-    return h
+_default = AppLogger()
+LOG_DIR = _default.log_dir
 
 
 def get_logger() -> logging.Logger:
-    """全局 AgentDemo logger（懒初始化控制台 handler）。"""
-    global _logger
-    if _logger is None:
-        _logger = logging.getLogger("AgentDemo")
-        _logger.setLevel(logging.DEBUG)
-        _logger.propagate = False
-        if not _logger.handlers:
-            _logger.addHandler(_make_console_handler())
-    return _logger
+    return _default.get_logger()
+
+
+def set_user_notify_callback(fn: Optional[Callable[[str], None]]) -> None:
+    _default.set_user_notify_callback(fn)
 
 
 def setup_task_logger(task_name: str = "task") -> logging.Logger:
-    """按任务名创建带时间戳的日志文件，并重置控制台与文件 handler。"""
-    global _logger, _current_log_file
-
-    safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in task_name)[:50]
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filepath = LOG_DIR / f"{safe}_{ts}.log"
-
-    _logger = logging.getLogger("AgentDemo")
-    _logger.setLevel(logging.DEBUG)
-    _logger.propagate = False
-    _logger.handlers.clear()
-    _logger.addHandler(_make_console_handler())
-    _logger.addHandler(_make_file_handler(log_filepath))
-
-    _current_log_file = log_filepath
-    _logger.info(f"日志文件已创建: {log_filepath}")
-    return _logger
-
-
-_session_log_files: dict[str, Path] = {}
+    return _default.setup_task_logger(task_name)
 
 
 def setup_session_logger(session_name: str) -> logging.Logger:
-    """同一会话名复用同一日志文件（不含时间戳）。"""
-    global _logger, _current_log_file
-
-    safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in session_name)[:50]
-    if safe_name not in _session_log_files:
-        _session_log_files[safe_name] = LOG_DIR / f"{safe_name}.log"
-    log_filepath = _session_log_files[safe_name]
-
-    if _current_log_file == log_filepath and _logger is not None:
-        return _logger
-
-    _logger = logging.getLogger("AgentDemo")
-    _logger.setLevel(logging.DEBUG)
-    _logger.propagate = False
-    for h in _logger.handlers[:]:
-        if isinstance(h, logging.FileHandler):
-            h.close()
-        _logger.removeHandler(h)
-    _logger.addHandler(_make_console_handler())
-    _logger.addHandler(_make_file_handler(log_filepath))
-
-    _current_log_file = log_filepath
-    return _logger
+    return _default.setup_session_logger(session_name)
 
 
-def debug(msg, *args, **kwargs):
-    get_logger().debug(msg, *args, **kwargs)
+def wrap_tools_for_user_notify(tools: List[Any]) -> List[Any]:
+    return _default.wrap_tools_for_user_notify(tools)
 
 
-def info(msg, *args, **kwargs):
-    get_logger().info(msg, *args, **kwargs)
+def debug(msg: Any, *args: Any, **kwargs: Any) -> None:
+    _default.debug(msg, *args, **kwargs)
 
 
-def warning(msg, *args, **kwargs):
-    get_logger().warning(msg, *args, **kwargs)
+def info(msg: Any, *args: Any, **kwargs: Any) -> None:
+    _default.info(msg, *args, **kwargs)
 
 
-def error(msg, *args, **kwargs):
-    get_logger().error(msg, *args, **kwargs)
+def warning(msg: Any, *args: Any, **kwargs: Any) -> None:
+    _default.warning(msg, *args, **kwargs)
 
+
+def error(msg: Any, *args: Any, **kwargs: Any) -> None:
+    _default.error(msg, *args, **kwargs)
+
+
+def log_conversation_user(text: str) -> None:
+    """任务日志中显式标记用户输入（与模型输出区分）。"""
+    body = (text or "").strip() or "（空）"
+    _default.get_logger().info("[用户]\n%s", body)
+
+
+def log_conversation_model(text: str) -> None:
+    """任务日志中显式标记模型 / 助手回复。"""
+    body = (text or "").strip() or "（无输出）"
+    _default.get_logger().info("[模型]\n%s", body)
+
+
+def log_conversation_task_summary(text: str) -> None:
+    """多 Worker 编排阶段产生的汇总文本（非单轮 Coordinator 直连输出时可用）。"""
+    body = (text or "").strip() or "（无汇总）"
+    _default.get_logger().info("[任务汇总]\n%s", body)
