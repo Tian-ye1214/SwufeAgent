@@ -10,7 +10,6 @@ from typing import Any
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 import logger
-from logger import LOG_DIR
 
 
 def _safe_segment(s: str, max_len: int = 80) -> str:
@@ -25,7 +24,7 @@ class ConversationLog:
         self._name = _safe_segment(name, 40)
         self._date = _safe_segment(date, 16)
         self._topic = _safe_segment(topic, 80)
-        path = LOG_DIR / "conversations" / self._name / self._date / self._topic
+        path = logger.LOG_DIR / "conversations" / self._name / self._date / self._topic
         if sub_id:
             path = path / _safe_segment(sub_id, 60)
         self._dir = path
@@ -45,7 +44,7 @@ class ConversationLog:
             try:
                 await asyncio.to_thread(self._write, base, snap, extra)
             except Exception as e:
-                logger.get_logger().debug("conversation_log 写入失败: %s", e)
+                logger.error("conversation_log 写入失败: %s", e)
 
         try:
             asyncio.get_running_loop().create_task(_job())

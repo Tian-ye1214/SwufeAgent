@@ -2,97 +2,145 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
-from logger import get_logger
+import logger
 
-logger = get_logger()
+try:
+    from dotenv import dotenv_values
+except ImportError:
+    dotenv_values = None  # type: ignore[misc, assignment]
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+DOTENV_FILE = (Path(__file__).resolve().parent / ".." / ".env").resolve()
 
 _CONFIG: dict[str, Any] | None = None
+
+
+def _dotenv_map() -> dict[str, str]:
+    if not dotenv_values or not DOTENV_FILE.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for k, v in (dotenv_values(DOTENV_FILE) or {}).items():
+        if v is None or not str(v).strip():
+            continue
+        out[str(k).strip()] = str(v).strip()
+    return out
 
 
 def load_config() -> dict[str, Any]:
     global _CONFIG
     if not CONFIG_FILE.is_file():
-        raise FileNotFoundError(f"缺少配置文件: {CONFIG_FILE}，请创建 config.json（含 api_base、api_key、models）。")
+        raise FileNotFoundError(
+            f"缺少配置文件: {CONFIG_FILE}，请创建 config.json（含 BASE_URL、API_KEY、models 等）。"
+        )
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         _CONFIG = json.load(f)
     return _CONFIG
 
 
-def get_config() -> dict[str, Any]:
+def settings() -> dict[str, Any]:
     if _CONFIG is None:
         load_config()
     assert _CONFIG is not None
     return _CONFIG
 
 
+def get_env(key: str, **kwargs: Any) -> str:
+    w = bool(kwargs.pop("warn", True))
+    default = str(kwargs.pop("default", ""))
+    if kwargs:
+        raise TypeError(f"get_env: 不支持的参数 {set(kwargs)}")
+
+    v = (_dotenv_map().get(key) or "").strip()
+    if v:
+        return v
+
+    raw = settings().get(key)
+    if raw is not None and not isinstance(raw, (dict, list)):
+        v = (raw or "").strip() if isinstance(raw, str) else str(raw).strip()
+    else:
+        v = ""
+    if v:
+        return v
+    if w and not default:
+        logger.warning("未配置 %r，请在 .env 或 config.json 根中填写。", key)
+    return default
+
+
 def save_config(cfg: dict[str, Any] | None = None) -> None:
     global _CONFIG
-    cfg = cfg if cfg is not None else get_config()
+    cfg = cfg if cfg is not None else settings()
     _CONFIG = cfg
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
-def get_api_base() -> str:
-    c = (get_config().get("api_base") or "").strip()
-    if c:
-        return c
-    return (os.environ.get("BASE_URL") or "").strip()
+def _reasoning_effort_to_model_thinking(val: Any) -> Any | None:
+    if val is None:
+        return None
 
-
-def get_api_key() -> str:
-    c = (get_config().get("api_key") or "").strip()
-    if c:
-        return c
-    return (os.environ.get("API_KEY") or "").strip()
-
-
-def apply_api_to_process_env() -> None:
-    """将当前配置中的 api_base / api_key 同步到进程环境，供依赖环境变量的代码使用。"""
-    cfg = get_config()
-    base = (cfg.get("api_base") or "").strip()
-    key = (cfg.get("api_key") or "").strip()
-    if base:
-        os.environ["BASE_URL"] = base
-    if key:
-        os.environ["API_KEY"] = key
+    s = str(val).strip().lower()
+    if s in ("none", "off", "false"):
+        return False
+    for level in ("minimal", "low", "medium", "high", "xhigh"):
+        if s == level:
+            return level
+    logger.warning("思考力度默认配置为medium")
+    return "medium"
 
 
 def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
     if role not in ("manager", "worker", "coordinator"):
         raise ValueError(f"未知角色: {role}")
-    m = get_config()["models"][role]
+    m = settings()["models"][role]
     name = m["name"]
-    params = {
+    params: dict[str, Any] = {
         "temperature": float(m["temperature"]),
         "max_tokens": int(m["max_tokens"]),
     }
+    thinking = _reasoning_effort_to_model_thinking(m.get("reasoning_effort"))
+    if thinking is not None:
+        params["thinking"] = thinking
     return name, params
+
+
+def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
+    """
+    与 DeepSeek 官方 /chat/completions 体一致，供 httpx 直连时合并到 JSON（见文档 thinking + reasoning_effort）：
+    - 启用：\"thinking\": {\"type\": \"enabled\"}，以及 \"reasoning_effort\" 档位字符串；
+    - 关闭：\"thinking\": {\"type\": \"disabled\"}（不再带 reasoning_effort）；
+    - 未配置 thinking（get_model_and_params 未写入）：返回 {}，与旧行为一致。
+    """
+    th = model_params.get("thinking")
+    if th is None:
+        return {}
+    if th is False:
+        return {"thinking": {"type": "disabled"}}
+    if th is True:
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": "medium"}
+    if isinstance(th, str):
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": th}
+    return {}
 
 
 def set_model_name(role: str, model_name: str) -> None:
     if role not in ("manager", "worker", "coordinator"):
         raise ValueError(f"未知角色: {role}")
-    cfg = get_config()
+    cfg = settings()
     cfg["models"][role]["name"] = model_name.strip()
     save_config(cfg)
 
 
-def set_api(api_base: str | None, api_key: str | None) -> None:
-    cfg = get_config()
-    if api_base is not None:
-        cfg["api_base"] = api_base.strip()
+def set_api(base_url: str | None = None, api_key: str | None = None) -> None:
+    cfg = settings()
+    if base_url is not None:
+        cfg["BASE_URL"] = base_url.strip()
     if api_key is not None:
-        cfg["api_key"] = api_key.strip()
+        cfg["API_KEY"] = api_key.strip()
     save_config(cfg)
-    apply_api_to_process_env()
 
 CONTEXT_ROLE_KEYS = frozenset({"coordinator", "manager", "worker"})
 
@@ -131,7 +179,7 @@ def get_context_config(role: str) -> dict[str, Any]:
     if role not in CONTEXT_ROLE_KEYS:
         role = "coordinator"
         logger.warning("警告，发现未知role，默认配置为coordinator")
-    raw_root = get_config().get("context")
+    raw_root = settings().get("context")
     out: dict[str, Any] = {}
     if not isinstance(raw_root, dict):
         return out

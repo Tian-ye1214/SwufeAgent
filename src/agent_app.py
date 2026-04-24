@@ -1,7 +1,6 @@
 import app_config
 
 app_config.load_config()
-app_config.apply_api_to_process_env()
 
 from prompt import get_manager_system_prompt, get_coordinator_system_prompt, load_prompt
 from tools.BasicTools import BasicToolkit
@@ -22,12 +21,12 @@ from ModelGateway.ModelChecker import (
     estimate_history_tokens_async,
     format_context_usage_line,
     get_effective_max_context_async,
+    prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
 from app_config import get_context_config, get_model_and_params
 from cli_commands import handle_slash_command
 import logger
-from logger import LOG_DIR, log_conversation_model, log_conversation_task_summary, log_conversation_user
 import traceback
 import time
 import asyncio
@@ -58,7 +57,7 @@ class AgentSystem:
         self._current_attachments: list = []
         self._long_term_memory = LongTermMemory()
         self._long_term_memory.refresh_from_disk_sync()
-        self._short_term_memory = ShortTermMemory(log_root=LOG_DIR)
+        self._short_term_memory = ShortTermMemory(log_root=logger.LOG_DIR)
         self._toolkit = BasicToolkit(
             self._skills_manager,
             extra_worker_tools=[
@@ -78,6 +77,7 @@ class AgentSystem:
             on_activate=self._orchestrator.set_conversation_session,
             on_reset=self._orchestrator.clear_conversation_session,
         )
+        self._context_prewarmed = False
 
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
@@ -99,7 +99,9 @@ class AgentSystem:
         """每轮 Coordinator 结束后：后台静默合并长期记忆（不阻塞当前回复）。"""
         msgs = list(history.messages)
         asyncio.create_task(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
-        asyncio.create_task(self._long_term_memory.consolidate_from_logs(LOG_DIR, silent=True))
+        asyncio.create_task(
+            self._long_term_memory.consolidate_from_logs(logger.LOG_DIR, silent=True)
+        )
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -140,7 +142,7 @@ class AgentSystem:
                 directly relevant to the user's question.
         """
         self._session_logs.ensure(user_input or "task")
-        log_conversation_user(user_input)
+        logger.log_conversation_user(user_input)
 
         manager_tools = [
             self._task_manager.create_todo_list,
@@ -181,7 +183,7 @@ class AgentSystem:
                 logger.info("已自动压缩 Manager 上下文（达到配置阈值）")
         except Exception as ce:
             logger.warning("Manager 自动压缩失败: %s", ce)
-        log_conversation_model(result.output)
+        logger.log_conversation_model(result.output)
 
         logger.info("=" * 60)
         logger.info("第二阶段: 多Worker并行执行任务")
@@ -190,7 +192,7 @@ class AgentSystem:
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
             user_input, attachments=attachments
         )
-        log_conversation_task_summary(final_summary)
+        logger.log_conversation_task_summary(final_summary)
 
         logger.info("=" * 60)
         logger.info("第三阶段: 生成最终报告")
@@ -225,7 +227,7 @@ class AgentSystem:
             logger.info("=" * 60)
             logger.info("🎯 最终回复")
             logger.info("=" * 60)
-            log_conversation_model(final_text)
+            logger.log_conversation_model(final_text)
             return final_text
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
@@ -242,10 +244,10 @@ class AgentSystem:
                         logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
                 except Exception as ce:
                     logger.warning("Manager 自动压缩失败: %s", ce)
-                log_conversation_model(final_result.output)
+                logger.log_conversation_model(final_result.output)
                 return final_result.output
             except Exception:
-                log_conversation_task_summary(final_summary)
+                logger.log_conversation_task_summary(final_summary)
                 return final_summary
 
     async def _execute_task_with_worker(
@@ -308,13 +310,19 @@ class AgentSystem:
             message = user_message_from_text(message)
         self._current_attachments = message.attachments
 
+        if not self._context_prewarmed:
+            await prewarm_effective_max_contexts_by_role_async(
+                reason="非 CLI 首条任务（预取三角色）"
+            )
+            self._context_prewarmed = True
+
         await self._sync_skills_for_user_turn()
 
         if history is None:
             history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
-        log_conversation_user(_format_user_log_text(message))
+        logger.log_conversation_user(_format_user_log_text(message))
 
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
@@ -338,7 +346,7 @@ class AgentSystem:
         elapsed = time.time() - start_time
 
         logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
-        log_conversation_model(result.output)
+        logger.log_conversation_model(result.output)
         history.update(result)
         extra: dict = {"kind": "coordinator"}
         if conversation_log_extra:
@@ -358,6 +366,8 @@ class AgentSystem:
         logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出")
         logger.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
         logger.info("=" * 60)
+        await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
+        self._context_prewarmed = True
 
         is_first_input = True
         history = ChatHistory()

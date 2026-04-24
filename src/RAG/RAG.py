@@ -4,6 +4,8 @@ import asyncio
 import os
 from typing import Any
 
+import logger
+from app_config import get_env
 from RAG.DataBase import EmbedDataBase
 from RAG.embedding_function import embed_texts, rerank_documents
 
@@ -21,7 +23,7 @@ class RAG:
         *,
         use_rerank: bool | None = None,
     ):
-        base = db_path or os.environ.get("RAG_DB_PATH") or os.path.join(
+        base = db_path or get_env("RAG_DB_PATH", warn=False) or os.path.join(
             os.getcwd(), "data", "rag_lancedb"
         )
         self._db = EmbedDataBase(base, table_name=table_name, vector_dim=vector_dim)
@@ -33,6 +35,12 @@ class RAG:
 
     async def connect(self) -> None:
         await self._db.connect()
+        logger.info(
+            "RAG: 已连接 LanceDB, path=%s, table=%s, rerank=%s",
+            self._db.db_path,
+            self._db.table_name,
+            self._use_rerank,
+        )
 
     def format_instruction(
         self,
@@ -132,33 +140,54 @@ class RAG:
             for i in range(len(chunks))
         ]
         await self._db.add_vectors(rows)
-        return len(chunks)
+        n = len(chunks)
+        logger.info("RAG ingest: source=%s, chunks=%d", source, n)
+        return n
 
     async def retrieve(self, query: str) -> list[dict[str, Any]]:
         if not query.strip():
             return []
 
-        query_vector = await self._embed_query(query)
-        candidates = await self._db.vector_search(query_vector, top_k=self.vector_search_limit)
-        if not candidates:
-            return []
+        qprev = (query[:120] + "…") if len(query) > 120 else query
+        try:
+            query_vector = await self._embed_query(query)
+            candidates = await self._db.vector_search(
+                query_vector, top_k=self.vector_search_limit
+            )
+            n_cand = len(candidates)
+            logger.info(
+                "RAG retrieve: query_len=%d, query_preview=%r, vector_hits=%d, rerank=%s",
+                len(query),
+                qprev,
+                n_cand,
+                self._use_rerank,
+            )
+            if not candidates:
+                return []
 
-        if not self._use_rerank:
-            return [
-                {
-                    **candidates[i],
-                    "relevance_score": 1.0 - (i / max(self.vector_search_limit, 1)) * 0.01,
-                }
-                for i in range(self.vector_search_limit)
-            ]
+            if not self._use_rerank:
+                out = [
+                    {
+                        **candidates[i],
+                        "relevance_score": 1.0 - (i / max(self.vector_search_limit, 1)) * 0.01,
+                    }
+                    for i in range(self.vector_search_limit)
+                ]
+                logger.info("RAG retrieve: 无 rerank，返回条数=%d", len(out))
+                return out
 
-        texts = [c["text"] for c in candidates]
-        ranked = await rerank_documents(query, texts, top_n=min(self.final_top_k, len(texts)))
+            texts = [c["text"] for c in candidates]
+            top_n = min(self.final_top_k, len(texts)) if self.final_top_k is not None else len(texts)
+            ranked = await rerank_documents(query, texts, top_n=top_n)
 
-        results: list[dict[str, Any]] = []
-        for r in ranked:
-            idx = int(r["index"])
-            if 0 <= idx < len(candidates):
-                merged = {**candidates[idx], "relevance_score": r["relevance_score"]}
-                results.append(merged)
-        return results
+            results: list[dict[str, Any]] = []
+            for r in ranked:
+                idx = int(r["index"])
+                if 0 <= idx < len(candidates):
+                    merged = {**candidates[idx], "relevance_score": r["relevance_score"]}
+                    results.append(merged)
+            logger.info("RAG retrieve: rerank 后返回条数=%d", len(results))
+            return results
+        except Exception as e:
+            logger.error("RAG retrieve 失败: %s", e, exc_info=True)
+            raise

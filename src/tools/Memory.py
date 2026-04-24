@@ -11,9 +11,7 @@ from typing import Any
 
 import json_repair
 import httpx
-from logger import get_logger
-
-logger = get_logger()
+import logger
 from pydantic_ai import BinaryContent
 from pydantic_ai.messages import (
     BaseToolReturnPart,
@@ -23,7 +21,11 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from app_config import get_api_base, get_api_key, get_model_and_params
+from app_config import (
+    get_env,
+    get_model_and_params,
+    http_chat_completions_thinking_extras,
+)
 from RAG.RAG import RAG as RAGEngineCls
 
 
@@ -208,12 +210,7 @@ class ShortTermMemory:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     async def _ingest_log_delta_unlocked(self) -> None:
-        try:
-            from logger import LOG_DIR
-        except Exception:
-            return
-
-        root = (self._log_root if self._log_root is not None else LOG_DIR).resolve()
+        root = (self._log_root if self._log_root is not None else logger.LOG_DIR).resolve()
         if not root.is_dir():
             return
 
@@ -561,9 +558,9 @@ class LongTermMemory:
             t = t[-self._CONSOLIDATION_MAX_TRANSCRIPT_CHARS :]
             t = "[... earlier content truncated ...]\n\n" + t
 
-        api_base = get_api_base().rstrip("/")
-        api_key = get_api_key()
-        model_name, _ = get_model_and_params("worker")
+        api_base = get_env("BASE_URL", warn=False).rstrip("/")
+        api_key = get_env("API_KEY", warn=False)
+        model_name, w_params = get_model_and_params("worker")
         ex = self._PROMPT_BODY_ELIDE
         existing = ""
         if include_existing_memory:
@@ -578,12 +575,13 @@ class LongTermMemory:
         body = f"## 待分析的全文\n\n{t}"
         user_content = f"{template}\n\n{existing}{body}"
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": model_name,
             "messages": [{"role": "user", "content": user_content}],
             "max_tokens": self._CONSOLIDATION_MAX_OUTPUT_TOKENS,
             "temperature": 0.2,
         }
+        payload.update(http_chat_completions_thinking_extras(w_params))
 
         async with httpx.AsyncClient(http2=True, timeout=90.0) as client:
             resp = await client.post(
@@ -611,9 +609,7 @@ class LongTermMemory:
         log_root 默认使用 logger.LOG_DIR（进程当前工作目录下的 logs）。
         """
         try:
-            from logger import LOG_DIR
-
-            root = (log_root if log_root is not None else LOG_DIR).resolve()
+            root = (log_root if log_root is not None else logger.LOG_DIR).resolve()
         except Exception:
             if not silent:
                 raise
@@ -636,7 +632,6 @@ class LongTermMemory:
                 if not log_files:
                     return
 
-                any_added = False
                 pending_state: dict[str, int] = {}
 
                 for fp in log_files:
@@ -684,8 +679,7 @@ class LongTermMemory:
                                     header + piece,
                                     truncate=False,
                                 )
-                                if await self._apply_consolidation_parsed(parsed):
-                                    any_added = True
+                                await self._apply_consolidation_parsed(parsed)
                                 ci = cj
                             pos += len(raw)
                             last_committed = pos

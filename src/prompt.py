@@ -171,6 +171,11 @@ system_info = format_system_info()
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 
 
+def format_prompt_current_time() -> str:
+    """系统提示中使用的当前本地时间（构建提示时取一次）。"""
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def load_prompt(filename: str) -> str:
     """从 prompts 目录加载 markdown 格式的 prompt 模板"""
     filepath = os.path.join(PROMPTS_DIR, filename)
@@ -215,7 +220,7 @@ def get_manager_system_prompt(
     """构建 Manager Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("manager_system.md")
     return template.format(
-        current_time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        current_time=format_prompt_current_time(),
         system_info=system_info,
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
@@ -230,6 +235,7 @@ def get_worker_system_prompt(
     """构建 Worker Agent 的系统提示（含当前 skills 摘要，随热加载更新）。"""
     template = load_prompt("worker_system.md")
     return template.format(
+        current_time=format_prompt_current_time(),
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
         long_term_memory=format_long_term_memory_for_prompt(memory_injection),
@@ -243,6 +249,7 @@ def get_coordinator_system_prompt(
     """构建 Coordinator 的系统提示（含 Skills 目录说明与当前摘要）。"""
     template = load_prompt("coordinator_system.md")
     return template.format(
+        current_time=format_prompt_current_time(),
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
         long_term_memory=format_long_term_memory_for_prompt(memory_injection),

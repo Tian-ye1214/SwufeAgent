@@ -1,27 +1,30 @@
 {
-  "api_base": "",
-  "api_key": "",
-  "SILICONFLOW_base": "",
-  "SILICONFLOW_key": "",
+  "BASE_URL": "",
+  "API_KEY": "",
+  "SILICONFLOW_BASE": "",
+  "SILICONFLOW_KEY": "",
   "RAG_models": {
     "embedding": "Qwen/Qwen3-Embedding-0.6B",
     "reranker": "Qwen/Qwen3-Reranker-0.6B"
   },
   "models": {
     "manager": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 32768,
+      "reasoning_effort": "high"
     },
     "worker": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-flash",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 32768,
+      "reasoning_effort": "medium"
     },
     "coordinator": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 32768,
+      "reasoning_effort": "medium"
     }
   },
   "context": {

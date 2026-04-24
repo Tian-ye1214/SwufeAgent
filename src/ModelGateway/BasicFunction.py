@@ -1,7 +1,6 @@
 import json
 import re
 
-from dotenv import load_dotenv
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
@@ -17,9 +16,7 @@ from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 import logger
-from app_config import get_api_base, get_api_key
-
-load_dotenv()
+from app_config import get_env
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
@@ -180,8 +177,8 @@ class ThinkingProvider(OpenAIProvider):
 
 
 def create_model(model_name: str, parameter: dict):
-    api_key = get_api_key() or None
-    api_base = get_api_base() or None
+    api_key = get_env("API_KEY", warn=False) or None
+    api_base = get_env("BASE_URL", warn=False) or None
     if 'gemini' in model_name:
         provider = GoogleProvider(
             base_url='https://api.zhizengzeng.com/google',

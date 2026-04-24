@@ -15,6 +15,7 @@ for _p in (_SRC, _API_DIR):
         sys.path.insert(0, _p)
 os.chdir(_REPO_ROOT)
 
+from app_config import get_env
 from agent_app import AgentSystem
 from tools.Memory import ChatHistory, UserMessage
 import logger
@@ -58,9 +59,13 @@ class BotBase:
             f"{self.__class__.__name__}_ctx", default=None
         )
         if self._ENV_AGENT_TIMEOUT:
-            self.AGENT_RUN_TIMEOUT_S = float(os.environ.get(self._ENV_AGENT_TIMEOUT, self.AGENT_RUN_TIMEOUT_S))
+            s = get_env(self._ENV_AGENT_TIMEOUT, default="", warn=False)
+            if s.strip():
+                self.AGENT_RUN_TIMEOUT_S = float(s)
         if self._ENV_SEND_TIMEOUT:
-            self.SEND_REPLY_TIMEOUT_S = float(os.environ.get(self._ENV_SEND_TIMEOUT, self.SEND_REPLY_TIMEOUT_S))
+            s = get_env(self._ENV_SEND_TIMEOUT, default="", warn=False)
+            if s.strip():
+                self.SEND_REPLY_TIMEOUT_S = float(s)
 
     @property
     def platform_tag(self) -> str:

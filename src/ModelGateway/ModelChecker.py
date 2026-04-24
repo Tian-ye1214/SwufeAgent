@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
+import threading
 from copy import deepcopy
 from typing import Any, Literal
 
 import httpx
 import json_repair
 
-from app_config import get_api_base, get_api_key, get_context_config, get_model_and_params
-from prompt import load_prompt
+from app_config import (
+    get_context_config,
+    get_env,
+    get_model_and_params,
+    http_chat_completions_thinking_extras,
+)
+from prompt import format_prompt_current_time, load_prompt
 from tools.Memory import ChatHistory, _pydantic_messages_to_text
 
 try:
@@ -19,7 +26,7 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
-from logger import get_logger
+import logger
 
 from pydantic_ai.messages import (
     BaseToolCallPart,
@@ -31,28 +38,21 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-logger = get_logger()
-
 AgentRole = Literal["coordinator", "manager", "worker"]
 
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
+
+_MODELS_LIST_LOCK = threading.Lock()
+_MODELS_LIST_BY_KEY: dict[str, list[dict]] = {}
+_MODELS_LIST_FAILED_KEYS: set[str] = set()
 
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
 _COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
 _COMPRESS_MARKER_LEGACY = "<<COMPRESS_JSON>>"
 
 
-def _tiktoken_encoder():
-    if not tiktoken:
-        return None
-    try:
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        return None
-
-
 def _count_text_tokens(text: str, chars_per_token: float) -> int:
-    enc = _tiktoken_encoder()
+    enc = tiktoken.get_encoding("cl100k_base")
     if enc and text:
         return len(enc.encode(text))
     return max(1, int(len(text) / max(chars_per_token, 0.25)))
@@ -117,6 +117,67 @@ def _parse_context_int_from_obj(obj: dict[str, Any]) -> int | None:
     return None
 
 
+def _models_list_cache_key(url: str, key: str) -> str:
+    h = hashlib.sha256(f"{url}\0{key}".encode("utf-8")).hexdigest()[:20]
+    return f"{url}#{h}"
+
+
+def _get_models_list_items(*, role: AgentRole) -> list[dict] | None:
+    """
+    拉取 /v1/models 解析后的 data 项列表。同一 (BASE_URL, API_KEY, path) 只请求一次。
+    无有效 URL 或 key 时返回 None；成功但列表为空时返回 []。
+    """
+    ctx = get_context_config(role)
+    base = (get_env("BASE_URL", warn=False) or "").strip().rstrip("/")
+    if not base:
+        return None
+    path = str(ctx.get("models_api_path") or "v1/models").strip().strip("/")
+    if base.endswith("/v1") and path.startswith("v1/"):
+        path = path[3:].lstrip("/")
+    url = f"{base}/{path}"
+    key = (get_env("API_KEY", warn=False) or "").strip()
+    cache_key = _models_list_cache_key(url, key)
+    with _MODELS_LIST_LOCK:
+        if cache_key in _MODELS_LIST_FAILED_KEYS:
+            return None
+        if cache_key in _MODELS_LIST_BY_KEY:
+            return _MODELS_LIST_BY_KEY[cache_key]
+
+    if not key:
+        with _MODELS_LIST_LOCK:
+            if cache_key not in _MODELS_LIST_FAILED_KEYS:
+                logger.warning(
+                    "拉取模型列表跳过：无有效 API Key；请在 .env 或 config.json 中设置 API_KEY"
+                    "（与对话接口同一组凭据）。"
+                )
+            _MODELS_LIST_FAILED_KEYS.add(cache_key)
+        return None
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    items: list[dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            r = client.get(url, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        with _MODELS_LIST_LOCK:
+            _MODELS_LIST_FAILED_KEYS.add(cache_key)
+        logger.warning("拉取模型列表失败 (%s): %s", url, e)
+        return None
+
+    logger.info
+
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        items = [x for x in data["data"] if isinstance(x, dict)]
+    elif isinstance(data, list):
+        items = [x for x in data if isinstance(x, dict)]
+
+    with _MODELS_LIST_LOCK:
+        _MODELS_LIST_BY_KEY[cache_key] = items
+    return items
+
+
 def fetch_model_context_from_api(model_id: str, *, role: AgentRole) -> int | None:
     """GET /v1/models（可配置 path），从匹配 id 的条目中解析上下文长度。"""
     ctx = get_context_config(role)
@@ -124,32 +185,9 @@ def fetch_model_context_from_api(model_id: str, *, role: AgentRole) -> int | Non
     if isinstance(raw_max, int) and raw_max > 0:
         return raw_max
 
-    base = (get_api_base() or "").strip().rstrip("/")
-    if not base:
+    items = _get_models_list_items(role=role)
+    if items is None:
         return None
-    path = str(ctx.get("models_api_path") or "v1/models").strip().strip("/")
-    if base.endswith("/v1") and path.startswith("v1/"):
-        path = path[3:].lstrip("/")
-    url = f"{base}/{path}"
-    key = (get_api_key() or "").strip()
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-
-    try:
-        with httpx.Client(timeout=30.0) as client:
-            r = client.get(url, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        logger.warning("拉取模型列表失败 (%s): %s", url, e)
-        return None
-
-    items: list[dict[str, Any]] = []
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        items = [x for x in data["data"] if isinstance(x, dict)]
-    elif isinstance(data, list):
-        items = [x for x in data if isinstance(x, dict)]
 
     best: int | None = None
     for item in items:
@@ -420,12 +458,13 @@ def _call_compressor_llm(
     max_tokens = int(comp.get("max_tokens") or 4096)
     temperature = float(comp.get("temperature") or 0.2)
 
-    base = (get_api_base() or "").strip().rstrip("/")
-    key = (get_api_key() or "").strip()
+    base = (get_env("BASE_URL", warn=False) or "").strip().rstrip("/")
+    key = (get_env("API_KEY", warn=False) or "").strip()
     if not base:
-        raise RuntimeError("api_base 为空，无法调用压缩模型")
+        raise RuntimeError("BASE_URL 为空，无法调用压缩模型")
 
-    payload = {
+    _, role_params = get_model_and_params(role)
+    payload: dict = {
         "model": model.strip(),
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -434,6 +473,7 @@ def _call_compressor_llm(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    payload.update(http_chat_completions_thinking_extras(role_params))
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -511,7 +551,9 @@ def compress_history(history: ChatHistory, *, role: AgentRole, force: bool = Fal
     middle_for_prompt = _middle_with_summarized_tools(messages, middle_lo, middle_hi)
     excerpt = _pydantic_messages_to_text(middle_for_prompt)
 
-    system_prompt = load_prompt("context_compress_structured_system.md")
+    system_prompt = load_prompt("context_compress_structured_system.md").format(
+        current_time=format_prompt_current_time()
+    )
     user_parts: list[str] = []
     if prev_summary and prev_summary.strip():
         user_parts.append(
@@ -536,14 +578,39 @@ def compress_history(history: ChatHistory, *, role: AgentRole, force: bool = Fal
     return True
 
 
+_ALL_AGENT_ROLES: tuple[AgentRole, ...] = ("coordinator", "manager", "worker")
+
+
+async def get_effective_max_contexts_by_role_async() -> dict[AgentRole, int]:
+    async def one(r: AgentRole) -> tuple[AgentRole, int]:
+        n = await asyncio.to_thread(get_effective_max_context, None, role=r)
+        return r, n
+
+    pairs = await asyncio.gather(*(one(r) for r in _ALL_AGENT_ROLES))
+    return dict(pairs)
+
+
+async def prewarm_effective_max_contexts_by_role_async(
+    *, reason: str = "startup"
+) -> dict[AgentRole, int]:
+    """并行预取三角色有效上下文并写入缓存；在启动与切换模型后调用。返回各角色 max token。"""
+    d = await get_effective_max_contexts_by_role_async()
+    logger.info(
+        "各角色有效上下文 token 上限（%s）: coordinator=%s, manager=%s, worker=%s",
+        reason,
+        d["coordinator"],
+        d["manager"],
+        d["worker"],
+    )
+    return d
+
+
 async def get_effective_max_context_async(
     model_name: str | None = None,
     *,
     role: AgentRole | None = None,
 ) -> int:
-    return await asyncio.to_thread(
-        lambda: get_effective_max_context(model_name, role=role)
-    )
+    return await asyncio.to_thread(lambda: get_effective_max_context(model_name, role=role))
 
 
 async def estimate_history_tokens_async(

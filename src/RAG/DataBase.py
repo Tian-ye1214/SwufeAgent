@@ -5,6 +5,8 @@ import os
 from typing import Any
 
 import lancedb
+import logger
+from app_config import get_env
 from lancedb.pydantic import LanceModel, Vector
 
 
@@ -31,7 +33,7 @@ class EmbedDataBase:
     ):
         self.db_path = db_path
         self.table_name = table_name
-        self.vector_dim = vector_dim or int(os.environ.get("RAG_EMBED_DIM", "1024"))
+        self.vector_dim = vector_dim or int(get_env("RAG_EMBED_DIM", default="1024", warn=False) or "1024")
         self._schema = vector_record_schema(self.vector_dim)
         self._db = None
         self._table = None
@@ -46,6 +48,12 @@ class EmbedDataBase:
                 self._table = None
 
         await asyncio.to_thread(_connect)
+        logger.debug(
+            "RAG DB: connect path=%s, table=%s, has_table=%s",
+            self.db_path,
+            self.table_name,
+            self._table is not None,
+        )
 
     async def ensure_connected(self) -> None:
         if self._db is None:
@@ -86,6 +94,7 @@ class EmbedDataBase:
                 self._table.add(pydantic_rows)
 
         await asyncio.to_thread(_add)
+        logger.debug("RAG DB: add_vectors, rows=%d, table=%s", len(rows), self.table_name)
 
     async def vector_search(
         self, query_embedding: list[float], top_k: int = 10
@@ -113,7 +122,9 @@ class EmbedDataBase:
                 )
             return out
 
-        return await asyncio.to_thread(_search)
+        out = await asyncio.to_thread(_search)
+        logger.debug("RAG DB: vector_search top_k=%s, results=%d", top_k, len(out))
+        return out
 
     async def drop_table(self) -> None:
         await self.ensure_connected()
