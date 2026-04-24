@@ -223,10 +223,6 @@ class AgentSystem:
                     logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
             except Exception as ce:
                 logger.warning("Manager 自动压缩失败: %s", ce)
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info("🎯 最终回复")
-            logger.info("=" * 60)
             logger.log_conversation_model(final_text)
             return final_text
         except Exception as e:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import threading
@@ -26,6 +25,8 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
+from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
+
 import logger
 
 from pydantic_ai.messages import (
@@ -41,10 +42,6 @@ from pydantic_ai.messages import (
 AgentRole = Literal["coordinator", "manager", "worker"]
 
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
-
-_MODELS_LIST_LOCK = threading.Lock()
-_MODELS_LIST_BY_KEY: dict[str, list[dict]] = {}
-_MODELS_LIST_FAILED_KEYS: set[str] = set()
 
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
 _COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
@@ -97,107 +94,174 @@ def estimate_history_tokens(
     return sum(estimate_message_tokens(m, cpt) for m in messages)
 
 
-def _parse_context_int_from_obj(obj: dict[str, Any]) -> int | None:
-    keys_priority = (
-        "context_length",
-        "max_model_len",
-        "context_window",
-        "max_context_tokens",
-        "model_context_length",
-    )
-    for k in keys_priority:
-        v = obj.get(k)
-        if isinstance(v, int) and v >= 4096:
-            return v
-        if isinstance(v, float) and v >= 4096:
-            return int(v)
-    v = obj.get("max_tokens")
-    if isinstance(v, int) and v >= 8192:
-        return v
+
+_MODEL_VARIANT_SUFFIXES = re.compile(
+    r"[-_](?:pro|flash|turbo|latest|preview|mini|lite|plus|max|ultra|fast|small|medium|large|long|free|instruct)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_model_name(name: str) -> str:
+    """去掉供应商前缀和常见变体后缀，得到模型家族名。"""
+    n = name.strip().lower()
+    if "/" in n:
+        n = n.rsplit("/", 1)[-1]
+    n = re.sub(r"-\d{6,8}$", "", n)
+    while True:
+        stripped = _MODEL_VARIANT_SUFFIXES.sub("", n)
+        if stripped == n:
+            break
+        n = stripped
+    return n
+
+
+def _lookup_genai_prices(name: str) -> int | None:
+    try:
+        snap = _genai_get_snapshot()
+    except Exception:
+        return None
+    for provider in snap.providers:
+        for m in provider.models:
+            if m.is_match(name) and isinstance(m.context_window, int) and m.context_window >= 4096:
+                return m.context_window
     return None
 
 
-def _models_list_cache_key(url: str, key: str) -> str:
-    h = hashlib.sha256(f"{url}\0{key}".encode("utf-8")).hexdigest()[:20]
-    return f"{url}#{h}"
+_LITELLM_LOCK = threading.Lock()
+_LITELLM_CONTEXT_MAP: dict[str, int] | None = None   # max_input_tokens（降级 max_tokens）
+_LITELLM_OUTPUT_MAP: dict[str, int] | None = None    # max_output_tokens
+_LITELLM_FAILED = False
+_LITELLM_URL_USED: str | None = None
 
 
-def _get_models_list_items(*, role: AgentRole) -> list[dict] | None:
-    """
-    拉取 /v1/models 解析后的 data 项列表。同一 (BASE_URL, API_KEY, path) 只请求一次。
-    无有效 URL 或 key 时返回 None；成功但列表为空时返回 []。
-    """
-    ctx = get_context_config(role)
-    base = (get_env("BASE_URL", warn=False) or "").strip().rstrip("/")
-    if not base:
-        return None
-    path = str(ctx.get("models_api_path") or "v1/models").strip().strip("/")
-    if base.endswith("/v1") and path.startswith("v1/"):
-        path = path[3:].lstrip("/")
-    url = f"{base}/{path}"
-    key = (get_env("API_KEY", warn=False) or "").strip()
-    cache_key = _models_list_cache_key(url, key)
-    with _MODELS_LIST_LOCK:
-        if cache_key in _MODELS_LIST_FAILED_KEYS:
-            return None
-        if cache_key in _MODELS_LIST_BY_KEY:
-            return _MODELS_LIST_BY_KEY[cache_key]
+def _litellm_model_prices_json_url() -> str | None:
+    for role in ("coordinator", "manager", "worker"):
+        raw = get_context_config(role).get("litellm_model_prices_json_url")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
 
-    if not key:
-        with _MODELS_LIST_LOCK:
-            if cache_key not in _MODELS_LIST_FAILED_KEYS:
-                logger.warning(
-                    "拉取模型列表跳过：无有效 API Key；请在 .env 或 config.json 中设置 API_KEY"
-                    "（与对话接口同一组凭据）。"
-                )
-            _MODELS_LIST_FAILED_KEYS.add(cache_key)
-        return None
 
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    items: list[dict[str, Any]] = []
+def _ensure_litellm_maps() -> None:
+    """拉取 litellm JSON 并填充 _LITELLM_CONTEXT_MAP 与 _LITELLM_OUTPUT_MAP，只拉一次。"""
+    global _LITELLM_CONTEXT_MAP, _LITELLM_OUTPUT_MAP, _LITELLM_FAILED, _LITELLM_URL_USED
+    url = _litellm_model_prices_json_url()
+    cache_key = url or "__no_url__"
+    with _LITELLM_LOCK:
+        if _LITELLM_CONTEXT_MAP is not None and _LITELLM_URL_USED == cache_key:
+            return
+        if _LITELLM_FAILED and _LITELLM_URL_USED == cache_key:
+            return
+    if not url:
+        logger.warning(
+            "未配置 litellm_model_prices_json_url（可在 context.defaults 或任一 context.coordinator|manager|worker 下设置），"
+            "跳过 litellm 模型元数据拉取"
+        )
+        with _LITELLM_LOCK:
+            _LITELLM_CONTEXT_MAP = {}
+            _LITELLM_OUTPUT_MAP = {}
+            _LITELLM_URL_USED = cache_key
+            _LITELLM_FAILED = False
+        return
     try:
-        with httpx.Client(timeout=30.0) as client:
-            r = client.get(url, headers=headers)
+        with httpx.Client(timeout=15.0) as client:
+            r = client.get(url)
             r.raise_for_status()
-            data = r.json()
+            raw = r.json()
     except Exception as e:
-        with _MODELS_LIST_LOCK:
-            _MODELS_LIST_FAILED_KEYS.add(cache_key)
-        logger.warning("拉取模型列表失败 (%s): %s", url, e)
-        return None
+        logger.warning("拉取 litellm 模型元数据失败 (%s): %s", url, e)
+        with _LITELLM_LOCK:
+            _LITELLM_FAILED = True
+            _LITELLM_URL_USED = cache_key
+        return
 
-    logger.info
-
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        items = [x for x in data["data"] if isinstance(x, dict)]
-    elif isinstance(data, list):
-        items = [x for x in data if isinstance(x, dict)]
-
-    with _MODELS_LIST_LOCK:
-        _MODELS_LIST_BY_KEY[cache_key] = items
-    return items
-
-
-def fetch_model_context_from_api(model_id: str, *, role: AgentRole) -> int | None:
-    """GET /v1/models（可配置 path），从匹配 id 的条目中解析上下文长度。"""
-    ctx = get_context_config(role)
-    raw_max = ctx.get("max_context_tokens")
-    if isinstance(raw_max, int) and raw_max > 0:
-        return raw_max
-
-    items = _get_models_list_items(role=role)
-    if items is None:
-        return None
-
-    best: int | None = None
-    for item in items:
-        mid = str(item.get("id") or item.get("model") or "")
-        if mid != model_id and model_id not in mid and mid not in model_id:
+    ctx_map: dict[str, int] = {}
+    out_map: dict[str, int] = {}
+    for key, info in raw.items():
+        if not isinstance(info, dict):
             continue
-        n = _parse_context_int_from_obj(item)
-        if n and (best is None or n > best):
-            best = n
-    return best
+        low = key.lower()
+        bare = key.rsplit("/", 1)[-1].lower() if "/" in key else None
+
+        # 上下文窗口：max_input_tokens 优先，降级 max_tokens（litellm legacy）
+        ctx = info.get("max_input_tokens") or info.get("max_tokens")
+        if isinstance(ctx, int) and ctx >= 4096:
+            ctx_map[low] = ctx
+            if bare and bare not in ctx_map:
+                ctx_map[bare] = ctx
+
+        # 最大输出 tokens
+        out = info.get("max_output_tokens")
+        if isinstance(out, int) and out >= 1:
+            out_map[low] = out
+            if bare and bare not in out_map:
+                out_map[bare] = out
+
+    with _LITELLM_LOCK:
+        _LITELLM_CONTEXT_MAP = ctx_map
+        _LITELLM_OUTPUT_MAP = out_map
+        _LITELLM_URL_USED = cache_key
+        _LITELLM_FAILED = False
+    logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
+
+
+def _litellm_lookup(name: str, m: dict[str, int] | None) -> int | None:
+    if not m:
+        return None
+    low = name.lower()
+    if low in m:
+        return m[low]
+    bare = low.rsplit("/", 1)[-1] if "/" in low else None
+    if bare and bare in m:
+        return m[bare]
+    return None
+
+
+def _lookup_litellm(name: str) -> int | None:
+    _ensure_litellm_maps()
+    return _litellm_lookup(name, _LITELLM_CONTEXT_MAP)
+
+
+def _lookup_litellm_output(name: str) -> int | None:
+    _ensure_litellm_maps()
+    return _litellm_lookup(name, _LITELLM_OUTPUT_MAP)
+
+
+def _multi_source_lookup(name: str, fns: tuple) -> int | None:
+    """按顺序尝试多个查找函数，精确匹配优先，再用归一化名兜底。"""
+    for fn in fns:
+        val = fn(name)
+        if val:
+            return val
+    normalized = _normalize_model_name(name)
+    if normalized != name.lower():
+        for fn in fns:
+            val = fn(normalized)
+            if val:
+                return val
+    return None
+
+
+def lookup_model_context(model_name: str) -> int | None:
+    """多源查找上下文窗口：内置字典 > genai-prices > litellm(max_input_tokens/max_tokens)。"""
+    return _multi_source_lookup(model_name, (_lookup_genai_prices, _lookup_litellm))
+
+
+def lookup_model_max_output_tokens(model_name: str) -> int | None:
+    """多源查找最大输出 tokens：内置字典 > litellm(max_output_tokens)。"""
+    return _multi_source_lookup(model_name, (_lookup_litellm_output,))
+
+
+def merge_litellm_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """
+    根据 litellm 元数据覆盖模型参数：
+    - max_output_tokens 覆盖 params['max_tokens']
+    """
+    out = dict(params)
+    max_out = lookup_model_max_output_tokens(model_name)
+    if isinstance(max_out, int) and max_out > 0:
+        out["max_tokens"] = max_out
+    return out
 
 
 def get_effective_max_context(
@@ -205,14 +269,11 @@ def get_effective_max_context(
     *,
     role: AgentRole | None = None,
 ) -> int:
-    """有效上下文上限：config 覆盖 > 缓存/API > default_context_tokens。未指定模型时默认 coordinator。"""
+    """有效上下文上限：config 覆盖 > 缓存 > 多源查找 > default_context_tokens。"""
     r: AgentRole = role if role is not None else "coordinator"
     ctx = get_context_config(r)
     fallback = int(ctx["default_context_tokens"])
-    if model_name is None:
-        mid = get_model_and_params(r)[0]
-    else:
-        mid = model_name
+    mid = model_name if model_name is not None else get_model_and_params(r)[0]
 
     raw_max = ctx.get("max_context_tokens")
     if isinstance(raw_max, int) and raw_max > 0:
@@ -222,12 +283,13 @@ def get_effective_max_context(
     if mid in _CONTEXT_LIMIT_CACHE:
         return _CONTEXT_LIMIT_CACHE[mid]
 
-    api_val = fetch_model_context_from_api(mid, role=r)
-    if api_val and api_val > 0:
-        _CONTEXT_LIMIT_CACHE[mid] = api_val
-        return api_val
+    looked = lookup_model_context(mid)
+    if looked:
+        logger.info("模型 %s 上下文窗口已从模型元数据解析: %d", mid, looked)
+        _CONTEXT_LIMIT_CACHE[mid] = looked
+        return looked
 
-    logger.warning("无法从 API 解析上下文，使用 default_context_tokens=%s（模型 %s）", fallback, mid)
+    logger.warning("无法解析模型上下文窗口，使用 default_context_tokens=%s（模型 %s）", fallback, mid)
     _CONTEXT_LIMIT_CACHE[mid] = fallback
     return fallback
 

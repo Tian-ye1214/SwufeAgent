@@ -1,6 +1,8 @@
 import json
 import re
+from collections.abc import Sequence
 
+from openai.types import chat as oa_chat
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
@@ -10,16 +12,53 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai import Agent, ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 import logger
-from app_config import get_env
+from app_config import get_env, http_chat_completions_thinking_extras
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
+
+    def _ensure_assistant_reasoning_content_echo(
+        self,
+        pydantic_messages: Sequence[ModelMessage],
+        openai_messages: list[oa_chat.ChatCompletionMessageParam],
+    ) -> None:
+        """DeepSeek V4+：思考模式 + 工具调用时，必须在后续请求中回传上一轮的 reasoning_content。"""
+        profile = OpenAIModelProfile.from_profile(self.profile)
+        field = profile.openai_chat_thinking_field
+        send_mode = profile.openai_chat_send_back_thinking_parts
+        if not field or send_mode is False:
+            return
+        assistant_idxs = [i for i, m in enumerate(openai_messages) if m.get('role') == 'assistant']
+        responses = [m for m in pydantic_messages if isinstance(m, ModelResponse)]
+        if len(assistant_idxs) != len(responses):
+            logger.warning(
+                'reasoning 回传对齐跳过: assistant 条数=%s ModelResponse 条数=%s',
+                len(assistant_idxs),
+                len(responses),
+            )
+            return
+        for oi, mr in zip(assistant_idxs, responses):
+            thinking_text = '\n\n'.join(p.content for p in mr.parts if isinstance(p, ThinkingPart))
+            if not thinking_text:
+                continue
+            msg = openai_messages[oi]
+            if msg.get(field) != thinking_text:
+                msg[field] = thinking_text
+
+    async def _map_messages(
+        self,
+        messages: Sequence[ModelMessage],
+        model_request_parameters: ModelRequestParameters,
+    ) -> list[oa_chat.ChatCompletionMessageParam]:
+        openai_messages = await super()._map_messages(messages, model_request_parameters)
+        self._ensure_assistant_reasoning_content_echo(messages, openai_messages)
+        return openai_messages
 
     async def request(
         self,
@@ -171,6 +210,7 @@ class ThinkingProvider(OpenAIProvider):
         return OpenAIModelProfile(
             json_schema_transformer=OpenAIJsonSchemaTransformer,
             supports_json_object_output=True,
+            supports_thinking=True,
             openai_chat_thinking_field='reasoning_content',
             openai_chat_send_back_thinking_parts='field',
         ).update(profile)
@@ -197,15 +237,25 @@ def create_model(model_name: str, parameter: dict):
         
         if use_thinking_provider:
             provider = ThinkingProvider(base_url=api_base, api_key=api_key)
+            param = dict(parameter)
+            extra: dict = {}
+            eb = param.get('extra_body')
+            if isinstance(eb, dict):
+                extra = dict(eb)
+            extra.update(http_chat_completions_thinking_extras(param))
+            if extra:
+                param['extra_body'] = extra
+            settings_kw = param
         else:
             provider = OpenAIProvider(
                 base_url=api_base,
                 api_key=api_key,
             )
+            settings_kw = parameter
         return JsonRepairOpenAIChatModel(
             model_name,
             provider=provider,
-            settings=ModelSettings(**parameter)
+            settings=ModelSettings(**settings_kw)
         )
 
 

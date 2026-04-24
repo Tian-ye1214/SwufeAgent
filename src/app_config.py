@@ -104,7 +104,9 @@ def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
     thinking = _reasoning_effort_to_model_thinking(m.get("reasoning_effort"))
     if thinking is not None:
         params["thinking"] = thinking
-    return name, params
+    from ModelGateway.ModelChecker import merge_litellm_into_model_params
+
+    return name, merge_litellm_into_model_params(name, params)
 
 
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
