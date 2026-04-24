@@ -41,7 +41,7 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         except json.JSONDecodeError:
             pass
 
-        logger.warning("tool=%s args 非法JSON（前500字符）: %s", tool_name, args_str[:500])
+        logger.warning("tool=%s args 非法JSON: %s", tool_name, args_str)
 
         try:
             fixed = json_repair.loads(args_str)
