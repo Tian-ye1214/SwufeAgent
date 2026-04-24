@@ -17,11 +17,17 @@ from tools.Memory import (
 )
 
 from tools.conversation_log import SessionConversationLogs
-from BasicFunction import create_agent
-from app_config import get_model_and_params
+from ModelGateway.BasicFunction import create_agent
+from ModelGateway.ModelChecker import (
+    estimate_history_tokens_async,
+    format_context_usage_line,
+    get_effective_max_context_async,
+    maybe_auto_compress_async,
+)
+from app_config import get_context_config, get_model_and_params
 from cli_commands import handle_slash_command
 import logger
-from logger import LOG_DIR
+from logger import LOG_DIR, log_conversation_model, log_conversation_task_summary, log_conversation_user
 import traceback
 import time
 import asyncio
@@ -30,6 +36,17 @@ from typing import Tuple
 from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
+
+
+def _format_user_log_text(message: UserMessage) -> str:
+    """供任务 .log 落盘：用户可见文本 + 附件说明。"""
+    t = (message.text or "").strip()
+    n = len(message.attachments or [])
+    if n and t:
+        return f"{t}\n（含 {n} 个多媒体附件）"
+    if n:
+        return f"（仅 {n} 个多媒体附件，无文本）"
+    return t or "（空文本）"
 
 
 class AgentSystem:
@@ -123,6 +140,7 @@ class AgentSystem:
                 directly relevant to the user's question.
         """
         self._session_logs.ensure(user_input or "task")
+        log_conversation_user(user_input)
 
         manager_tools = [
             self._task_manager.create_todo_list,
@@ -158,7 +176,12 @@ class AgentSystem:
         self._session_logs.for_agent("manager").save(
             self._manager_history.messages, extra={"kind": "manager", "phase": "planning"}
         )
-        logger.info(result.output)
+        try:
+            if await maybe_auto_compress_async(self._manager_history, role="manager"):
+                logger.info("已自动压缩 Manager 上下文（达到配置阈值）")
+        except Exception as ce:
+            logger.warning("Manager 自动压缩失败: %s", ce)
+        log_conversation_model(result.output)
 
         logger.info("=" * 60)
         logger.info("第二阶段: 多Worker并行执行任务")
@@ -167,7 +190,7 @@ class AgentSystem:
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
             user_input, attachments=attachments
         )
-        logger.info(final_summary)
+        log_conversation_task_summary(final_summary)
 
         logger.info("=" * 60)
         logger.info("第三阶段: 生成最终报告")
@@ -193,11 +216,16 @@ class AgentSystem:
             self._session_logs.for_agent("manager").save(
                 self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
             )
+            try:
+                if await maybe_auto_compress_async(self._manager_history, role="manager"):
+                    logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
+            except Exception as ce:
+                logger.warning("Manager 自动压缩失败: %s", ce)
             logger.info("")
             logger.info("=" * 60)
             logger.info("🎯 最终回复")
             logger.info("=" * 60)
-            logger.info(final_text)
+            log_conversation_model(final_text)
             return final_text
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
@@ -209,8 +237,15 @@ class AgentSystem:
                 self._session_logs.for_agent("manager").save(
                     self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
                 )
+                try:
+                    if await maybe_auto_compress_async(self._manager_history, role="manager"):
+                        logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
+                except Exception as ce:
+                    logger.warning("Manager 自动压缩失败: %s", ce)
+                log_conversation_model(final_result.output)
                 return final_result.output
             except Exception:
+                log_conversation_task_summary(final_summary)
                 return final_summary
 
     async def _execute_task_with_worker(
@@ -279,6 +314,7 @@ class AgentSystem:
             history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
+        log_conversation_user(_format_user_log_text(message))
 
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
@@ -302,39 +338,55 @@ class AgentSystem:
         elapsed = time.time() - start_time
 
         logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
-        logger.info(result.output)
+        log_conversation_model(result.output)
         history.update(result)
         extra: dict = {"kind": "coordinator"}
         if conversation_log_extra:
             extra.update(conversation_log_extra)
         self._session_logs.for_agent("coordinator").save(history.messages, extra=extra)
+        try:
+            if await maybe_auto_compress_async(history, role="coordinator"):
+                logger.info("已自动压缩 Coordinator 上下文（达到配置阈值）")
+        except Exception as ce:
+            logger.warning("Coordinator 自动压缩失败: %s", ce)
         await self._after_coordinator_turn(history)
         return history, result.output
 
     async def run_interactive(self):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
-        log = logger.get_logger()
-        log.info("=" * 60)
-        log.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出")
-        log.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
-        log.info("=" * 60)
+        logger.info("=" * 60)
+        logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出")
+        logger.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
+        logger.info("=" * 60)
 
         is_first_input = True
         history = ChatHistory()
 
         while True:
             try:
+                if history.messages:
+                    ctx_cfg = get_context_config("coordinator")
+                    cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
+                    max_tok = await get_effective_max_context_async(role="coordinator")
+                    used_tok = await estimate_history_tokens_async(
+                        history.messages, chars_per_token=cpt, role="coordinator"
+                    )
+                    print(format_context_usage_line(used_tok, max_tok))
                 raw_input = (await asyncio.to_thread(input, "\n\U0001f4dd 请输入您的任务: ")).strip()
                 if not raw_input:
                     continue
 
                 if raw_input.startswith("/"):
                     await self._sync_skills_for_user_turn()
-                    await asyncio.to_thread(handle_slash_command, raw_input, self._skills_manager)
+                    await handle_slash_command(
+                        raw_input,
+                        self._skills_manager,
+                        coordinator_history=history,
+                    )
                     continue
 
                 if raw_input.lower() in ["quit", "exit", "退出"]:
-                    log.info("👋 再见！")
+                    logger.info("👋 再见！")
                     break
 
                 if "新任务" in raw_input:
@@ -348,7 +400,7 @@ class AgentSystem:
 
                 message = await asyncio.to_thread(user_message_from_cli_input, raw_input)
                 if message.attachments:
-                    log.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
+                    logger.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
 
                 if is_first_input:
                     task_name = message.text[:30].replace(" ", "_")
@@ -361,25 +413,25 @@ class AgentSystem:
                 )
 
             except KeyboardInterrupt:
-                log.info("\n\n👋 程序已中断，再见！")
+                logger.info("\n\n👋 程序已中断，再见！")
                 break
 
             except ModelHTTPError as e:
                 body = e.body or {}
                 code = body.get("code", "") if isinstance(body, dict) else ""
                 if code == "data_inspection_failed":
-                    log.warning(
+                    logger.warning(
                         "\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n"
                         '   请尝试换一种表达方式重新输入，或输入"新任务"清空上下文后重试。'
                     )
                 else:
-                    log.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
-                    log.error(f"详细信息:\n{traceback.format_exc()}")
+                    logger.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
+                    logger.error(f"详细信息:\n{traceback.format_exc()}")
                     self._task_manager.reset()
 
             except Exception as e:
-                log.error(f"\n❌ 未预期的系统错误: {e}")
-                log.error(f"详细信息:\n{traceback.format_exc()}")
+                logger.error(f"\n❌ 未预期的系统错误: {e}")
+                logger.error(f"详细信息:\n{traceback.format_exc()}")
                 self._task_manager.reset()
 
 

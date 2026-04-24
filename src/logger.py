@@ -212,12 +212,12 @@ class AppLogger:
         if len(line) > self._MAX_NOTIFY_LEN:
             line = line[: self._MAX_NOTIFY_LEN - 1] + "…"
         cb = self._notify_cv.get()
-        log = self.get_logger()
+        logger = self.get_logger()
         if cb:
-            log.info(line)
+            logger.info(line)
             self._run_notify(cb, line)
         else:
-            log.debug(line)
+            logger.debug(line)
 
     def _wrap_tool(self, fn: Callable) -> Callable:
         if getattr(fn, "_notify_tool_wrapped", False):
@@ -284,3 +284,21 @@ def warning(msg: Any, *args: Any, **kwargs: Any) -> None:
 
 def error(msg: Any, *args: Any, **kwargs: Any) -> None:
     _default.error(msg, *args, **kwargs)
+
+
+def log_conversation_user(text: str) -> None:
+    """任务日志中显式标记用户输入（与模型输出区分）。"""
+    body = (text or "").strip() or "（空）"
+    _default.get_logger().info("[用户]\n%s", body)
+
+
+def log_conversation_model(text: str) -> None:
+    """任务日志中显式标记模型 / 助手回复。"""
+    body = (text or "").strip() or "（无输出）"
+    _default.get_logger().info("[模型]\n%s", body)
+
+
+def log_conversation_task_summary(text: str) -> None:
+    """多 Worker 编排阶段产生的汇总文本（非单轮 Coordinator 直连输出时可用）。"""
+    body = (text or "").strip() or "（无汇总）"
+    _default.get_logger().info("[任务汇总]\n%s", body)

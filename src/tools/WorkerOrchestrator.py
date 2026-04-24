@@ -7,9 +7,11 @@ import traceback
 
 import logger
 from prompt import get_worker_system_prompt, load_prompt
-from BasicFunction import create_agent
+from ModelGateway.BasicFunction import create_agent
+from ModelGateway.ModelChecker import maybe_auto_compress_async
 from app_config import get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
+from tools.Memory import ChatHistory
 from tools.conversation_log import ConversationLog
 
 if TYPE_CHECKING:
@@ -157,6 +159,7 @@ class WorkerOrchestrator:
             )
 
         prompt = [prompt_text, *attachments] if attachments else prompt_text
+        adhoc_history = ChatHistory()
 
         try:
             logger.info("=" * 50)
@@ -167,13 +170,19 @@ class WorkerOrchestrator:
             logger.info("=" * 50)
 
             start_time = time.time()
-            result = await worker_agent.run(prompt)
+            result = await worker_agent.run(prompt, message_history=adhoc_history.messages)
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
 
+            adhoc_history.update(result)
+            try:
+                await maybe_auto_compress_async(adhoc_history, role="worker")
+            except Exception as ce:
+                logger.warning("Worker 上下文自动压缩失败: %s", ce)
+
             self._worker_adhoc_seq += 1
             self._save_worker_messages(
-                list(result.all_messages()),
+                list(adhoc_history.messages),
                 sub_id=f"adhoc-{self._worker_adhoc_seq}",
                 extra={"mode": "simple"},
             )
@@ -335,13 +344,21 @@ class WorkerOrchestrator:
             logger.info(f"{'='*50}")
 
             start_time = time.time()
-            result = await worker_agent.run(prompt_input)
+            result = await worker_agent.run(
+                prompt_input, message_history=task.worker_chat_history.messages
+            )
             elapsed = time.time() - start_time
 
             logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
 
+            task.worker_chat_history.update(result)
+            try:
+                await maybe_auto_compress_async(task.worker_chat_history, role="worker")
+            except Exception as ce:
+                logger.warning("[%s] Worker 上下文自动压缩失败: %s", worker_id, ce)
+
             self._save_worker_messages(
-                list(result.all_messages()),
+                list(task.worker_chat_history.messages),
                 sub_id=f"task-{task.id}",
                 extra={"mode": "parallel", "task_id": task.id},
             )

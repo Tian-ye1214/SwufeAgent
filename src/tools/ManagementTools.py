@@ -6,6 +6,8 @@ from enum import Enum
 import json_repair as json
 import logger
 
+from tools.Memory import ChatHistory
+
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -25,6 +27,7 @@ class Task:
     max_retries: int = 3
     dependencies: List[str] = field(default_factory=list)
     failure_history: List[str] = field(default_factory=list)
+    worker_chat_history: ChatHistory = field(default_factory=ChatHistory)
 
 
 class TaskManager:

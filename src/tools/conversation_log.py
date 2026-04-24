@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-import logger as logger_mod
+import logger
 from logger import LOG_DIR
 
 
@@ -45,7 +45,7 @@ class ConversationLog:
             try:
                 await asyncio.to_thread(self._write, base, snap, extra)
             except Exception as e:
-                logger_mod.get_logger().debug("conversation_log 写入失败: %s", e)
+                logger.get_logger().debug("conversation_log 写入失败: %s", e)
 
         try:
             asyncio.get_running_loop().create_task(_job())

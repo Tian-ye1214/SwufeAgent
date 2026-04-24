@@ -11,15 +11,17 @@ from typing import Any
 
 import json_repair
 import httpx
-import logger as _logger
+from logger import get_logger
+
+logger = get_logger()
 from pydantic_ai import BinaryContent
 from pydantic_ai.messages import (
+    BaseToolReturnPart,
     ModelRequest,
     ModelResponse,
     TextPart,
     ToolCallPart,
     UserPromptPart,
-    ToolReturnPart,
 )
 from app_config import get_api_base, get_api_key, get_model_and_params
 from RAG.RAG import RAG as RAGEngineCls
@@ -88,10 +90,11 @@ class ChatHistory:
         history.update(result)
     """
 
-    __slots__ = ("_messages",)
+    __slots__ = ("_messages", "_compress_summary_state")
 
     def __init__(self):
         self._messages: list = []
+        self._compress_summary_state: str | None = None
 
     def update(self, result) -> None:
         """从 RunResult / StreamedRunResult 提取完整消息列表并保存。"""
@@ -99,6 +102,20 @@ class ChatHistory:
 
     def reset(self) -> None:
         self._messages = []
+        self._compress_summary_state = None
+
+    def set_messages(self, messages: list) -> None:
+        """直接替换消息列表（供上下文压缩等使用）。"""
+        self._messages = list(messages)
+
+    @property
+    def compress_summary_state(self) -> str | None:
+        """上一轮结构化压缩摘要 JSON，供迭代合并。"""
+        return self._compress_summary_state
+
+    @compress_summary_state.setter
+    def compress_summary_state(self, value: str | None) -> None:
+        self._compress_summary_state = value
 
     @property
     def messages(self) -> list:
@@ -122,8 +139,9 @@ def _pydantic_messages_to_text(messages: list) -> str:
                     content = part.content
                     if isinstance(content, str):
                         lines.append(f"[USER]: {content}")
-                elif isinstance(part, ToolReturnPart):
-                    lines.append(f"[TOOL_RESULT:{part.tool_name}]: {part.content[:500]}")
+                elif isinstance(part, BaseToolReturnPart):
+                    c = part.model_response_str() if hasattr(part, "model_response_str") else str(part.content)
+                    lines.append(f"[TOOL_RESULT:{part.tool_name}]: {c[:500]}")
         elif isinstance(msg, ModelResponse):
             for part in msg.parts:
                 if isinstance(part, TextPart):
@@ -479,7 +497,7 @@ class LongTermMemory:
                     continue
                 err = self._scan(text)
                 if err:
-                    _logger.warning(f"长期记忆合并已跳过 {key}：{err}")
+                    logger.warning(f"长期记忆合并已跳过 {key}：{err}")
                     continue
                 self._set_body(key, text)
                 await asyncio.to_thread(self._save_sync, key)
@@ -599,7 +617,7 @@ class LongTermMemory:
         except Exception:
             if not silent:
                 raise
-            _logger.warning("长期记忆（日志）：无法解析日志目录。")
+            logger.warning("长期记忆（日志）：无法解析日志目录。")
             return
 
         async with self._logs_consolidate_lock:
@@ -684,7 +702,7 @@ class LongTermMemory:
             except Exception as e:
                 if not silent:
                     raise
-                _logger.warning(f"长期记忆（日志）合并失败（已忽略）: {e}")
+                logger.warning(f"长期记忆（日志）合并失败（已忽略）: {e}")
 
     async def consolidate_from_messages(self, messages: list, *, silent: bool = True) -> None:
         """
@@ -703,12 +721,12 @@ class LongTermMemory:
 
             parsed = await self._consolidation_chat_and_parse(template, transcript)
             if await self._apply_consolidation_parsed(parsed):
-                _logger.info("长期记忆已根据本轮对话更新（SOUL/USER 整篇）。")
+                logger.info("长期记忆已根据本轮对话更新（SOUL/USER 整篇）。")
 
         except Exception as e:
             if not silent:
                 raise
-            _logger.warning(f"长期记忆合并失败（已忽略）: {e}")
+            logger.warning(f"长期记忆合并失败（已忽略）: {e}")
             
     async def add(self, target: str, content: str) -> str:
         """

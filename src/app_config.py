@@ -6,6 +6,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+from logger import get_logger
+
+logger = get_logger()
+
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 
 _CONFIG: dict[str, Any] | None = None
@@ -89,3 +93,55 @@ def set_api(api_base: str | None, api_key: str | None) -> None:
         cfg["api_key"] = api_key.strip()
     save_config(cfg)
     apply_api_to_process_env()
+
+CONTEXT_ROLE_KEYS = frozenset({"coordinator", "manager", "worker"})
+
+
+def _merge_context_layer(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """将一层 overlay 合并进 base（处理 compressor 子 dict）。"""
+    out = dict(base)
+    for k, v in overlay.items():
+        if k in CONTEXT_ROLE_KEYS:
+            continue
+        if k == "compressor" and isinstance(v, dict):
+            prev = out.get("compressor")
+            comp = dict(prev) if isinstance(prev, dict) else {}
+            comp.update(v)
+            out["compressor"] = comp
+        else:
+            out[k] = v
+    return out
+
+
+def _context_root_is_per_role(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    return any(
+        k in CONTEXT_ROLE_KEYS and isinstance(raw.get(k), dict) for k in CONTEXT_ROLE_KEYS
+    )
+
+
+def get_context_config(role: str) -> dict[str, Any]:
+    """
+    返回指定角色合并后的 context 配置（不写回文件）。
+    - 新格式：context.coordinator / context.manager / context.worker 各自独立；
+      可选 context.defaults 先于角色层合并。
+    - 旧格式：context 为单层扁平 dict（无角色子对象），则三角色共用该配置。
+    """
+    if role not in CONTEXT_ROLE_KEYS:
+        role = "coordinator"
+        logger.warning("警告，发现未知role，默认配置为coordinator")
+    raw_root = get_config().get("context")
+    out: dict[str, Any] = {}
+    if not isinstance(raw_root, dict):
+        return out
+    if _context_root_is_per_role(raw_root):
+        defaults = raw_root.get("defaults")
+        if isinstance(defaults, dict):
+            out = _merge_context_layer(out, defaults)
+        role_raw = raw_root.get(role)
+        if isinstance(role_raw, dict):
+            out = _merge_context_layer(out, role_raw)
+    else:
+        out = _merge_context_layer(out, raw_root)
+    return out
