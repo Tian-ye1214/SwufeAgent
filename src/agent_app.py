@@ -370,24 +370,42 @@ class AgentSystem:
 
         while True:
             try:
-                if history.messages:
-                    ctx_cfg = get_context_config("coordinator")
-                    cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
-                    max_tok = await get_effective_max_context_async(role="coordinator")
-                    used_tok = await estimate_history_tokens_async(
-                        history.messages, chars_per_token=cpt, role="coordinator"
-                    )
-                    print(format_context_usage_line(used_tok, max_tok))
+                worker_histories = [
+                    t.worker_chat_history for t in self._task_manager.tasks.values()
+                ]
+                has_any_history = bool(history.messages) or bool(self._manager_history.messages)
+                if has_any_history:
+                    print("\n── 上下文占用 ──")
+                    roles_and_histories = [
+                        ("manager", "Manager", [self._manager_history]),
+                        ("coordinator", "Coordinator", [history]),
+                    ]
+                    for role, label, histories in roles_and_histories:
+                        ctx_cfg = get_context_config(role)
+                        cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
+                        max_tok = await get_effective_max_context_async(role=role)
+                        used_tok = 0
+                        for h in histories:
+                            if h.messages:
+                                used_tok += await estimate_history_tokens_async(
+                                    h.messages, chars_per_token=cpt, role=role
+                                )
+                        print(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
                 raw_input = (await asyncio.to_thread(input, "\n\U0001f4dd 请输入您的任务: ")).strip()
                 if not raw_input:
                     continue
 
                 if raw_input.startswith("/"):
                     await self._sync_skills_for_user_turn()
+                    worker_histories = [
+                        t.worker_chat_history for t in self._task_manager.tasks.values()
+                    ]
                     await handle_slash_command(
                         raw_input,
                         self._skills_manager,
                         coordinator_history=history,
+                        manager_history=self._manager_history,
+                        worker_histories=worker_histories,
                     )
                     continue
 

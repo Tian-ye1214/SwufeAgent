@@ -5,6 +5,7 @@ python-dotenv
 httpx[http2]
 json-repair
 ddgs
+pyinstaller>=6.20.0
 
 requests
 playwright>=1.49.0

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import mimetypes
+import sys
 from ddgs import DDGS
 import logger
 import shlex
@@ -16,7 +17,12 @@ from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
 from tools.browser_session import PlaywrightBrowserSession
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+def _get_runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+_REPO_ROOT = _get_runtime_root()
 
 
 class BasicToolkit:

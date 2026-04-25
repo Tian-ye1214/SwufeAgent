@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from app_config import get_context_config, get_env, get_model_and_params, set_api, set_model_name
+from typing import Iterable
+
+from app_config import get_env, get_model_and_params, set_api, set_model_name
 from ModelGateway.ModelChecker import (
     compress_history_async,
-    estimate_history_tokens_async,
-    format_context_usage_line,
-    get_effective_max_context_async,
     prewarm_effective_max_contexts_by_role_async,
 )
 from prompt import get_skills_as_in_system_prompt
@@ -23,7 +22,7 @@ def print_cli_help() -> None:
         "/agent    查看 Manager / Worker / Coordinator 的模型名与 temperature、max_tokens；\n"
         "          切换: /agent <manager|worker|coordinator> <模型名称>\n"
         "/api      按提示修改 BASE_URL 与 API_KEY（写入 config.json，回车跳过单项）\n"
-        "/compress 主动压缩当前 Coordinator 对话上下文（Markdown 摘要）\n"
+        "/compress 主动压缩当前 Manager / Coordinator 对话上下文（Markdown 摘要）\n"
         "\n── 其他 ─────────────────────────────────────────────\n"
         "新任务     清空任务与对话上下文\n"
         "quit/exit  退出程序\n"
@@ -74,6 +73,8 @@ async def handle_slash_command(
     skills_manager: SkillsManager,
     *,
     coordinator_history: ChatHistory | None = None,
+    manager_history: ChatHistory | None = None,
+    worker_histories: Iterable[ChatHistory] | None = None,
 ) -> bool:
     """
     处理以 / 开头的输入行。
@@ -111,41 +112,41 @@ async def handle_slash_command(
         interactive_set_api()
         return True
     if cmd == "/compress":
-        if coordinator_history is None:
-            print("当前环境未绑定 Coordinator 历史，无法压缩。\n")
+        role_histories: list[tuple[str, str, list[ChatHistory]]] = [
+            ("manager", "Manager", [manager_history] if manager_history is not None else []),
+            ("coordinator", "Coordinator", [coordinator_history] if coordinator_history is not None else []),
+        ]
+        if not any(histories for _, _, histories in role_histories):
+            print("当前环境未绑定任何 Agent 历史，无法压缩。\n")
             return True
-        msgs = list(coordinator_history.messages)
-        if not msgs:
-            print("对话历史为空，无需压缩。\n")
-            return True
-        ctx = get_context_config("coordinator")
-        cpt = float(ctx["token_estimate_fallback_chars_per_token"])
-        max_t = await get_effective_max_context_async(role="coordinator")
-        before = await estimate_history_tokens_async(
-            msgs, chars_per_token=cpt, role="coordinator"
-        )
-        try:
-            did = await compress_history_async(
-                coordinator_history, role="coordinator", force=True
-            )
-        except Exception as e:
-            print(f"压缩失败: {e}\n")
-            return True
-        after = await estimate_history_tokens_async(
-            list(coordinator_history.messages),
-            chars_per_token=cpt,
-            role="coordinator",
-        )
-        if did:
-            print(
-                f"已压缩上下文: {format_context_usage_line(before, max_t)} → "
-                f"{format_context_usage_line(after, max_t)}\n"
-            )
-        else:
-            print(
-                f"未执行压缩（可能历史过短或头尾保护区重叠）。"
-                f"当前 {format_context_usage_line(after, max_t)}\n"
-            )
+
+        print("\n── 压缩结果（按角色）──")
+        for role, label, histories in role_histories:
+            if not histories:
+                print(f"  • {label}: 未绑定历史")
+                continue
+
+            compressed_count = 0
+            skipped_count = 0
+
+            try:
+                for h in histories:
+                    msgs = list(h.messages)
+                    if not msgs:
+                        skipped_count += 1
+                        continue
+                    did = await compress_history_async(h, role=role, force=True)
+                    if did:
+                        compressed_count += 1
+                    else:
+                        skipped_count += 1
+            except Exception as e:
+                print(f"  • {label}: 压缩失败: {e}")
+                continue
+
+            total = len(histories)
+            print(f"  • {label}: 已压缩 {compressed_count}，跳过 {skipped_count}，总计 {total}")
+        print("")
         return True
 
     print(f"未知命令 {cmd}，输入 /help 查看可用命令\n")
