@@ -25,7 +25,13 @@
       "temperature": 1.0,
       "max_tokens": 32768,
       "reasoning_effort": "medium"
-    }
+    },
+    "compressor": {
+      "name": "deepseek-v4-flash",
+      "temperature": 0.2,
+      "max_tokens": 2048,
+      "reasoning_effort": "medium"
+      }
   },
   "context": {
     "defaults": {
@@ -38,12 +44,7 @@
       "auto_compress_ratio": 0.5,
       "tail_reserve_ratio": 0.2,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     },
     "manager": {
       "max_context_tokens": null,
@@ -51,12 +52,7 @@
       "auto_compress_ratio": 0.5,
       "tail_reserve_ratio": 0.2,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     },
     "worker": {
       "max_context_tokens": null,
@@ -64,12 +60,13 @@
       "auto_compress_ratio": 0.5,
       "tail_reserve_ratio": 0.2,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     }
+  },
+  "conversation_log": {
+    "save_model_thinking_chain": true
+  },
+  "thinking": {
+    "type": "enable"
   }
 }

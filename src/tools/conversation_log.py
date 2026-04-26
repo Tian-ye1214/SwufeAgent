@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
+from app_config import settings
 import logger
 
 
@@ -64,6 +65,7 @@ class ConversationLog:
 
     def _to_readable(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
+        include_thinking = self._save_model_thinking_chain_enabled()
         for msg in raw:
             parts = msg.get("parts") or []
             if msg.get("kind") == "request":
@@ -74,15 +76,39 @@ class ConversationLog:
                         messages.append({"role": "tool", "name": p.get("tool_name"), "tool_call_id": p.get("tool_call_id"), "content": p.get("content")})
             elif msg.get("kind") == "response":
                 texts = [p.get("content") or "" for p in parts if p.get("part_kind") == "text"]
+                thinking_parts = [
+                    p.get("content") or ""
+                    for p in parts
+                    if p.get("part_kind") in ("thinking", "reasoning", "reasoning-content")
+                ]
                 tool_calls = [{"id": p.get("tool_call_id"), "name": p.get("tool_name"), "arguments": p.get("args")} for p in parts if p.get("part_kind") == "tool-call"]
                 entry: dict[str, Any] = {"role": "assistant"}
                 if text := "\n".join(t for t in texts if t).strip():
                     entry["content"] = text
+                if include_thinking:
+                    reasoning_content = msg.get("reasoning_content")
+                    chains: list[str] = []
+                    if isinstance(reasoning_content, str) and reasoning_content.strip():
+                        chains.append(reasoning_content.strip())
+                    chains.extend(t.strip() for t in thinking_parts if isinstance(t, str) and t.strip())
+                    if chains:
+                        entry["thinking_chain"] = "\n\n".join(chains)
                 if tool_calls:
                     entry["tool_calls"] = tool_calls
                 if len(entry) > 1:
                     messages.append(entry)
         return messages
+
+    def _save_model_thinking_chain_enabled(self) -> bool:
+        raw = settings().get("conversation_log")
+        if not isinstance(raw, dict):
+            return False
+        flag = raw.get("save_model_thinking_chain")
+        if isinstance(flag, bool):
+            return flag
+        if isinstance(flag, str):
+            return flag.strip().lower() in ("1", "true", "yes", "on")
+        return bool(flag)
 
     def _str_content(self, content: Any) -> str:
         if isinstance(content, str):

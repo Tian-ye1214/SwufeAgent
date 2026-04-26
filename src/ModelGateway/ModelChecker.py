@@ -510,22 +510,16 @@ def _call_compressor_llm(
     *,
     system_prompt: str,
     user_content: str,
-    role: AgentRole,
 ) -> str:
-    ctx = get_context_config(role)
-    comp = ctx["compressor"]
-    model = comp.get("model") if isinstance(comp.get("model"), str) else None
-    if not (model and model.strip()):
-        model = get_model_and_params(role)[0]
-    max_tokens = int(comp.get("max_tokens") or 4096)
-    temperature = float(comp.get("temperature") or 0.2)
+    model, comp_params = get_model_and_params("compressor")
+    max_tokens = int(comp_params["max_tokens"])
+    temperature = float(comp_params["temperature"])
 
     base = (get_env("BASE_URL", warn=False) or "").strip().rstrip("/")
     key = (get_env("API_KEY", warn=False) or "").strip()
     if not base:
         raise RuntimeError("BASE_URL 为空，无法调用压缩模型")
 
-    _, role_params = get_model_and_params(role)
     payload: dict = {
         "model": model.strip(),
         "messages": [
@@ -535,7 +529,7 @@ def _call_compressor_llm(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    payload.update(http_chat_completions_thinking_extras(role_params))
+    payload.update(http_chat_completions_thinking_extras(comp_params))
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -629,7 +623,7 @@ def compress_history(history: ChatHistory, *, role: AgentRole, force: bool = Fal
     user_content = "\n\n".join(user_parts)
 
     summary_md = _call_compressor_llm(
-        system_prompt=system_prompt, user_content=user_content, role=role
+        system_prompt=system_prompt, user_content=user_content
     )
     new_body = _build_compress_user_body(summary_md)
 

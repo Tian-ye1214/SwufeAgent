@@ -56,6 +56,8 @@ def save_config(cfg: dict[str, Any] | None = None) -> None:
 
 
 def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
+    from ModelGateway.ModelChecker import merge_litellm_into_model_params
+
     m = settings()["models"][role]
     name = m["name"]
     params: dict[str, Any] = {
@@ -66,27 +68,25 @@ def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
     if reff is not None:
         s = str(reff).strip().lower()
         if s in ("none", "off", "false"):
-            params["thinking"] = False
+            params["reasoning_effort"] = False
         elif s in ("minimal", "low", "medium", "high", "xhigh"):
-            params["thinking"] = s
+            params["reasoning_effort"] = s
         else:
-            params["thinking"] = "medium"
-    from ModelGateway.ModelChecker import merge_litellm_into_model_params
+            params["reasoning_effort"] = "medium"
+    else:
+        params["reasoning_effort"] = False
 
     return name, merge_litellm_into_model_params(name, params)
 
 
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
-    th = model_params.get("thinking")
-    if th is None:
-        return {}
-    if th is False:
-        return {"thinking": {"type": "disabled"}}
-    if th is True:
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": "medium"}
-    if isinstance(th, str):
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": th}
-    return {}
+    thinking_cfg = settings().get("thinking")
+    thinking_type = str(thinking_cfg.get("type", "")).strip().lower()
+    if thinking_type == "enable":
+        reasoning_effort = model_params.get("reasoning_effort")
+        if reasoning_effort not in ("none", "off", "false", False):
+            return {"thinking": {"type": "enable"}, "reasoning_effort": reasoning_effort}
+    return {"thinking": {"type": "disable"}}
 
 
 def set_model_name(role: str, model_name: str) -> None:
@@ -109,13 +109,7 @@ def _merge_ctx(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     for k, v in overlay.items():
         if k in _ROLES:
             continue
-        if k == "compressor" and isinstance(v, dict):
-            prev = out.get("compressor")
-            c = dict(prev) if isinstance(prev, dict) else {}
-            c.update(v)
-            out["compressor"] = c
-        else:
-            out[k] = v
+        out[k] = v
     return out
 
 
