@@ -11,27 +11,35 @@
     "manager": {
       "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768,
-      "reasoning_effort": "high"
+      "max_tokens": 175616,
+      "top_p": 1.0,
+      "reasoning_effort": "high",
+      "thinking": "enabled"
     },
     "worker": {
       "name": "deepseek-v4-flash",
       "temperature": 1.0,
-      "max_tokens": 32768,
-      "reasoning_effort": "medium"
+      "max_tokens": 175616,
+      "top_p": 1.0,
+      "reasoning_effort": "medium",
+      "thinking": "enabled"
     },
     "coordinator": {
       "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768,
-      "reasoning_effort": "medium"
+      "max_tokens": 175616,
+      "top_p": 1.0,
+      "reasoning_effort": "medium",
+      "thinking": "enabled"
     },
     "compressor": {
       "name": "deepseek-v4-flash",
       "temperature": 0.2,
       "max_tokens": 2048,
-      "reasoning_effort": "medium"
-      }
+      "top_p": 1.0,
+      "reasoning_effort": "medium",
+      "thinking": "enabled"
+    }
   },
   "context": {
     "defaults": {
@@ -65,8 +73,5 @@
   },
   "conversation_log": {
     "save_model_thinking_chain": true
-  },
-  "thinking": {
-    "type": "enable"
   }
 }

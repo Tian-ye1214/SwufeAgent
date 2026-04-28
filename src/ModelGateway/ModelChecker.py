@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
+from pathlib import Path
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
 
 import httpx
 import json_repair
 
 from app_config import (
+    get_agent_roles,
     get_context_config,
     get_env,
     get_model_and_params,
@@ -40,6 +43,7 @@ from pydantic_ai.messages import (
 )
 
 AgentRole = Literal["coordinator", "manager", "worker"]
+_AGENT_ROLE_VALUES: tuple[AgentRole, ...] = tuple(cast(tuple[AgentRole, ...], get_args(AgentRole)))
 
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
 
@@ -135,15 +139,64 @@ _LITELLM_URL_USED: str | None = None
 
 
 def _litellm_model_prices_json_url() -> str | None:
-    for role in ("coordinator", "manager", "worker"):
+    for role in get_agent_roles():
         raw = get_context_config(role).get("litellm_model_prices_json_url")
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
     return None
 
 
+def _litellm_cache_file_path(url: str) -> Path:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    d = logger.LOG_DIR / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"litellm_model_prices_{digest}.json"
+
+
+def _read_litellm_cache(url: str) -> dict[str, Any] | None:
+    path = _litellm_cache_file_path(url)
+    if not path.is_file():
+        return None
+    with open(path, encoding="utf-8") as f:
+        env = json.load(f)
+    if env.get("url") != url:
+        return None
+    return env["body"]
+
+
+def _write_litellm_cache(url: str, raw: dict[str, Any]) -> None:
+    path = _litellm_cache_file_path(url)
+    envelope = {"url": url, "body": raw}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(envelope, f, ensure_ascii=False)
+
+
+def _litellm_raw_to_maps(raw: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    ctx_map: dict[str, int] = {}
+    out_map: dict[str, int] = {}
+    for key, info in raw.items():
+        if not isinstance(info, dict):
+            continue
+        low = key.lower()
+        bare = key.rsplit("/", 1)[-1].lower() if "/" in key else None
+
+        ctx = info.get("max_input_tokens") or info.get("max_tokens")
+        if isinstance(ctx, int) and ctx >= 4096:
+            ctx_map[low] = ctx
+            if bare and bare not in ctx_map:
+                ctx_map[bare] = ctx
+
+        out = info.get("max_output_tokens")
+        if isinstance(out, int) and out >= 1:
+            out_map[low] = out
+            if bare and bare not in out_map:
+                out_map[bare] = out
+
+    return ctx_map, out_map
+
+
 def _ensure_litellm_maps() -> None:
-    """拉取 litellm JSON 并填充 _LITELLM_CONTEXT_MAP 与 _LITELLM_OUTPUT_MAP，只拉一次。"""
+    """拉取 litellm JSON 并填充 _LITELLM_CONTEXT_MAP 与 _LITELLM_OUTPUT_MAP，只拉一次；有缓存则直接读盘。"""
     global _LITELLM_CONTEXT_MAP, _LITELLM_OUTPUT_MAP, _LITELLM_FAILED, _LITELLM_URL_USED
     url = _litellm_model_prices_json_url()
     cache_key = url or "__no_url__"
@@ -163,6 +216,18 @@ def _ensure_litellm_maps() -> None:
             _LITELLM_URL_USED = cache_key
             _LITELLM_FAILED = False
         return
+
+    cached = _read_litellm_cache(url)
+    if cached is not None:
+        ctx_map, out_map = _litellm_raw_to_maps(cached)
+        with _LITELLM_LOCK:
+            _LITELLM_CONTEXT_MAP = ctx_map
+            _LITELLM_OUTPUT_MAP = out_map
+            _LITELLM_URL_USED = cache_key
+            _LITELLM_FAILED = False
+        logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
+        return
+
     try:
         with httpx.Client(timeout=15.0) as client:
             r = client.get(url)
@@ -175,28 +240,8 @@ def _ensure_litellm_maps() -> None:
             _LITELLM_URL_USED = cache_key
         return
 
-    ctx_map: dict[str, int] = {}
-    out_map: dict[str, int] = {}
-    for key, info in raw.items():
-        if not isinstance(info, dict):
-            continue
-        low = key.lower()
-        bare = key.rsplit("/", 1)[-1].lower() if "/" in key else None
-
-        # 上下文窗口：max_input_tokens 优先，降级 max_tokens（litellm legacy）
-        ctx = info.get("max_input_tokens") or info.get("max_tokens")
-        if isinstance(ctx, int) and ctx >= 4096:
-            ctx_map[low] = ctx
-            if bare and bare not in ctx_map:
-                ctx_map[bare] = ctx
-
-        # 最大输出 tokens
-        out = info.get("max_output_tokens")
-        if isinstance(out, int) and out >= 1:
-            out_map[low] = out
-            if bare and bare not in out_map:
-                out_map[bare] = out
-
+    _write_litellm_cache(url, raw)
+    ctx_map, out_map = _litellm_raw_to_maps(raw)
     with _LITELLM_LOCK:
         _LITELLM_CONTEXT_MAP = ctx_map
         _LITELLM_OUTPUT_MAP = out_map
@@ -270,7 +315,7 @@ def get_effective_max_context(
     role: AgentRole | None = None,
 ) -> int:
     """有效上下文上限：config 覆盖 > 缓存 > 多源查找 > default_context_tokens。"""
-    r: AgentRole = role if role is not None else "coordinator"
+    r: AgentRole = role if role is not None else _AGENT_ROLE_VALUES[0]
     ctx = get_context_config(r)
     fallback = int(ctx["default_context_tokens"])
     mid = model_name if model_name is not None else get_model_and_params(r)[0]
@@ -634,15 +679,23 @@ def compress_history(history: ChatHistory, *, role: AgentRole, force: bool = Fal
     return True
 
 
-_ALL_AGENT_ROLES: tuple[AgentRole, ...] = ("coordinator", "manager", "worker")
+async def get_effective_max_contexts_by_role_async(**kwargs: Any) -> dict[AgentRole, int]:
+    configured_roles = kwargs.pop("roles", get_agent_roles())
+    if kwargs:
+        raise TypeError(
+            f"get_effective_max_contexts_by_role_async() got unexpected keyword arguments: {tuple(kwargs.keys())}"
+        )
+    roles = tuple(
+        cast(AgentRole, role)
+        for role in configured_roles
+        if isinstance(role, str) and role in _AGENT_ROLE_VALUES
+    )
 
-
-async def get_effective_max_contexts_by_role_async() -> dict[AgentRole, int]:
     async def one(r: AgentRole) -> tuple[AgentRole, int]:
         n = await asyncio.to_thread(get_effective_max_context, None, role=r)
         return r, n
 
-    pairs = await asyncio.gather(*(one(r) for r in _ALL_AGENT_ROLES))
+    pairs = await asyncio.gather(*(one(r) for r in roles))
     return dict(pairs)
 
 
@@ -651,12 +704,11 @@ async def prewarm_effective_max_contexts_by_role_async(
 ) -> dict[AgentRole, int]:
     """并行预取三角色有效上下文并写入缓存；在启动与切换模型后调用。返回各角色 max token。"""
     d = await get_effective_max_contexts_by_role_async()
+    log_values = ", ".join(f"{role}={value}" for role, value in d.items())
     logger.info(
-        "各角色有效上下文 token 上限（%s）: coordinator=%s, manager=%s, worker=%s",
+        "各角色有效上下文 token 上限（%s）: %s",
         reason,
-        d["coordinator"],
-        d["manager"],
-        d["worker"],
+        log_values,
     )
     return d
 

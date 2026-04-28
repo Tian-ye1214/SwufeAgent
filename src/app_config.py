@@ -13,7 +13,6 @@ CONFIG_FILE = _d / "config.json"
 DOTENV_FILE = _d / ".env" if getattr(sys, "frozen", False) else _d.parent / ".env"
 
 _CONFIG: dict[str, Any] | None = None
-_ROLES = frozenset({"coordinator", "manager", "worker"})
 
 
 def load_config() -> dict[str, Any]:
@@ -69,24 +68,25 @@ def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
         s = str(reff).strip().lower()
         if s in ("none", "off", "false"):
             params["reasoning_effort"] = False
-        elif s in ("minimal", "low", "medium", "high", "xhigh"):
+        elif s in ("minimal", "low", "medium", "high", "xhigh", "max"):
             params["reasoning_effort"] = s
         else:
             params["reasoning_effort"] = "medium"
     else:
         params["reasoning_effort"] = False
 
+    params["thinking"] = str(m["thinking"]).strip().lower()
+
     return name, merge_litellm_into_model_params(name, params)
 
 
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
-    thinking_cfg = settings().get("thinking")
-    thinking_type = str(thinking_cfg.get("type", "")).strip().lower()
-    if thinking_type == "enable":
+    thinking_type = str(model_params["thinking"]).strip().lower()
+    if thinking_type == "enabled":
         reasoning_effort = model_params.get("reasoning_effort")
-        if reasoning_effort not in ("none", "off", "false", False):
-            return {"thinking": {"type": "enable"}, "reasoning_effort": reasoning_effort}
-    return {"thinking": {"type": "disable"}}
+        if reasoning_effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
+            return {"thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort}
+    return {"thinking": {"type": "disabled"}}
 
 
 def set_model_name(role: str, model_name: str) -> None:
@@ -104,31 +104,43 @@ def set_api(base_url: str | None = None, api_key: str | None = None) -> None:
     save_config(cfg)
 
 
-def _merge_ctx(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+def _merge_ctx(base: dict[str, Any], overlay: dict[str, Any], roles: tuple[str, ...]) -> dict[str, Any]:
     out = dict(base)
     for k, v in overlay.items():
-        if k in _ROLES:
+        if k in roles:
             continue
         out[k] = v
     return out
+
+
+def get_agent_roles(**kwargs: Any) -> tuple[str, ...]:
+    cfg = kwargs.pop("cfg", settings())
+    models = cfg.get("models")
+    roles: list[str] = []
+    for role in models.keys():
+        roles.append(role)
+    return tuple(roles)
 
 
 def get_context_config(role: str) -> dict[str, Any]:
     raw = settings().get("context")
     if not isinstance(raw, dict):
         return {}
-    if role not in _ROLES:
-        role = "coordinator"
-        logger.warning("警告，发现未知role，默认配置为coordinator")
-    per_role = any(k in _ROLES and isinstance(raw.get(k), dict) for k in _ROLES)
+    roles = get_agent_roles()
+    if role not in roles:
+        if not roles:
+            return {}
+        role = roles[0]
+        logger.warning("警告，发现未知role，默认配置为%r", role)
+    per_role = any(isinstance(raw.get(k), dict) for k in roles)
     out: dict[str, Any] = {}
     if per_role:
         d = raw.get("defaults")
         if isinstance(d, dict):
-            out = _merge_ctx(out, d)
+            out = _merge_ctx(out, d, roles)
         r = raw.get(role)
         if isinstance(r, dict):
-            out = _merge_ctx(out, r)
+            out = _merge_ctx(out, r, roles)
     else:
-        out = _merge_ctx(out, raw)
+        out = _merge_ctx(out, raw, roles)
     return out

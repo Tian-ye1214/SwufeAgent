@@ -22,44 +22,6 @@ from app_config import get_env, http_chat_completions_thinking_extras
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
-
-    def _ensure_assistant_reasoning_content_echo(
-        self,
-        pydantic_messages: Sequence[ModelMessage],
-        openai_messages: list[oa_chat.ChatCompletionMessageParam],
-    ) -> None:
-        """DeepSeek V4+：思考模式 + 工具调用时，必须在后续请求中回传上一轮的 reasoning_content。"""
-        profile = OpenAIModelProfile.from_profile(self.profile)
-        field = profile.openai_chat_thinking_field
-        send_mode = profile.openai_chat_send_back_thinking_parts
-        if not field or send_mode is False:
-            return
-        assistant_idxs = [i for i, m in enumerate(openai_messages) if m.get('role') == 'assistant']
-        responses = [m for m in pydantic_messages if isinstance(m, ModelResponse)]
-        if len(assistant_idxs) != len(responses):
-            logger.warning(
-                'reasoning 回传对齐跳过: assistant 条数=%s ModelResponse 条数=%s',
-                len(assistant_idxs),
-                len(responses),
-            )
-            return
-        for oi, mr in zip(assistant_idxs, responses):
-            thinking_text = '\n\n'.join(p.content for p in mr.parts if isinstance(p, ThinkingPart))
-            if not thinking_text:
-                continue
-            msg = openai_messages[oi]
-            if msg.get(field) != thinking_text:
-                msg[field] = thinking_text
-
-    async def _map_messages(
-        self,
-        messages: Sequence[ModelMessage],
-        model_request_parameters: ModelRequestParameters,
-    ) -> list[oa_chat.ChatCompletionMessageParam]:
-        openai_messages = await super()._map_messages(messages, model_request_parameters)
-        self._ensure_assistant_reasoning_content_echo(messages, openai_messages)
-        return openai_messages
-
     async def request(
         self,
         messages: list[ModelMessage],
@@ -88,69 +50,6 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         logger.error("tool=%s args 无法修复，fallback 为 _args_corrupted 标记", tool_name)
         return json.dumps({"_args_corrupted": True, "tool": tool_name}, ensure_ascii=False)
 
-    def _truncate_long_content(self, json_str: str, max_content_length: int = 8000) -> str:
-        """对于 write_file 等工具，截断过长的 content 字段"""
-        try:
-            data = json_repair.loads(json_str)
-            if isinstance(data, dict) and 'content' in data:
-                content = data['content']
-                if isinstance(content, str) and len(content) > max_content_length:
-                    data['content'] = content[:max_content_length] + "\n\n... [内容被截断，原长度: " + str(len(content)) + " 字符] ..."
-            return json_repair.dumps(data)
-        except Exception:
-            return json_str
-
-    def _repair_truncated_json(self, json_str: str, tool_name: str) -> str:
-        """尝试修复被截断的 JSON 字符串。"""
-        if not json_str or not isinstance(json_str, str):
-            return json_str
-
-        try:
-            repaired = json_repair.loads(json_str)
-            return json_repair.dumps(repaired)
-        except Exception:
-            pass
-
-        json_str = json_str.strip()
-        if tool_name == 'write_file':
-            try:
-                name_match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
-                if name_match:
-                    file_name = name_match.group(1)
-                    return json_repair.dumps({
-                        "name": file_name,
-                        "content": "[ERROR: Content was truncated due to length. Please write the file in smaller chunks or use a shorter content. Maximum recommended content length is 8000 characters.]"
-                    })
-            except Exception:
-                pass
-
-        try:
-            open_braces = json_str.count('{') - json_str.count('}')
-            open_brackets = json_str.count('[') - json_str.count(']')
-            in_string = False
-            escape_next = False
-            for char in json_str:
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == '\\':
-                    escape_next = True
-                    continue
-                if char == '"':
-                    in_string = not in_string
-            if in_string:
-                json_str += '"'
-
-            json_str += ']' * open_brackets
-            json_str += '}' * open_braces
-
-            repaired = json_repair.loads(json_str)
-            return json_repair.dumps(repaired)
-        except Exception:
-            pass
-
-        return json_str
-
     def _repair_tool_calls_json(self, response: ModelResponse) -> ModelResponse:
         """修复响应中所有工具调用的 JSON 参数"""
         repaired_parts = []
@@ -159,16 +58,10 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
             if isinstance(part, ToolCallPart):
                 try:
                     original_args = part.args
-                    if isinstance(original_args, str):
-                        repaired_args = self._repair_truncated_json(original_args, part.tool_name)
-                        if part.tool_name == 'write_file':
-                            repaired_args = self._truncate_long_content(repaired_args)
-                        # 最终保证合法 JSON，防止存入 history 后下轮触发 400
-                        repaired_args = self._ensure_valid_json(repaired_args, part.tool_name)
-                    elif isinstance(original_args, dict):
+                    if isinstance(original_args, dict):
                         repaired_args = json.dumps(original_args, ensure_ascii=False)
                     else:
-                        repaired_args = original_args
+                        repaired_args = self._ensure_valid_json(original_args, part.tool_name)
                     part = ToolCallPart(
                         tool_name=part.tool_name,
                         args=repaired_args,
@@ -203,6 +96,23 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
             metadata=response.metadata,
         )
 
+    def _process_thinking(self, message: oa_chat.ChatCompletionMessage) -> list[ThinkingPart] | None:
+        """DeepSeek thinking + tools: reasoning_content must round-trip even when empty, or API returns 400."""
+        inherited = super()._process_thinking(message)
+        if inherited:
+            return inherited
+        profile = OpenAIModelProfile.from_profile(self.profile)
+        if (
+            profile.openai_chat_thinking_field
+            and profile.openai_chat_send_back_thinking_parts == 'field'
+            and message.tool_calls
+        ):
+            field = profile.openai_chat_thinking_field
+            return [
+                ThinkingPart(id=field, content='', provider_name=self.system),
+            ]
+        return None
+
 
 class ThinkingProvider(OpenAIProvider):
     def model_profile(self, model_name: str) -> ModelProfile | None:
@@ -219,39 +129,43 @@ class ThinkingProvider(OpenAIProvider):
 def create_model(model_name: str, parameter: dict):
     api_key = get_env("API_KEY", warn=False) or None
     api_base = get_env("BASE_URL", warn=False) or None
+    param = dict(parameter)
     if 'gemini' in model_name:
+        del param["thinking"]
         provider = GoogleProvider(
             base_url='https://api.zhizengzeng.com/google',
             api_key=api_key,
         )
-        return GoogleModel(model_name, provider=provider, settings=ModelSettings(**parameter))
+        return GoogleModel(model_name, provider=provider, settings=ModelSettings(**param))
     elif 'claude' in model_name:
+        del param["thinking"]
         provider = AnthropicProvider(
             base_url='https://api.zhizengzeng.com/anthropic',
             api_key=api_key,
         )
-        return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**parameter))
+        return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**param))
     else:
         thinking_models = ['deepseek', 'kimi']
         use_thinking_provider = any(m in model_name.lower() for m in thinking_models)
         
         if use_thinking_provider:
             provider = ThinkingProvider(base_url=api_base, api_key=api_key)
-            param = dict(parameter)
             extra: dict = {}
             eb = param.get('extra_body')
             if isinstance(eb, dict):
                 extra = dict(eb)
             extra.update(http_chat_completions_thinking_extras(param))
+            del param["thinking"]
             if extra:
                 param['extra_body'] = extra
             settings_kw = param
         else:
+            del param["thinking"]
             provider = OpenAIProvider(
                 base_url=api_base,
                 api_key=api_key,
             )
-            settings_kw = parameter
+            settings_kw = param
         return JsonRepairOpenAIChatModel(
             model_name,
             provider=provider,
@@ -264,6 +178,8 @@ def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: s
         parameter = {
             "temperature": 1.0,
             "max_tokens": 32768,
+            "reasoning_effort": False,
+            "thinking": "disabled",
         }
 
     model = create_model(model_name, parameter)

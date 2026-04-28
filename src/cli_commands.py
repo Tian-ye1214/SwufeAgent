@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from app_config import get_env, get_model_and_params, set_api, set_model_name
+from app_config import get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
 from ModelGateway.ModelChecker import (
     compress_history_async,
     prewarm_effective_max_contexts_by_role_async,
@@ -32,18 +32,14 @@ def print_cli_help() -> None:
 
 
 def print_agent_models() -> None:
-    labels = {
-        "manager": "Manager（任务规划）",
-        "worker": "Worker（子任务执行）",
-        "coordinator": "Coordinator（入口协调）",
-    }
+    labels = {"manager": "Manager（任务规划）", "worker": "Worker（子任务执行）", "coordinator": "Coordinator（入口协调）"}
+    roles = get_agent_roles()
     print("\n── 当前模型配置（config.json）──")
-    for role in ("manager", "worker", "coordinator"):
+    for role in roles:
         name, p = get_model_and_params(role)
-        print(f"  • {labels[role]}")
+        print(f"  • {labels.get(role, role)}")
         print(f"    模型名: {name}")
-        th = p.get("thinking")
-        th_s = f"  reasoning→thinking: {th}" if th is not None else ""
+        th_s = f"  reasoning→thinking: {p['thinking']}"
         print(f"    temperature: {p['temperature']}  max_tokens: {p['max_tokens']}{th_s}")
     print("")
 
@@ -74,7 +70,6 @@ async def handle_slash_command(
     *,
     coordinator_history: ChatHistory | None = None,
     manager_history: ChatHistory | None = None,
-    worker_histories: Iterable[ChatHistory] | None = None,
 ) -> bool:
     """
     处理以 / 开头的输入行。
@@ -90,12 +85,14 @@ async def handle_slash_command(
         print_loaded_skills(skills_manager)
         return True
     if cmd == "/agent":
+        roles = get_agent_roles()
+        role_text = "|".join(roles)
         if len(parts) == 1:
             print_agent_models()
-            print("切换模型: /agent <manager|worker|coordinator> <模型名称>\n")
+            print(f"切换模型: /agent <{role_text}> <模型名称>\n")
             return True
         if len(parts) < 3:
-            print("用法: /agent <manager|worker|coordinator> <模型名称>\n")
+            print(f"用法: /agent <{role_text}> <模型名称>\n")
             return True
         role = parts[1].lower()
         model_name = parts[2].strip()
@@ -126,27 +123,15 @@ async def handle_slash_command(
                 print(f"  • {label}: 未绑定历史")
                 continue
 
-            compressed_count = 0
-            skipped_count = 0
-
             try:
                 for h in histories:
                     msgs = list(h.messages)
                     if not msgs:
-                        skipped_count += 1
                         continue
-                    did = await compress_history_async(h, role=role, force=True)
-                    if did:
-                        compressed_count += 1
-                    else:
-                        skipped_count += 1
+                    await compress_history_async(h, role=role, force=True)
             except Exception as e:
                 print(f"  • {label}: 压缩失败: {e}")
                 continue
-
-            total = len(histories)
-            print(f"  • {label}: 已压缩 {compressed_count}，跳过 {skipped_count}，总计 {total}")
-        print("")
         return True
 
     print(f"未知命令 {cmd}，输入 /help 查看可用命令\n")
