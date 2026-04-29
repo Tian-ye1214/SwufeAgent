@@ -18,6 +18,20 @@ def _safe_segment(s: str, max_len: int = 80) -> str:
     return ("".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in s)[:max_len]) or "default"
 
 
+def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:
+    """从 `*.model_messages.json` 读取 `model_messages`，校验并还原为 pydantic-ai 消息对象。"""
+    path = Path(path)
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    raw = data.get("model_messages")
+    if not isinstance(raw, list):
+        raise ValueError("文件格式无效：缺少 model_messages 数组")
+    meta_raw = data.get("meta")
+    meta: dict[str, Any] = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+    messages = ModelMessagesTypeAdapter.validate_python(raw)
+    return messages, meta
+
+
 class ConversationLog:
     """对话落盘。save() 写入两份文件：人类可读的 .json 与可加载历史的 .model_messages.json。"""
 

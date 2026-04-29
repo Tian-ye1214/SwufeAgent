@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
@@ -59,89 +58,26 @@ class RAG:
             doc=doc or "",
         )
 
-    def split_text(
-        self,
-        text: str,
-        chunk_size: int | None = None,
-        special_chars: list[str] | None = None,
-        overlap: int | None = None,
-    ) -> list[str]:
-        chunk_size = chunk_size or self.chunk_size
-        overlap = overlap if overlap is not None else self.overlap
-        if special_chars:
-            segments: list[str] = []
-            current_pos = 0
-            parts: list[str] = []
-            for char in special_chars:
-                parts = text[current_pos:].split(char)
-                for i, part in enumerate(parts[:-1]):
-                    if part.strip():
-                        segments.append(part.strip())
-                    current_pos += len(part) + len(char)
-            if parts and parts[-1].strip():
-                segments.append(parts[-1].strip())
-
-            chunks = []
-            for segment in segments:
-                if len(segment) > chunk_size:
-                    start = 0
-                    while start < len(segment):
-                        end = min(start + chunk_size, len(segment))
-                        chunks.append(segment[start:end])
-                        start = end
-                        if overlap > 0 and start < len(segment):
-                            start = max(0, start - overlap)
-                else:
-                    chunks.append(segment)
-            return chunks
-
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            chunks.append(text[start:end])
-            start = end
-            if overlap > 0 and start < len(text):
-                start = max(0, start - overlap)
-        return chunks
-
-    async def split_text_async(
-        self,
-        text: str,
-        chunk_size: int | None = None,
-        special_chars: list[str] | None = None,
-        overlap: int | None = None,
-    ) -> list[str]:
-        """长文本分块在 worker 线程执行，避免阻塞事件循环。"""
-        return await asyncio.to_thread(
-            self.split_text, text, chunk_size, special_chars, overlap
-        )
-
     async def _embed_query(self, query: str) -> list[float]:
         instruct_text = self.format_instruction(None, query, None, type="embedding")
         vectors = await embed_texts(instruct_text)
         return vectors[0]
 
-    async def ingest_text(
-        self,
-        text: str,
-        source: str = "inline",
-        *,
-        special_chars: list[str] | None = None,
-    ) -> int:
-        """将长文本分块、取向量并写入库；返回写入块数。"""
-        chunks = await self.split_text_async(text, special_chars=special_chars)
-        if not chunks:
+    async def ingest_chunk_pairs(self, pairs: list[tuple[str, str]]) -> int:
+        """每条 (source, text) 单独取向量并入库，不做字符切分。"""
+        if not pairs:
             return 0
         await self._db.ensure_connected()
-        vectors = await embed_texts(chunks)
+        texts = [p[1] for p in pairs]
+        sources = [p[0] for p in pairs]
+        vectors = await embed_texts(texts)
         rows = [
-            {"vector": vectors[i], "text": chunks[i], "source": source}
-            for i in range(len(chunks))
+            {"vector": vectors[i], "text": texts[i], "source": sources[i]}
+            for i in range(len(pairs))
         ]
         await self._db.add_vectors(rows)
-        n = len(chunks)
-        logger.info("RAG ingest: source=%s, chunks=%d", source, n)
+        n = len(rows)
+        logger.info("RAG ingest_chunk_pairs: rows=%d", n)
         return n
 
     async def retrieve(self, query: str) -> list[dict[str, Any]]:

@@ -24,7 +24,7 @@ from ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
-from app_config import get_context_config, get_model_and_params
+from app_config import get_context_config, get_model_and_params, settings
 from cli_commands import handle_slash_command
 import logger
 import traceback
@@ -57,11 +57,18 @@ class AgentSystem:
         self._current_attachments: list = []
         self._long_term_memory = LongTermMemory()
         self._long_term_memory.refresh_from_disk_sync()
-        self._short_term_memory = ShortTermMemory(log_root=logger.LOG_DIR)
+        _stm_cfg = settings()["short_term_memory"]
+        _chunk_max_tokens = int(_stm_cfg["chunk_max_tokens"])
+        _cpt = float(settings()["context"]["defaults"]["token_estimate_fallback_chars_per_token"])
+        self._short_term_memory = ShortTermMemory(
+            _chunk_max_tokens,
+            _cpt,
+            log_root=logger.LOG_DIR,
+        )
         self._toolkit = BasicToolkit(
             self._skills_manager,
             extra_worker_tools=[
-                self._short_term_memory.recall,
+                self._short_term_memory.query_short_term_memory,
                 self._long_term_memory.add,
                 self._long_term_memory.remove,
                 self._long_term_memory.list_memory,
@@ -89,11 +96,16 @@ class AgentSystem:
     def set_task_directory(self, task_name: str):
         self._toolkit.set_task_directory(task_name)
 
-    def reset_task_directory(self):
-        self._toolkit.reset_task_directory()
-
     def reset_manager_history(self):
         self._manager_history.reset()
+
+    def reset_cli_interactive_session(self, history: ChatHistory) -> None:
+        """与输入「新任务」相同：清空任务、工作目录绑定、双方历史与会话落盘状态。"""
+        self._task_manager.reset()
+        self._toolkit.reset_task_directory()
+        self.reset_manager_history()
+        self._session_logs.reset()
+        history.reset()
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
         """每轮 Coordinator 结束后：后台静默合并长期记忆（不阻塞当前回复）。"""
@@ -396,28 +408,26 @@ class AgentSystem:
 
                 if raw_input.startswith("/"):
                     await self._sync_skills_for_user_turn()
-                    worker_histories = [
-                        t.worker_chat_history for t in self._task_manager.tasks.values()
-                    ]
-                    await handle_slash_command(
+                    consumed, first_override = await handle_slash_command(
                         raw_input,
                         self._skills_manager,
                         coordinator_history=history,
                         manager_history=self._manager_history,
-                        worker_histories=worker_histories,
+                        reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
+                            history
+                        ),
                     )
-                    continue
+                    if first_override is not None:
+                        is_first_input = first_override
+                    if consumed:
+                        continue
 
                 if raw_input.lower() in ["quit", "exit", "退出"]:
                     logger.info("👋 再见！")
                     break
 
                 if "新任务" in raw_input:
-                    self._task_manager.reset()
-                    self._toolkit.reset_task_directory()
-                    self.reset_manager_history()
-                    self._session_logs.reset()
-                    history.reset()
+                    self.reset_cli_interactive_session(history)
                     is_first_input = True
                     continue
 

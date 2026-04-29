@@ -11,7 +11,7 @@
     "manager": {
       "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 175616,
+      "max_tokens": 131072,
       "top_p": 1.0,
       "reasoning_effort": "high",
       "thinking": "enabled"
@@ -19,7 +19,7 @@
     "worker": {
       "name": "deepseek-v4-flash",
       "temperature": 1.0,
-      "max_tokens": 175616,
+      "max_tokens": 131072,
       "top_p": 1.0,
       "reasoning_effort": "medium",
       "thinking": "enabled"
@@ -27,7 +27,7 @@
     "coordinator": {
       "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 175616,
+      "max_tokens": 131072,
       "top_p": 1.0,
       "reasoning_effort": "medium",
       "thinking": "enabled"
@@ -48,30 +48,36 @@
     },
     "coordinator": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
       "head_max_ratio": 0.12
     },
     "manager": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
       "head_max_ratio": 0.12
     },
     "worker": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
       "head_max_ratio": 0.12
     }
   },
   "conversation_log": {
     "save_model_thinking_chain": true
+  },
+  "short_term_memory": {
+    "chunk_max_tokens": 8192
   }
 }

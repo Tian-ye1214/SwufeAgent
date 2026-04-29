@@ -54,39 +54,45 @@ def save_config(cfg: dict[str, Any] | None = None) -> None:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
-def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
+def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
     from ModelGateway.ModelChecker import merge_litellm_into_model_params
 
-    m = settings()["models"][role]
-    name = m["name"]
-    params: dict[str, Any] = {
-        "temperature": float(m["temperature"]),
-        "max_tokens": int(m["max_tokens"]),
-    }
-    reff = m.get("reasoning_effort")
-    if reff is not None:
-        s = str(reff).strip().lower()
-        if s in ("none", "off", "false"):
-            params["reasoning_effort"] = False
-        elif s in ("minimal", "low", "medium", "high", "xhigh", "max"):
-            params["reasoning_effort"] = s
-        else:
-            params["reasoning_effort"] = "medium"
+    raw: dict[str, Any] = dict(settings()["models"][role])
+    name = str(raw.pop("name")).strip()
+    reff = raw.pop("reasoning_effort")
+    s = str(reff).strip().lower()
+    if s in ("none", "off", "false"):
+        raw["reasoning_effort"] = False
+    elif s in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        raw["reasoning_effort"] = s
     else:
-        params["reasoning_effort"] = False
+        raw["reasoning_effort"] = "medium"
+    raw["thinking"] = str(raw.pop("thinking")).strip().lower()
 
-    params["thinking"] = str(m["thinking"]).strip().lower()
-
-    return name, merge_litellm_into_model_params(name, params)
+    out = merge_litellm_into_model_params(name, raw)
+    out.update(kwargs)
+    return name, out
 
 
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
+    reasoning_effort = model_params["reasoning_effort"]
     thinking_type = str(model_params["thinking"]).strip().lower()
-    if thinking_type == "enabled":
-        reasoning_effort = model_params.get("reasoning_effort")
-        if reasoning_effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
-            return {"thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort}
+    if thinking_type == "enabled" and reasoning_effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort}
     return {"thinking": {"type": "disabled"}}
+
+
+def chat_completion_inference_request_fields(
+    model_params: dict[str, Any],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """OpenAI 兼容 chat/completions 请求体中除 model、messages 外的推理相关字段；config 与运行时 kwargs 均可扩展。"""
+    mp = dict(model_params)
+    tex = http_chat_completions_thinking_extras(mp)
+    mp.pop("thinking")
+    mp.update(tex)
+    mp.update(kwargs)
+    return mp
 
 
 def set_model_name(role: str, model_name: str) -> None:
@@ -120,6 +126,14 @@ def get_agent_roles(**kwargs: Any) -> tuple[str, ...]:
     for role in models.keys():
         roles.append(role)
     return tuple(roles)
+
+
+def get_context_profile_roles() -> tuple[str, ...]:
+    """参与上下文配置（有独立 context 段）的角色，顺序与 config 中 context 键顺序一致。"""
+    raw = settings().get("context")
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(k for k, v in raw.items() if k != "defaults" and isinstance(v, dict))
 
 
 def get_context_config(role: str) -> dict[str, Any]:

@@ -22,11 +22,37 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from app_config import (
+    chat_completion_inference_request_fields,
     get_env,
     get_model_and_params,
-    http_chat_completions_thinking_extras,
 )
 from RAG.RAG import RAG as RAGEngineCls
+from tools.conversation_log import read_saved_model_messages_file
+
+
+def _pack_messages_to_chunk_texts(
+    messages: list[Any],
+    chunk_max_tokens: int,
+    chars_per_token: float,
+) -> list[str]:
+    from ModelGateway.ModelChecker import estimate_message_tokens
+
+    if not messages:
+        return []
+    out: list[str] = []
+    buf: list[Any] = []
+    buf_tokens = 0
+    for m in messages:
+        t = estimate_message_tokens(m, chars_per_token)
+        if buf and buf_tokens + t > chunk_max_tokens:
+            out.append(_pydantic_messages_to_text(buf))
+            buf = []
+            buf_tokens = 0
+        buf.append(m)
+        buf_tokens += t
+    if buf:
+        out.append(_pydantic_messages_to_text(buf))
+    return out
 
 
 @dataclass
@@ -112,7 +138,7 @@ class ChatHistory:
 
     @property
     def compress_summary_state(self) -> str | None:
-        """上一轮结构化压缩摘要 JSON，供迭代合并。"""
+        """上一轮压缩模型产出的 Markdown 摘要文本，供下次压缩合并。"""
         return self._compress_summary_state
 
     @compress_summary_state.setter
@@ -155,19 +181,17 @@ def _pydantic_messages_to_text(messages: list) -> str:
 
 
 class ShortTermMemory:
-    """短期记忆：以 RAG 索引 `logs` 下全部 `.log`，供 Worker 按查询检索。
-
-    流程：静默增量写入向量库 → 向量检索（检索前一次 ingest；省略检索后扫尾以降低延迟）。
-    分块策略与 RAG 默认一致（chunk_size、overlap），日志按行优先切分再滑窗。
-    """
-
-    _LOG_SPECIAL_CHARS = ["\n"]
+    """短期记忆：`logs/conversations/**/messages_*.model_messages.json` 按消息边界打包入向量库，供 Worker 检索。"""
 
     def __init__(
         self,
+        chunk_max_tokens: int,
+        chars_per_token: float,
         rag: Any | None = None,
         log_root: Path | None = None,
     ):
+        self._chunk_max_tokens = chunk_max_tokens
+        self._chars_per_token = chars_per_token
         self._rag = rag
         self._log_root = log_root
         self._ingest_lock = asyncio.Lock()
@@ -177,9 +201,9 @@ class ShortTermMemory:
             self._rag = RAGEngineCls()
         return self._rag
 
-    def _ingest_state_path(self) -> Path:
+    def _stm_state_path(self) -> Path:
         rag = self._get_rag()
-        return Path(rag._db.db_path) / "log_ingest_state.json"
+        return Path(rag._db.db_path) / "conversation_stm_state.json"
 
     def _rel_log_key(self, path: Path, root: Path) -> str:
         try:
@@ -187,8 +211,8 @@ class ShortTermMemory:
         except ValueError:
             return path.resolve().as_posix()
 
-    def _load_ingest_state_sync(self) -> dict[str, Any]:
-        p = self._ingest_state_path()
+    def _load_stm_state_sync(self) -> dict[str, Any]:
+        p = self._stm_state_path()
         if not p.is_file():
             return {"version": 1, "sources": {}}
         try:
@@ -203,13 +227,50 @@ class ShortTermMemory:
         except Exception:
             return {"version": 1, "sources": {}}
 
-    def _save_ingest_state_sync(self, state: dict[str, Any]) -> None:
-        p = self._ingest_state_path()
+    def _save_stm_state_sync(self, state: dict[str, Any]) -> None:
+        p = self._stm_state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
-    async def _ingest_log_delta_unlocked(self) -> None:
+    def _sync_scan_conversations_and_collect_pairs(
+        self,
+        root: Path,
+    ) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+        state = self._load_stm_state_sync()
+        sources: dict[str, Any] = state.setdefault("sources", {})
+        pairs: list[tuple[str, str]] = []
+        conv = root / "conversations"
+        if not conv.is_dir():
+            return state, pairs
+        files = sorted(
+            conv.rglob("messages_*.model_messages.json"),
+            key=lambda p: str(p),
+        )
+        for fp in files:
+            key = self._rel_log_key(fp, root)
+            messages, _meta = read_saved_model_messages_file(fp)
+            chunk_texts = _pack_messages_to_chunk_texts(
+                messages,
+                self._chunk_max_tokens,
+                self._chars_per_token,
+            )
+            total = len(chunk_texts)
+            done = 0
+            ent = sources.get(key)
+            if isinstance(ent, dict):
+                try:
+                    done = int(ent.get("chunks_done", 0))
+                except (TypeError, ValueError):
+                    done = 0
+            if total < done:
+                done = 0
+            for i in range(done, total):
+                pairs.append((f"{key}#c{i}", chunk_texts[i]))
+            sources[key] = {"chunks_done": total}
+        return state, pairs
+
+    async def _ingest_conversation_delta_unlocked(self) -> None:
         root = (self._log_root if self._log_root is not None else logger.LOG_DIR).resolve()
         if not root.is_dir():
             return
@@ -218,81 +279,36 @@ class ShortTermMemory:
         await rag.connect()
         await rag._db.ensure_connected()
 
-        state = await asyncio.to_thread(self._load_ingest_state_sync)
-        sources: dict[str, Any] = state.setdefault("sources", {})
-
-        log_files = sorted(
-            [p for p in root.rglob("*.log") if p.is_file()],
-            key=lambda p: str(p),
+        state, pairs = await asyncio.to_thread(
+            self._sync_scan_conversations_and_collect_pairs,
+            root,
         )
+        if pairs:
+            await rag.ingest_chunk_pairs(pairs)
+        await asyncio.to_thread(self._save_stm_state_sync, state)
 
-        for fp in log_files:
-            key = self._rel_log_key(fp, root)
-            try:
-                size = fp.stat().st_size
-            except OSError:
-                continue
-
-            prev = 0
-            ent = sources.get(key)
-            if isinstance(ent, dict):
-                try:
-                    prev = int(ent.get("bytes_read", 0))
-                except (TypeError, ValueError):
-                    prev = 0
-            if prev > size:
-                prev = 0
-            if prev >= size:
-                continue
-
-            def _read_span() -> bytes:
-                with fp.open("rb") as f:
-                    f.seek(prev)
-                    return f.read(size - prev)
-
-            raw = await asyncio.to_thread(_read_span)
-            if not raw:
-                sources[key] = {"bytes_read": size}
-                continue
-            text = raw.decode("utf-8", errors="replace")
-            if text.strip():
-                await rag.ingest_text(
-                    text,
-                    source=key,
-                    special_chars=self._LOG_SPECIAL_CHARS,
-                )
-            sources[key] = {"bytes_read": size}
-
-        await asyncio.to_thread(self._save_ingest_state_sync, state)
-
-    async def recall(self, query: str) -> str:
+    async def query_short_term_memory(self, query: str) -> str:
         """
-        在运行日志（logs 目录下 .log 文件）的向量索引中检索与查询相关的片段。
-        会先静默同步未索引的日志增量，再检索。
+        在历史对话向量索引中检索与 query 相关的片段；结果为模型可用的短期记忆上下文。
 
         Parameters:
-            query: 要检索的主题或问题（针对历史日志内容）
+            query: 检索查询语句
         """
-        q = (query or "").strip()
-        if not q:
-            return "错误：查询不能为空。"
-
-        async with self._ingest_lock:
-            try:
-                await self._ingest_log_delta_unlocked()
+        q = query.strip()
+        inner = ""
+        if q:
+            async with self._ingest_lock:
+                await self._ingest_conversation_delta_unlocked()
                 rag = self._get_rag()
                 await rag.connect()
                 hits = await rag.retrieve(q)
-            except Exception as e:
-                return f"短期记忆（日志 RAG）检索失败: {e}"
 
-        if not hits:
-            return "短期记忆（日志）中未找到与查询相关的片段。"
-
-        return "\n\n".join(
-            f"[{i + 1}] (source: {h.get('source', '')})\n{h.get('text', '')}"
-            for i, h in enumerate(hits)
-        )
+            if hits:
+                inner = "\n\n".join(
+                    f"[{i + 1}] (source: {h.get('source', '')})\n{h.get('text', '')}"
+                    for i, h in enumerate(hits)
+                )
+        return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
 
 
 class LongTermMemory:
@@ -302,8 +318,6 @@ class LongTermMemory:
     - soul_user_consolidation.md：从对话或日志增量中**合并**出 SOUL/USER 整篇正文的**唯一**提示词
     - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；旧版无标题的纯文本会在加载时整篇当正文；\\n---\\n 分隔的段落会合并
     - log_sources_state.json：各 .log 已读字节偏移，避免重复喂给模型；**不存在时首次加载会自动创建**（version + 空 sources）
-
-    add 向对应正文追加一段；remove 按**精确子串**删除；consolidate_* 以模型输出的**整篇**替换；consolidate_from_messages / consolidate_from_logs 共享同一模板。
     """
     _CHAR_LIMIT = 8000
     _PROMPT_BODY_ELIDE = 10_000
@@ -547,6 +561,7 @@ class LongTermMemory:
         *,
         truncate: bool = True,
         include_existing_memory: bool = True,
+        **kwargs: Any,
     ) -> dict[str, str | None]:
         """合并前会 _load_sync；提示中注入整篇 SOUL/USER 正文（过长则尾部摘要）供模型改写成**一份**自洽新正文。"""
         await asyncio.to_thread(self._load_sync)
@@ -578,10 +593,13 @@ class LongTermMemory:
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": self._CONSOLIDATION_MAX_OUTPUT_TOKENS,
-            "temperature": 0.2,
+            **chat_completion_inference_request_fields(
+                w_params,
+                max_tokens=self._CONSOLIDATION_MAX_OUTPUT_TOKENS,
+                temperature=0.2,
+                **kwargs,
+            ),
         }
-        payload.update(http_chat_completions_thinking_extras(w_params))
 
         async with httpx.AsyncClient(http2=True, timeout=90.0) as client:
             resp = await client.post(
@@ -721,7 +739,7 @@ class LongTermMemory:
             if not silent:
                 raise
             logger.warning(f"长期记忆合并失败（已忽略）: {e}")
-            
+
     async def add(self, target: str, content: str) -> str:
         """
         向对应类别的**整篇**记忆正文末尾追加一段（自动合并为一块连续文本，非分条存储）。
