@@ -63,15 +63,6 @@ class LoggerManager:
                 wrapped.append(tool)
         return wrapped
 
-    def log_conversation_user(self, text: str) -> None:
-        self.get_logger().info("[用户]\n%s", (text or "").strip() or "（空）")
-
-    def log_conversation_model(self, text: str) -> None:
-        self.get_logger().info("[模型]\n%s", (text or "").strip() or "（无输出）")
-
-    def log_conversation_task_summary(self, text: str) -> None:
-        self.get_logger().info("[任务汇总]\n%s", (text or "").strip() or "（无汇总）")
-
     def _build_console_handler(self) -> logging.Handler:
         handler = logging.StreamHandler(stream=sys.stderr)
         handler.setLevel(logging.DEBUG)
@@ -163,9 +154,6 @@ setup_task_logger = _MANAGER.setup_task_logger
 setup_session_logger = _MANAGER.setup_session_logger
 set_user_notify_callback = _MANAGER.set_user_notify_callback
 wrap_tools_for_user_notify = _MANAGER.wrap_tools_for_user_notify
-log_conversation_user = _MANAGER.log_conversation_user
-log_conversation_model = _MANAGER.log_conversation_model
-log_conversation_task_summary = _MANAGER.log_conversation_task_summary
 
 __all__ = [
     "LOG_DIR",
@@ -177,7 +165,4 @@ __all__ = [
     "setup_session_logger",
     "set_user_notify_callback",
     "wrap_tools_for_user_notify",
-    "log_conversation_user",
-    "log_conversation_model",
-    "log_conversation_task_summary",
 ]

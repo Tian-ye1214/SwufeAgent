@@ -154,7 +154,7 @@ class AgentSystem:
                 directly relevant to the user's question.
         """
         self._session_logs.ensure(user_input or "task")
-        logger.log_conversation_user(user_input)
+        logger.info("[用户]\n%s", user_input)
 
         manager_tools = [
             self._task_manager.create_todo_list,
@@ -195,7 +195,7 @@ class AgentSystem:
                 logger.info("已自动压缩 Manager 上下文（达到配置阈值）")
         except Exception as ce:
             logger.warning("Manager 自动压缩失败: %s", ce)
-        logger.log_conversation_model(result.output)
+        logger.info(f"[模型]\n{result.output}")
 
         logger.info("=" * 60)
         logger.info("第二阶段: 多Worker并行执行任务")
@@ -204,7 +204,7 @@ class AgentSystem:
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
             user_input, attachments=attachments
         )
-        logger.log_conversation_task_summary(final_summary)
+        logger.info(f"[任务汇总]\n{final_summary}")
 
         logger.info("=" * 60)
         logger.info("第三阶段: 生成最终报告")
@@ -251,10 +251,10 @@ class AgentSystem:
                         logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
                 except Exception as ce:
                     logger.warning("Manager 自动压缩失败: %s", ce)
-                logger.log_conversation_model(final_result.output)
+                logger.info(f"[模型]\n{final_result.output}")
                 return final_result.output
             except Exception:
-                logger.log_conversation_task_summary(final_summary)
+                logger.info(f"{final_summary}")
                 return final_summary
 
     async def _execute_task_with_worker(
@@ -329,7 +329,7 @@ class AgentSystem:
             history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
-        logger.log_conversation_user(_format_user_log_text(message))
+        logger.info(f"[用户]\n{_format_user_log_text(message)}")
 
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
@@ -353,7 +353,7 @@ class AgentSystem:
         elapsed = time.time() - start_time
 
         logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
-        logger.log_conversation_model(result.output)
+        logger.info(f"[模型]\n{result.output}")
         history.update(result)
         extra: dict = {"kind": "coordinator"}
         if conversation_log_extra:
