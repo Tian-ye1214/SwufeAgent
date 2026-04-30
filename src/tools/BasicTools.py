@@ -341,27 +341,10 @@ class BasicToolkit:
 
         Parameters:
             name: File name/path (relative to WorkDatabase directory)
-            content: Content to write (must be a string)
-
-        CRITICAL LIMITATIONS - READ CAREFULLY:
-        - For larger content: Use append_to_file() to write in chunks
-        - For code files: Keep under 200 lines per file
-        - For long documents: Split into multiple files or write a Python script to generate the file
-
-        DO NOT use this for:
-        - Large code files (>200 lines)
-        - Long documents or reports
-        - Generated content that might be lengthy
-
-        INSTEAD, for large content:
-        1. Write a Python script that generates the file using standard file I/O
-        2. Use append_to_file() to write content in multiple chunks
-        3. Split content into multiple smaller files
+            content: Content to write
         """
         content_len = len(content) if content else 0
         try:
-            if content is None:
-                return "Write error: content cannot be None"
             if not isinstance(content, str):
                 content = str(content)
 
@@ -388,11 +371,6 @@ class BasicToolkit:
         Parameters:
             name: File name/path (relative to WorkDatabase directory)
             content: Content to append (keep each chunk under 5000 characters)
-
-        Usage Pattern for Large Files:
-        1. First chunk: write_file("myfile.txt", "first part...")
-        2. Next chunks: append_to_file("myfile.txt", "second part...")
-        3. Continue until done
         """
         content_len = len(content) if content else 0
         try:

@@ -28,8 +28,34 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         model_settings: _ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        self._log_missing_reasoning_content(messages)
         response = await super().request(messages, model_settings, model_request_parameters)
         return self._repair_tool_calls_json(response)
+
+    def _log_missing_reasoning_content(self, messages: list[ModelMessage]) -> None:
+        profile = OpenAIModelProfile.from_profile(self.profile)
+        field = profile.openai_chat_thinking_field
+        if not field or profile.openai_chat_send_back_thinking_parts != 'field':
+            return
+
+        missing_indices: list[int] = []
+        for idx, message in enumerate(messages):
+            if not isinstance(message, ModelResponse):
+                continue
+            mapped = self._map_model_response(message)
+            if mapped.get('role') != 'assistant':
+                continue
+            value = mapped.get(field)
+            if not isinstance(value, str):
+                missing_indices.append(idx)
+
+        if missing_indices:
+            logger.debug(
+                "thinking history missing `%s` on assistant messages: count=%s indices=%s",
+                field,
+                len(missing_indices),
+                missing_indices,
+            )
 
     def _ensure_valid_json(self, args_str: str, tool_name: str) -> str:
         """保证返回的字符串一定是合法 JSON。先校验，再 json_repair，最后 fallback 标记。"""
@@ -105,7 +131,6 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         if (
             profile.openai_chat_thinking_field
             and profile.openai_chat_send_back_thinking_parts == 'field'
-            and message.tool_calls
         ):
             field = profile.openai_chat_thinking_field
             return [
