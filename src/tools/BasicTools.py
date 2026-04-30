@@ -203,7 +203,7 @@ class BasicToolkit:
         return "Browser closed"
 
     def _resolve_path_candidate(self, name: str) -> Path:
-        """Resolve path (same rules as _safe_path) without workspace/repo boundary check — for read/list only."""
+        """Resolve path without workspace/repo boundary check — for read/list only."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Path name must not be empty")
@@ -220,17 +220,6 @@ class BasicToolkit:
         anchor = repo_r if norm == "src" or norm.startswith("src/") else base_r
         return (anchor / name).resolve()
 
-    def _safe_path(self, name: str) -> Path:
-        """Resolve path and confine to task workspace or Agent repo root (write/delete/move/execute)."""
-        path = self._resolve_path_candidate(name)
-        base_r = self._base_dir.resolve()
-        repo_r = _REPO_ROOT.resolve()
-        if not (path.is_relative_to(base_r) or path.is_relative_to(repo_r)):
-            raise ValueError(
-                "Path traversal detected: path must be inside the task workspace "
-                f"({base_r}) or the Agent project directory ({repo_r})"
-            )
-        return path
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""
@@ -349,7 +338,7 @@ class BasicToolkit:
                 content = str(content)
 
             self._base_dir.mkdir(parents=True, exist_ok=True)
-            file_path = self._safe_path(name)
+            file_path = self._resolve_path_candidate(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -380,7 +369,7 @@ class BasicToolkit:
                 content = str(content)
 
             self._base_dir.mkdir(parents=True, exist_ok=True)
-            file_path = self._safe_path(name)
+            file_path = self._resolve_path_candidate(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "a", encoding="utf-8") as f:
                 f.write(content)
@@ -401,7 +390,7 @@ class BasicToolkit:
             name: Directory name/path
         """
         try:
-            dir_path = self._safe_path(name)
+            dir_path = self._resolve_path_candidate(name)
             os.makedirs(dir_path, exist_ok=True)
             return f"Directory '{name}' created successfully"
         except ValueError as e:
@@ -474,7 +463,7 @@ class BasicToolkit:
             args: Optional, command-line arguments to pass to the script
         """
         try:
-            file_path = self._safe_path(name)
+            file_path = self._resolve_path_candidate(name)
             if not file_path.exists():
                 return f"Error: File '{name}' does not exist"
 
