@@ -320,7 +320,7 @@ def get_effective_max_context(
         _CONTEXT_LIMIT_CACHE[mid] = looked
         return looked
 
-    logger.warning("无法解析模型上下文窗口，使用 default_context_tokens=%s（模型 %s）", fallback, mid)
+    logger.debug("使用 default_context_tokens=%s（模型 %s）", fallback, mid)
     _CONTEXT_LIMIT_CACHE[mid] = fallback
     return fallback
 

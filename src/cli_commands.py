@@ -18,7 +18,7 @@ from tools.conversation_log import read_saved_model_messages_file
 
 def print_cli_help() -> None:
     print(
-        "\n── 斜杠命令 ─────────────────────────────────────────\n"
+        "\n── HELP ─────────────────────────────────────────\n"
         "/help     显示本帮助\n"
         "/skills   查看当前已加载 Skills（与系统提示中 {skills_layout}+{skills_summary} 一致）\n"
         "/agent    查看 Manager / Worker / Coordinator 的模型名与 temperature、max_tokens；\n"
