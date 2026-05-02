@@ -10,6 +10,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+class _ColorFmt(logging.Formatter):
+    def format(self, r: logging.LogRecord) -> str:
+        s = super().format(r)
+        if not sys.stdout.isatty():
+            return s
+        n = r.levelno
+        c = "\033[91m" if n >= logging.ERROR else "\033[38;5;208m" if n >= logging.WARNING else "\033[97m" if n >= logging.INFO else "\033[94m" if n >= logging.DEBUG else ""
+        return f"{c}{s}\033[0m" if c else s
+
+
 class LoggerManager:
     """进程内单例：控制台 + 可选文件；业务侧用模块级 `logger.info` 等。"""
 
@@ -28,12 +38,18 @@ class LoggerManager:
     def log_dir(self) -> Path:
         return self._log_dir
 
+    @staticmethod
+    def _release_handlers(logger: logging.Logger) -> None:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            h.close()
+
     def get_logger(self) -> logging.Logger:
         if self._logger is None:
             logger = logging.getLogger(self._logger_name)
             logger.setLevel(logging.DEBUG)
             logger.propagate = False
-            logger.handlers.clear()
+            self._release_handlers(logger)
             logger.addHandler(self._build_console_handler())
             self._logger = logger
         return self._logger
@@ -64,9 +80,9 @@ class LoggerManager:
         return wrapped
 
     def _build_console_handler(self) -> logging.Handler:
-        handler = logging.StreamHandler(stream=sys.stderr)
+        handler = logging.StreamHandler(stream=sys.stdout)
         handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S"))
+        handler.setFormatter(_ColorFmt("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S"))
         return handler
 
     def _build_file_handler(self, log_file: Path) -> logging.Handler:
@@ -85,7 +101,7 @@ class LoggerManager:
         logger = self.get_logger()
         if self._current_log_file == log_file:
             return logger
-        logger.handlers.clear()
+        self._release_handlers(logger)
         logger.addHandler(self._build_console_handler())
         logger.addHandler(self._build_file_handler(log_file))
         self._current_log_file = log_file
