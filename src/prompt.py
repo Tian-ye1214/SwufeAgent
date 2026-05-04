@@ -213,6 +213,11 @@ def get_skills_as_in_system_prompt(skills_manager: SkillsManager) -> str:
     return f"{layout}\n\n{summary}"
 
 
+def get_common_conduct() -> str:
+    """三角色共用的行为约束块（从 prompts/common_conduct.md 加载）。"""
+    return load_prompt("common_conduct.md")
+
+
 def get_manager_system_prompt(
     skills_manager: SkillsManager,
     memory_injection: str = "",
@@ -225,6 +230,7 @@ def get_manager_system_prompt(
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
         long_term_memory=format_long_term_memory_for_prompt(memory_injection),
+        common_conduct=get_common_conduct(),
     )
 
 
@@ -239,6 +245,7 @@ def get_worker_system_prompt(
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
         long_term_memory=format_long_term_memory_for_prompt(memory_injection),
+        common_conduct=get_common_conduct(),
     )
 
 
@@ -246,11 +253,12 @@ def get_coordinator_system_prompt(
     skills_manager: SkillsManager,
     memory_injection: str = "",
 ) -> str:
-    """构建 Coordinator 的系统提示（含 Skills 目录说明与当前摘要）。"""
+    """构建 Coordinator 的系统提示（含 Skills 摘要，可直接解决简单任务或派发）。"""
     template = load_prompt("coordinator_system.md")
     return template.format(
         current_time=format_prompt_current_time(),
         skills_layout=get_skills_layout_text(skills_manager),
         skills_summary=get_skills_summary(skills_manager),
         long_term_memory=format_long_term_memory_for_prompt(memory_injection),
+        common_conduct=get_common_conduct(),
     )

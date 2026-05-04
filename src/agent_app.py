@@ -24,7 +24,7 @@ from ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
-from app_config import get_context_config, get_model_and_params, settings
+from app_config import get_agent_usage_limits, get_context_config, get_model_and_params, settings
 from cli_commands import handle_slash_command
 import logger
 import traceback
@@ -258,7 +258,9 @@ class AgentSystem:
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
         result = await manager_agent.run(
-            planning_prompt, message_history=self._manager_history.messages
+            planning_prompt,
+            message_history=self._manager_history.messages,
+            usage_limits=get_agent_usage_limits(),
         )
         self._manager_history.update(result)
         self._session_logs.for_agent("manager").save(
@@ -292,7 +294,9 @@ class AgentSystem:
         summary_prompt = [summary_text, *attachments] if attachments else summary_text
         try:
             async with manager_agent.run_stream(
-                summary_prompt, message_history=self._manager_history.messages
+                summary_prompt,
+                message_history=self._manager_history.messages,
+                usage_limits=get_agent_usage_limits(),
             ) as stream:
                 collected = []
                 async for chunk in stream.stream_text(delta=True):
@@ -314,7 +318,9 @@ class AgentSystem:
             logger.warning(f"流式输出回退到普通模式: {e}")
             try:
                 final_result = await manager_agent.run(
-                    summary_prompt, message_history=self._manager_history.messages
+                    summary_prompt,
+                    message_history=self._manager_history.messages,
+                    usage_limits=get_agent_usage_limits(),
                 )
                 self._manager_history.update(final_result)
                 self._session_logs.for_agent("manager").save(
@@ -423,7 +429,11 @@ class AgentSystem:
         )
 
         start_time = time.time()
-        result = await agent.run(message.to_prompt(), message_history=history.messages)
+        result = await agent.run(
+            message.to_prompt(),
+            message_history=history.messages,
+            usage_limits=get_agent_usage_limits(),
+        )
         elapsed = time.time() - start_time
 
         logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")

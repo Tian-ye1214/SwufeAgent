@@ -9,7 +9,7 @@ import logger
 from prompt import get_worker_system_prompt, load_prompt
 from ModelGateway.BasicFunction import create_agent
 from ModelGateway.ModelChecker import maybe_auto_compress_async
-from app_config import get_model_and_params
+from app_config import get_agent_usage_limits, get_model_and_params
 from tools.ManagementTools import Task, TaskStatus, TaskManager
 from tools.Memory import ChatHistory
 from tools.conversation_log import ConversationLog
@@ -170,7 +170,11 @@ class WorkerOrchestrator:
             logger.info("=" * 50)
 
             start_time = time.time()
-            result = await worker_agent.run(prompt, message_history=adhoc_history.messages)
+            result = await worker_agent.run(
+                prompt,
+                message_history=adhoc_history.messages,
+                usage_limits=get_agent_usage_limits(),
+            )
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
 
@@ -345,7 +349,9 @@ class WorkerOrchestrator:
 
             start_time = time.time()
             result = await worker_agent.run(
-                prompt_input, message_history=task.worker_chat_history.messages
+                prompt_input,
+                message_history=task.worker_chat_history.messages,
+                usage_limits=get_agent_usage_limits(),
             )
             elapsed = time.time() - start_time
 

@@ -79,5 +79,6 @@
   },
   "short_term_memory": {
     "chunk_max_tokens": 8192
-  }
+  },
+  "request_limit": null
 }

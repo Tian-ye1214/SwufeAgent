@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pydantic_ai.usage import UsageLimits as _UsageLimits
 
 import logger
 from dotenv import dotenv_values
+from pydantic_ai.usage import UsageLimits
 
 _d = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG_FILE = _d / "config.json"
@@ -52,6 +56,15 @@ def save_config(cfg: dict[str, Any] | None = None) -> None:
     _CONFIG = cfg
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def get_agent_usage_limits() -> "_UsageLimits":
+    """单次 Agent 运行对模型请求次数上限"""
+    cfg = settings()
+    raw = cfg["request_limit"]
+    if raw is None or raw.strip().lower() in ("none", "unlimited", "null"):
+        return UsageLimits(request_limit=None)
+    return UsageLimits(request_limit=int(raw))
 
 
 def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:

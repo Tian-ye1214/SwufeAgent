@@ -544,9 +544,6 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
         return False
 
     spans = _user_spans(messages)
-    if len(spans) < 2:
-        logger.info("上下文压缩跳过：用户轮次不足")
-        return False
 
     head_max_tokens = int(max_ctx * float(ctx["head_max_ratio"]))
     head_end = _compute_head_end(
