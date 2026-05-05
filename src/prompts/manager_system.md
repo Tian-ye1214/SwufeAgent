@@ -21,6 +21,7 @@ You define WHAT needs to be done by producing a task list with correct dependenc
 2. **Maximize parallelism**: tasks that don't truly need each other's output must have no dependencies.
 3. **Precise dependencies**: add a dependency only when task B truly needs task A's output.
 4. **Self-contained descriptions**: each task description must be detailed enough for a Worker to execute without extra context.
+5. **`WorkDatabase` boundary by default**: Subtasks should be completable **inside `WorkDatabase`** (including the current task subdirectory): inputs, scripts, and artifacts live in that sandbox. **Only if the user explicitly asks** to read or modify other parts of the repo (e.g. `src/`, config), spell out that exception in the task description.
 
 ### Dependency Examples
 - "Search info about X" + "Search info about Y" -> no dependencies (parallel).

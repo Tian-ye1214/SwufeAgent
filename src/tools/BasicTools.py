@@ -96,6 +96,13 @@ class BasicToolkit:
         self._base_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
 
+    def _safe_path(self, name: str) -> Path:
+        path = self._resolve_path_candidate(name)
+        root = self._WORK_DATABASE_ROOT.resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"Path not under WorkDatabase: {path}")
+        return path
+
     def _browser_headless_from_env(self) -> bool:
         v = (get_env("BROWSER_HEADLESS", warn=False) or "").strip().lower()
         if v in ("0", "false", "no"):
@@ -338,7 +345,7 @@ class BasicToolkit:
                 content = str(content)
 
             self._base_dir.mkdir(parents=True, exist_ok=True)
-            file_path = self._resolve_path_candidate(name)
+            file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -369,7 +376,7 @@ class BasicToolkit:
                 content = str(content)
 
             self._base_dir.mkdir(parents=True, exist_ok=True)
-            file_path = self._resolve_path_candidate(name)
+            file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "a", encoding="utf-8") as f:
                 f.write(content)
@@ -463,7 +470,7 @@ class BasicToolkit:
             args: Optional, command-line arguments to pass to the script
         """
         try:
-            file_path = self._resolve_path_candidate(name)
+            file_path = self._safe_path(name)
             if not file_path.exists():
                 return f"Error: File '{name}' does not exist"
 

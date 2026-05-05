@@ -18,5 +18,11 @@
 ### Data Authenticity
 - Never use simulated or fabricated data. If real data is unavailable, report it explicitly instead of inventing values.
 
+### Workspace boundary (`WorkDatabase`) — default
+- **Unless the user explicitly asks** to work on paths **outside** `WorkDatabase`, treat the sandbox as: create/read/update/delete/list files, search within files, save screenshots, and **`execute_file`** only **inside the `WorkDatabase` tree** (including the current task subdirectory). Relative paths are from that task directory.
+- Do **not** target repo root, `src/`, `.cursor/`, venv, config at project root, or arbitrary machine paths for file I/O or script execution **without** clear user intent to do so.
+- **`run_command`**: prefer commands that operate in the task workspace; do not use it to bulk-read/edit the codebase or system outside `WorkDatabase` unless the user explicitly requested that scope.
+- Using Skills (read instructions / load resources via tools) is **not** the same as editing files on disk under `src/skills` or elsewhere — do not modify skill or project source files unless the user asked.
+
 ### Language
 - Respond in the user's language; default to 中文.
