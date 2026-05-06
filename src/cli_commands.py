@@ -75,6 +75,7 @@ async def handle_slash_command(
     coordinator_history: ChatHistory | None,
     manager_history: ChatHistory | None,
     reset_cli_session_for_load: Callable[[], None],
+    bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None],
 ) -> tuple[bool, bool | None]:
     """
     处理以 / 开头的输入行。
@@ -146,10 +147,12 @@ async def handle_slash_command(
         if agent == "coordinator":
             coordinator_history.set_messages(messages)
             manager_history.reset()
+            bind_loaded_snapshot_for_save("coordinator", load_path, meta)
             print(f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。\n")
         else:
             manager_history.set_messages(messages)
             coordinator_history.reset()
+            bind_loaded_snapshot_for_save("manager", load_path, meta)
             print(f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。\n")
         return True, True
     if cmd == "/compress":

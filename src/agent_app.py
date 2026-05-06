@@ -152,13 +152,19 @@ class AgentSystem:
         self._orchestrator = WorkerOrchestrator(
             self._toolkit,
             self._task_manager,
-            memory_injection_getter=lambda: self._long_term_memory.get_injection(),
+            memory_injection_getter=self._injection_for_session,
         )
         self._session_logs = SessionConversationLogs(
             on_activate=self._orchestrator.set_conversation_session,
             on_reset=self._orchestrator.clear_conversation_session,
         )
         self._context_prewarmed = False
+        self._memory_injection_snapshot: str | None = None
+
+    def _injection_for_session(self) -> str:
+        if self._memory_injection_snapshot is None:
+            self._memory_injection_snapshot = self._long_term_memory.get_injection()
+        return self._memory_injection_snapshot
 
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
@@ -179,6 +185,7 @@ class AgentSystem:
         self._toolkit.reset_task_directory()
         self.reset_manager_history()
         self._session_logs.reset()
+        self._memory_injection_snapshot = None
         history.reset()
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
@@ -236,7 +243,7 @@ class AgentSystem:
             self._toolkit.ask_user,
         ]
         m_name, m_params = get_model_and_params("manager")
-        mem_inj = self._long_term_memory.get_injection()
+        mem_inj = self._injection_for_session()
         mgr_prompt = await asyncio.to_thread(
             get_manager_system_prompt, self._skills_manager, mem_inj
         )
@@ -417,7 +424,7 @@ class AgentSystem:
             self._execute_task_with_worker,
             *self._toolkit.workers_tools,
         ]
-        mem_inj = self._long_term_memory.get_injection()
+        mem_inj = self._injection_for_session()
         coord_prompt = await asyncio.to_thread(
             get_coordinator_system_prompt, self._skills_manager, mem_inj
         )
@@ -500,6 +507,9 @@ class AgentSystem:
                         manager_history=self._manager_history,
                         reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
                             history
+                        ),
+                        bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
+                            agent, path, meta
                         ),
                     )
                     if first_override is not None:

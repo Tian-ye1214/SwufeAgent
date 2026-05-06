@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -25,9 +26,50 @@ from app_config import (
     chat_completion_inference_request_fields,
     get_env,
     get_model_and_params,
+    settings,
 )
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
+
+
+def _long_term_memory_consolidation_params(**kwargs: Any) -> dict[str, int | float]:
+    cfg = settings()["long_term_memory"]["consolidation"]
+    out = {
+        "max_transcript_chars": int(cfg["max_transcript_chars"]),
+        "max_output_tokens": int(cfg["max_output_tokens"]),
+        "log_read_chunk_bytes": int(cfg["log_read_chunk_bytes"]),
+        "merge_min_similarity": float(cfg["merge_min_similarity"]),
+        "merge_max_len_ratio": float(cfg["merge_max_len_ratio"]),
+        "merge_min_len_ratio": float(cfg["merge_min_len_ratio"]),
+        "merge_len_check_min_old_chars": int(cfg["merge_len_check_min_old_chars"]),
+    }
+    out.update(kwargs)
+    return out
+
+"""
+TODO:
+修改为embedding方案！
+"""
+def _merge_looks_like_unrelated_rewrite(old_body: str, new_body: str, **kwargs: Any) -> bool:
+    cfg = _long_term_memory_consolidation_params(**kwargs)
+    o = (old_body or "").strip()
+    n = (new_body or "").strip()
+    if not o:
+        return False
+    if not n:
+        return True
+    ol = len(o)
+    nl = len(n)
+    min_old = int(cfg["merge_len_check_min_old_chars"])
+    if ol >= min_old:
+        lo = max(1, int(ol * float(cfg["merge_min_len_ratio"])))
+        hi = int(ol * float(cfg["merge_max_len_ratio"]))
+        if nl < lo or nl > hi:
+            return True
+    ratio = difflib.SequenceMatcher(a=o, b=n).ratio()
+    if ratio < float(cfg["merge_min_similarity"]):
+        return True
+    return False
 
 
 def _pack_messages_to_chunk_texts(
@@ -85,7 +127,7 @@ class UserMessage:
         return BinaryContent(data=data, media_type=mime)
 
 
-def user_message_from_text(message: str | "UserMessage") -> "UserMessage":
+def user_message_from_text(message: str) -> "UserMessage":
     if isinstance(message, UserMessage):
         return message
     return UserMessage(text=str(message))
@@ -118,11 +160,16 @@ class ChatHistory:
         history.update(result)
     """
 
-    __slots__ = ("_messages", "_compress_summary_state")
+    __slots__ = (
+        "_messages",
+        "_compress_summary_state",
+        "_compress_weak_streak",
+    )
 
     def __init__(self):
         self._messages: list = []
         self._compress_summary_state: str | None = None
+        self._compress_weak_streak: int = 0
 
     def update(self, result) -> None:
         """从 RunResult / StreamedRunResult 提取完整消息列表并保存。"""
@@ -131,6 +178,7 @@ class ChatHistory:
     def reset(self) -> None:
         self._messages = []
         self._compress_summary_state = None
+        self._compress_weak_streak = 0
 
     def set_messages(self, messages: list) -> None:
         """直接替换消息列表（供上下文压缩等使用）。"""
@@ -332,9 +380,6 @@ class LongTermMemory:
     _TARGETS = {"soul": "SOUL.md", "user": "USER.md"}
     _MD_H1_SOUL = re.compile(r"^#\s*SOUL\s*$", re.IGNORECASE)
     _MD_H1_USER = re.compile(r"^#\s*USER\s*$", re.IGNORECASE)
-    _CONSOLIDATION_MAX_TRANSCRIPT_CHARS = 28_000
-    _CONSOLIDATION_MAX_OUTPUT_TOKENS = 4096
-    _LOG_READ_CHUNK_BYTES = 72_000
 
     def __init__(self):
         self._guidance_text: str = ""
@@ -510,6 +555,10 @@ class LongTermMemory:
                 if err:
                     logger.warning(f"长期记忆合并已跳过 {key}：{err}")
                     continue
+                old = (self._get_body(key) or "").strip()
+                if old and _merge_looks_like_unrelated_rewrite(old, text):
+                    logger.warning("长期记忆合并已跳过 %s：新正文与旧正文差异过大（疑似误抽取）", key)
+                    continue
                 self._set_body(key, text)
                 await asyncio.to_thread(self._save_sync, key)
                 changed = True
@@ -569,8 +618,10 @@ class LongTermMemory:
         t = transcript.strip()
         if not t:
             return {"soul": None, "user": None}
-        if truncate and len(t) > self._CONSOLIDATION_MAX_TRANSCRIPT_CHARS:
-            t = t[-self._CONSOLIDATION_MAX_TRANSCRIPT_CHARS :]
+        ltm = _long_term_memory_consolidation_params()
+        max_tc = int(ltm["max_transcript_chars"])
+        if truncate and len(t) > max_tc:
+            t = t[-max_tc:]
             t = "[... earlier content truncated ...]\n\n" + t
 
         api_base = get_env("BASE_URL", warn=False).rstrip("/")
@@ -595,7 +646,7 @@ class LongTermMemory:
             "messages": [{"role": "user", "content": user_content}],
             **chat_completion_inference_request_fields(
                 w_params,
-                max_tokens=self._CONSOLIDATION_MAX_OUTPUT_TOKENS,
+                max_tokens=int(ltm["max_output_tokens"]),
                 temperature=0.2,
                 **kwargs,
             ),
@@ -675,7 +726,10 @@ class LongTermMemory:
                     last_committed = prev
                     try:
                         while pos < size:
-                            to_read = min(self._LOG_READ_CHUNK_BYTES, size - pos)
+                            ltm = _long_term_memory_consolidation_params()
+                            log_chunk_b = int(ltm["log_read_chunk_bytes"])
+                            max_tc = int(ltm["max_transcript_chars"])
+                            to_read = min(log_chunk_b, size - pos)
                             with fp.open("rb") as f:
                                 f.seek(pos)
                                 raw = f.read(to_read)
@@ -684,7 +738,7 @@ class LongTermMemory:
                                 break
                             text = raw.decode("utf-8", errors="replace")
                             ci = 0
-                            maxc = self._CONSOLIDATION_MAX_TRANSCRIPT_CHARS
+                            maxc = max_tc
                             while ci < len(text):
                                 piece = text[ci : ci + maxc]
                                 cj = ci + len(piece)

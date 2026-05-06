@@ -46,6 +46,11 @@
       "token_estimate_fallback_chars_per_token": 4,
       "litellm_model_prices_json_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     },
+    "compression": {
+      "weak_streak_max": 2,
+      "min_saved_ratio": 0.1,
+      "middle_tool_args_max_chars": 1200
+    },
     "coordinator": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
@@ -79,6 +84,17 @@
   },
   "short_term_memory": {
     "chunk_max_tokens": 8192
+  },
+  "long_term_memory": {
+    "consolidation": {
+      "max_transcript_chars": 28000,
+      "max_output_tokens": 4096,
+      "log_read_chunk_bytes": 72000,
+      "merge_min_similarity": 0.35,
+      "merge_max_len_ratio": 2.6,
+      "merge_min_len_ratio": 0.35,
+      "merge_len_check_min_old_chars": 200
+    }
   },
   "request_limit": null
 }

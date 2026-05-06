@@ -19,6 +19,7 @@ from app_config import (
     get_context_profile_roles,
     get_env,
     get_model_and_params,
+    settings,
 )
 from prompt import format_prompt_current_time, load_prompt
 from tools.Memory import ChatHistory, _pydantic_messages_to_text
@@ -356,6 +357,16 @@ def summarize_tool_result(tool_name: str, tool_args: Any, tool_content: str) -> 
     return f"`{name}` {arg_line} → {len(tool_content)} chars"
 
 
+def _elide_tool_call_args_for_compress(arg_txt: str, max_chars: int) -> str:
+    s = (arg_txt or "").strip()
+    if len(s) <= max_chars:
+        return s
+    head = max_chars - 24
+    if head < 80:
+        head = 80
+    return s[:head] + " …(tool args truncated)"
+
+
 def _user_spans(messages: list) -> list[tuple[int, int]]:
     """每个元素为 (span_start_msg_index, exclusive_end)。"""
     starts: list[int] = []
@@ -426,10 +437,12 @@ def _tool_calls_up_to(messages: list, hi: int) -> dict[str, tuple[str, Any]]:
     return out
 
 
-def _middle_segment_markdown(messages: list, lo: int, hi: int) -> str:
+def _middle_segment_markdown(messages: list, lo: int, hi: int, **kwargs: Any) -> str:
     """提取中间对话：用户消息、助手文本、工具调用与工具返回（返回体为单行摘要）。"""
     by_id = _tool_calls_up_to(messages, hi)
     chunks: list[str] = []
+    seen_tool_return_keys: set[tuple[str, str]] = set()
+    arg_cap = int(kwargs["middle_tool_args_max_chars"])
     for idx in range(lo, hi):
         m = messages[idx]
         if isinstance(m, ModelRequest):
@@ -441,6 +454,10 @@ def _middle_segment_markdown(messages: list, lo: int, hi: int) -> str:
                     tname, args = by_id.get(p.tool_call_id, (p.tool_name, None))
                     text_content = p.model_response_str()
                     one_line = summarize_tool_result(tname, args, text_content)
+                    dedupe_key = (p.tool_name or "", one_line)
+                    if dedupe_key in seen_tool_return_keys:
+                        continue
+                    seen_tool_return_keys.add(dedupe_key)
                     chunks.append(f"### 工具返回 `{p.tool_name}`\n{one_line}")
         elif isinstance(m, ModelResponse):
             for p in m.parts:
@@ -448,6 +465,7 @@ def _middle_segment_markdown(messages: list, lo: int, hi: int) -> str:
                     chunks.append(f"### 助手\n{p.content}")
                 elif isinstance(p, BaseToolCallPart):
                     arg_txt = p.args if isinstance(p.args, str) else json.dumps(p.args, ensure_ascii=False)
+                    arg_txt = _elide_tool_call_args_for_compress(arg_txt, arg_cap)
                     chunks.append(f"### 工具调用 `{p.tool_name}`\n{arg_txt}")
     return "\n\n".join(chunks)
 
@@ -543,6 +561,21 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
     if not force and used < threshold:
         return False
 
+    cfg = settings()["context"]["compression"]
+    knobs = {
+            "weak_streak_max": int(cfg["weak_streak_max"]),
+            "min_saved_ratio": float(cfg["min_saved_ratio"]),
+            "middle_tool_args_max_chars": int(cfg["middle_tool_args_max_chars"]),
+    }
+
+    if not force and history._compress_weak_streak >= int(knobs["weak_streak_max"]):
+        logger.warning(
+            "上下文压缩跳过：连续 %s 次压缩收益低于 %.0f%%（抗抖动）",
+            int(knobs["weak_streak_max"]),
+            float(knobs["min_saved_ratio"]) * 100,
+        )
+        return False
+
     spans = _user_spans(messages)
 
     head_max_tokens = int(max_ctx * float(ctx["head_max_ratio"]))
@@ -571,7 +604,7 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
         return False
 
     prev_summary = history.compress_summary_state
-    excerpt = _middle_segment_markdown(messages, middle_lo, middle_hi)
+    excerpt = _middle_segment_markdown(messages, middle_lo, middle_hi, **knobs)
 
     system_prompt = load_prompt("context_compress_structured_system.md").format(
         current_time=format_prompt_current_time()
@@ -601,6 +634,14 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
     )
     history.set_messages(new_messages)
     history.compress_summary_state = summary_md.strip()
+
+    used_after = estimate_history_tokens(new_messages, chars_per_token=cpt, role=role)
+    denom = max(used, 1)
+    saved_ratio = (used - used_after) / denom
+    if saved_ratio < float(knobs["min_saved_ratio"]):
+        history._compress_weak_streak += 1
+    else:
+        history._compress_weak_streak = 0
     return True
 
 

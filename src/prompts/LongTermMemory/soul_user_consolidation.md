@@ -10,6 +10,13 @@ You are responsible for **merging** the durable facts from the **“full text to
 - **soul**: **Stable, reusable** information about the assistant, environment, and project habits, written as **valid Markdown body text** (you may use `##` / `###` sections, ordered or unordered lists, **bold** emphasis, and so on, for long-term readability and maintenance); merge overlapping wording and **remove duplicates, contradictions, or one-off minutiae**; if the new text conflicts with the old, prefer the **later, more reliable** information in the **“full text to analyze”** and resolve to **one** consistent phrasing (unless the two clearly refer to different facts).
 - **user**: **Enduring** personal information—preferences, taboos, forms of address, working style, and the like—likewise in **a single** document, also as **valid Markdown body text**; the line from soul is: **“about the user as a person”** versus **“about the environment and how the assistant works.”**
 
+## Minimal-change rule (anti–whole-document drift)
+
+- Treat the **current SOUL/USER** shown above as the **canonical base**: carry forward all still-valid sentences and structure; **rewrite only** where the new evidence clearly adds, corrects, or removes something.
+- If the **“full text to analyze”** is noisy, speculative, or a **single stray line** that does not clearly belong in durable memory, **ignore it** and return **`null`** for that category.
+- If you are **not sure** whether a fact is true or will matter next session, output **`null`** for that category—**do not guess** or invent user traits/project conventions.
+- **User** (`user`): record preferences/identity only when **explicitly stated or strongly implied across the transcript** (not one-off jokes, not assistant hallucinations).
+
 ## Do **not** include
 
 - Single-task progress, TODOs, or provisional conclusions

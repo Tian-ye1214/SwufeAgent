@@ -35,7 +35,7 @@ def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any
 class ConversationLog:
     """对话落盘。save() 写入两份文件：人类可读的 .json 与可加载历史的 .model_messages.json。"""
 
-    def __init__(self, name: str, date: str, topic: str, *, sub_id: str | None = None) -> None:
+    def __init__(self, name: str, date: str, topic: str, *, sub_id: str | None = None, existing_run_base: Path | None = None) -> None:
         self._name = _safe_segment(name, 40)
         self._date = _safe_segment(date, 16)
         self._topic = _safe_segment(topic, 80)
@@ -43,7 +43,7 @@ class ConversationLog:
         if sub_id:
             path = path / _safe_segment(sub_id, 60)
         self._dir = path
-        self._run_base: Path | None = None
+        self._run_base: Path | None = existing_run_base
         self._lock = threading.Lock()
 
     def save(self, model_messages: list[Any], *, extra: dict[str, Any] | None = None) -> None:
@@ -175,6 +175,29 @@ class SessionConversationLogs:
         self._logs.clear()
         if self._on_reset:
             self._on_reset()
+
+    def bind_loaded_snapshot(self, agent_name: str, load_path: Path, meta: dict[str, Any]) -> None:
+        """将会话日志绑定到 /load 的原始快照文件，后续保存继续覆盖该文件。"""
+        p = Path(load_path)
+        base = p.with_suffix("")
+        date = _safe_segment(str(meta.get("date") or ""), 16)
+        topic = _safe_segment(str(meta.get("topic") or ""), 80)
+        if not date:
+            date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
+        if not topic:
+            topic = _safe_segment(p.stem.replace(".model_messages", ""), 80)
+        self._date = date
+        self._topic = topic
+        self._logs.clear()
+        key = _safe_segment(agent_name, 40)
+        self._logs[key] = ConversationLog(
+            key,
+            self._date,
+            self._topic,
+            existing_run_base=base,
+        )
+        if self._on_activate:
+            self._on_activate(self._date, self._topic)
 
     def for_agent(self, name: str) -> ConversationLog:
         key = _safe_segment(name, 40)
