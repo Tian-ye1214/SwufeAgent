@@ -64,6 +64,13 @@ class BasicToolkit:
     def base_dir(self) -> Path:
         return self._base_dir
 
+    def close(self) -> None:
+        """进程退出时关闭 Playwright 等资源。"""
+        bs = getattr(self, "_browser_session", None)
+        if bs is not None:
+            bs.close()
+            del self._browser_session
+
     def set_task_directory(self, task_name: str) -> Path:
         """
         Set a dedicated work directory for the current task.

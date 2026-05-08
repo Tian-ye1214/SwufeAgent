@@ -31,11 +31,19 @@ import traceback
 import time
 import asyncio
 import sys
-from typing import Tuple
+import uuid
+from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
+from lifecycle import (
+    AgentRegistry,
+    LifecycleHooks,
+    register_default_lifecycle_logging,
+    run_agent_stream_with_lifecycle,
+    run_agent_with_lifecycle,
+)
 
 
 def _print_startup_logo() -> None:
@@ -126,6 +134,11 @@ class AgentSystem:
     """Agent 任务协调系统，管理 Manager/Coordinator 的对话历史与执行流程。"""
 
     def __init__(self):
+        self._registry = AgentRegistry()
+        self._hooks = LifecycleHooks()
+        register_default_lifecycle_logging(self._hooks)
+        self._background_tasks: set[asyncio.Task] = set()
+        self._shutdown_done = False
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
@@ -153,6 +166,8 @@ class AgentSystem:
             self._toolkit,
             self._task_manager,
             memory_injection_getter=self._injection_for_session,
+            registry=self._registry,
+            hooks=self._hooks,
         )
         self._session_logs = SessionConversationLogs(
             on_activate=self._orchestrator.set_conversation_session,
@@ -160,6 +175,86 @@ class AgentSystem:
         )
         self._context_prewarmed = False
         self._memory_injection_snapshot: str | None = None
+        self._current_turn: dict[str, Any] | None = None
+        self._cli_turn_id: str | None = None
+
+    @property
+    def registry(self) -> AgentRegistry:
+        return self._registry
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        t = asyncio.create_task(coro)
+        self._background_tasks.add(t)
+        t.add_done_callback(self._background_tasks.discard)
+
+    async def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        await self._registry.cancel_all()
+        pending = list(self._background_tasks)
+        if pending:
+            logger.info("[lifecycle] draining %s background task(s)", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._toolkit.close()
+        logger.info("[lifecycle] shutdown complete")
+
+    def _on_turn_task_done(self, done_task: asyncio.Task) -> None:
+        ct = self._current_turn
+        if ct is not None and ct.get("task") is done_task:
+            self._current_turn = None
+
+    async def cancel_current_turn(self) -> str:
+        ct = self._current_turn
+        if ct is None:
+            return "当前没有正在执行的用户任务。"
+        t: asyncio.Task = ct["task"]
+        await self._registry.cancel_all()
+        if not t.done():
+            t.cancel()
+        try:
+            await asyncio.wait_for(t, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        self._current_turn = None
+        return "已请求停止当前任务（本回合未完整写入对话历史）。"
+
+    def _start_user_turn(self, message: UserMessage, history: ChatHistory) -> bool:
+        if self._current_turn is not None:
+            return False
+        turn_id = uuid.uuid4().hex[:8]
+        task = asyncio.create_task(self._run_user_turn(turn_id, message, history))
+        self._current_turn = {"turn_id": turn_id, "task": task, "text": (message.text or "")[:200]}
+        task.add_done_callback(self._on_turn_task_done)
+        return True
+
+    async def _run_user_turn(self, turn_id: str, message: UserMessage, history: ChatHistory) -> None:
+        try:
+            await self.run_agent_system(
+                message,
+                history,
+                conversation_log_hint=(message.text or "")[:40],
+                conversation_log_extra={"turn_id": turn_id},
+                turn_id=turn_id,
+            )
+        except asyncio.CancelledError:
+            logger.info("用户回合已取消 turn_id=%s", turn_id)
+        except ModelHTTPError as e:
+            body = e.body or {}
+            code = body.get("code", "") if isinstance(body, dict) else ""
+            if code == "data_inspection_failed":
+                logger.warning(
+                    "\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n"
+                    '   请尝试换一种表达方式重新输入，或输入"新任务"清空上下文后重试。'
+                )
+            else:
+                logger.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
+                logger.error(f"详细信息:\n{traceback.format_exc()}")
+                self._task_manager.reset()
+        except Exception as e:
+            logger.error(f"\n❌ 未预期的系统错误: {e}")
+            logger.error(f"详细信息:\n{traceback.format_exc()}")
+            self._task_manager.reset()
 
     def _injection_for_session(self) -> str:
         if self._memory_injection_snapshot is None:
@@ -191,8 +286,8 @@ class AgentSystem:
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
         """每轮 Coordinator 结束后：后台静默合并长期记忆（不阻塞当前回复）。"""
         msgs = list(history.messages)
-        asyncio.create_task(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
-        asyncio.create_task(
+        self._spawn_background(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
+        self._spawn_background(
             self._long_term_memory.consolidate_from_logs(logger.LOG_DIR, silent=True)
         )
 
@@ -236,6 +331,7 @@ class AgentSystem:
         """
         self._session_logs.ensure(user_input or "task")
         logger.info("[用户]\n%s", user_input)
+        tid = self._cli_turn_id
 
         manager_tools = [
             self._task_manager.create_todo_list,
@@ -264,14 +360,21 @@ class AgentSystem:
             )
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
-        result = await manager_agent.run(
-            planning_prompt,
+        result = await run_agent_with_lifecycle(
+            agent=manager_agent,
+            prompt=planning_prompt,
+            role="manager",
+            registry=self._registry,
+            hooks=self._hooks,
+            parent_run_id=None,
+            turn_id=tid,
             message_history=self._manager_history.messages,
             usage_limits=get_agent_usage_limits(),
         )
         self._manager_history.update(result)
         self._session_logs.for_agent("manager").save(
-            self._manager_history.messages, extra={"kind": "manager", "phase": "planning"}
+            self._manager_history.messages,
+            extra={"kind": "manager", "phase": "planning", "turn_id": tid},
         )
         try:
             if await maybe_auto_compress_async(self._manager_history, role="manager"):
@@ -285,7 +388,7 @@ class AgentSystem:
         logger.info("=" * 60)
 
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
-            user_input, attachments=attachments
+            user_input, attachments=attachments, turn_id=tid
         )
         logger.info(f"[任务汇总]\n{final_summary}")
 
@@ -300,20 +403,43 @@ class AgentSystem:
         )
         summary_prompt = [summary_text, *attachments] if attachments else summary_text
         try:
-            async with manager_agent.run_stream(
-                summary_prompt,
-                message_history=self._manager_history.messages,
-                usage_limits=get_agent_usage_limits(),
-            ) as stream:
-                collected = []
+
+            async def _consume_summary_stream(stream) -> str:
+                collected: list[str] = []
+                render_buf = ""
                 async for chunk in stream.stream_text(delta=True):
-                    print(chunk, end="", flush=True)
+                    if not chunk:
+                        continue
                     collected.append(chunk)
+                    render_buf += chunk
+                    while "\n" in render_buf:
+                        line, render_buf = render_buf.split("\n", 1)
+                        print(line)
+                    if len(render_buf) >= 240:
+                        print(render_buf, end="", flush=True)
+                        render_buf = ""
+                if render_buf:
+                    print(render_buf, end="", flush=True)
                 print(flush=True)
                 final_text = "".join(collected)
                 self._manager_history.update(stream)
+                return final_text
+
+            final_text = await run_agent_stream_with_lifecycle(
+                agent=manager_agent,
+                role="manager",
+                registry=self._registry,
+                hooks=self._hooks,
+                parent_run_id=None,
+                turn_id=tid,
+                message_history=self._manager_history.messages,
+                usage_limits=get_agent_usage_limits(),
+                prompt=summary_prompt,
+                consumer=_consume_summary_stream,
+            )
             self._session_logs.for_agent("manager").save(
-                self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
+                self._manager_history.messages,
+                extra={"kind": "manager", "phase": "summary", "turn_id": tid},
             )
             try:
                 if await maybe_auto_compress_async(self._manager_history, role="manager"):
@@ -324,14 +450,21 @@ class AgentSystem:
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
             try:
-                final_result = await manager_agent.run(
-                    summary_prompt,
+                final_result = await run_agent_with_lifecycle(
+                    agent=manager_agent,
+                    prompt=summary_prompt,
+                    role="manager",
+                    registry=self._registry,
+                    hooks=self._hooks,
+                    parent_run_id=None,
+                    turn_id=tid,
                     message_history=self._manager_history.messages,
                     usage_limits=get_agent_usage_limits(),
                 )
                 self._manager_history.update(final_result)
                 self._session_logs.for_agent("manager").save(
-                    self._manager_history.messages, extra={"kind": "manager", "phase": "summary"}
+                    self._manager_history.messages,
+                    extra={"kind": "manager", "phase": "summary", "turn_id": tid},
                 )
                 try:
                     if await maybe_auto_compress_async(self._manager_history, role="manager"):
@@ -379,7 +512,11 @@ class AgentSystem:
                 - result (str): The output message from the Worker Agent
         """
         return await self._orchestrator.execute_task_with_worker(
-            task_description, user_goal, retry_info, attachments=self._current_attachments
+            task_description,
+            user_goal,
+            retry_info,
+            attachments=self._current_attachments,
+            turn_id=self._cli_turn_id,
         )
 
     async def run_agent_system(
@@ -389,6 +526,7 @@ class AgentSystem:
         *,
         conversation_log_hint: str = "",
         conversation_log_extra: dict | None = None,
+        turn_id: str | None = None,
     ) -> tuple["ChatHistory", str]:
         """
         任务协调系统入口，负责判断任务复杂度并调用相应的执行器。
@@ -404,6 +542,28 @@ class AgentSystem:
             message = user_message_from_text(message)
         self._current_attachments = message.attachments
 
+        prev_cli_turn = self._cli_turn_id
+        self._cli_turn_id = turn_id
+        try:
+            return await self._run_agent_system_impl(
+                message,
+                history,
+                conversation_log_hint=conversation_log_hint,
+                conversation_log_extra=conversation_log_extra,
+                turn_id=turn_id,
+            )
+        finally:
+            self._cli_turn_id = prev_cli_turn
+
+    async def _run_agent_system_impl(
+        self,
+        message: UserMessage,
+        history: "ChatHistory | None",
+        *,
+        conversation_log_hint: str,
+        conversation_log_extra: dict | None,
+        turn_id: str | None,
+    ) -> tuple["ChatHistory", str]:
         if not self._context_prewarmed:
             await prewarm_effective_max_contexts_by_role_async(
                 reason="非 CLI 首条任务（预取三角色）"
@@ -436,8 +596,14 @@ class AgentSystem:
         )
 
         start_time = time.time()
-        result = await agent.run(
-            message.to_prompt(),
+        result = await run_agent_with_lifecycle(
+            agent=agent,
+            prompt=message.to_prompt(),
+            role="coordinator",
+            registry=self._registry,
+            hooks=self._hooks,
+            parent_run_id=None,
+            turn_id=turn_id,
             message_history=history.messages,
             usage_limits=get_agent_usage_limits(),
         )
@@ -462,7 +628,7 @@ class AgentSystem:
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
         _print_startup_logo()
         logger.info("=" * 60)
-        logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出")
+        logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出；/stop 中断当前任务")
         logger.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
         logger.info("=" * 60)
         await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
@@ -471,96 +637,123 @@ class AgentSystem:
         is_first_input = True
         history = ChatHistory()
 
-        while True:
-            try:
-                worker_histories = [
-                    t.worker_chat_history for t in self._task_manager.tasks.values()
+        async def process_one_line(raw_input: str) -> str:
+            nonlocal history, is_first_input
+            raw_input = raw_input.strip()
+            if not raw_input:
+                return "continue"
+
+            has_any_history = bool(history.messages) or bool(self._manager_history.messages)
+            if has_any_history:
+                print("\n── 上下文占用 ──")
+                roles_and_histories = [
+                    ("manager", "Manager", [self._manager_history]),
+                    ("coordinator", "Coordinator", [history]),
                 ]
-                has_any_history = bool(history.messages) or bool(self._manager_history.messages)
-                if has_any_history:
-                    print("\n── 上下文占用 ──")
-                    roles_and_histories = [
-                        ("manager", "Manager", [self._manager_history]),
-                        ("coordinator", "Coordinator", [history]),
-                    ]
-                    for role, label, histories in roles_and_histories:
-                        ctx_cfg = get_context_config(role)
-                        cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
-                        max_tok = await get_effective_max_context_async(role=role)
-                        used_tok = 0
-                        for h in histories:
-                            if h.messages:
-                                used_tok += await estimate_history_tokens_async(
-                                    h.messages, chars_per_token=cpt, role=role
-                                )
-                        print(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
-                raw_input = (await asyncio.to_thread(input, "\n\U0001f4dd 请输入您的任务: ")).strip()
-                if not raw_input:
-                    continue
+                for role, label, histories in roles_and_histories:
+                    ctx_cfg = get_context_config(role)
+                    cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
+                    max_tok = await get_effective_max_context_async(role=role)
+                    used_tok = 0
+                    for h in histories:
+                        if h.messages:
+                            used_tok += await estimate_history_tokens_async(
+                                h.messages, chars_per_token=cpt, role=role
+                            )
+                    print(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
 
-                if raw_input.startswith("/"):
-                    await self._sync_skills_for_user_turn()
-                    consumed, first_override = await handle_slash_command(
-                        raw_input,
-                        self._skills_manager,
-                        coordinator_history=history,
-                        manager_history=self._manager_history,
-                        reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
-                            history
-                        ),
-                        bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
-                            agent, path, meta
-                        ),
-                    )
-                    if first_override is not None:
-                        is_first_input = first_override
-                    if consumed:
-                        continue
-
-                if raw_input.lower() in ["quit", "exit", "退出"]:
-                    logger.info("👋 再见！")
-                    break
-
-                if "新任务" in raw_input:
-                    self.reset_cli_interactive_session(history)
-                    is_first_input = True
-                    continue
-
-                message = await asyncio.to_thread(user_message_from_cli_input, raw_input)
-                if message.attachments:
-                    logger.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
-
-                if is_first_input:
-                    task_name = message.text[:30].replace(" ", "_")
-                    logger.setup_task_logger(task_name)
-                    self._toolkit.set_task_directory(task_name)
-                    is_first_input = False
-
-                history, _ = await self.run_agent_system(
-                    message, history, conversation_log_hint=message.text[:40]
+            if raw_input.startswith("/"):
+                await self._sync_skills_for_user_turn()
+                _consumed, first_override = await handle_slash_command(
+                    raw_input,
+                    self._skills_manager,
+                    coordinator_history=history,
+                    manager_history=self._manager_history,
+                    reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
+                        history
+                    ),
+                    bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
+                        agent, path, meta
+                    ),
+                    system=self,
                 )
+                if first_override is not None:
+                    is_first_input = first_override
+                return "continue"
 
-            except KeyboardInterrupt:
-                logger.info("\n\n👋 程序已中断，再见！")
-                break
+            if raw_input.lower() in ["quit", "exit", "退出"]:
+                if self._current_turn is not None:
+                    print("请先输入 /stop 结束当前任务，再退出。\n")
+                    return "continue"
+                logger.info("👋 再见！")
+                return "break"
 
-            except ModelHTTPError as e:
-                body = e.body or {}
-                code = body.get("code", "") if isinstance(body, dict) else ""
-                if code == "data_inspection_failed":
-                    logger.warning(
-                        "\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n"
-                        '   请尝试换一种表达方式重新输入，或输入"新任务"清空上下文后重试。'
-                    )
-                else:
-                    logger.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
-                    logger.error(f"详细信息:\n{traceback.format_exc()}")
-                    self._task_manager.reset()
+            if "新任务" in raw_input:
+                if self._current_turn is not None:
+                    print("请先输入 /stop 结束当前任务，再执行「新任务」。\n")
+                    return "continue"
+                self.reset_cli_interactive_session(history)
+                is_first_input = True
+                return "continue"
 
-            except Exception as e:
-                logger.error(f"\n❌ 未预期的系统错误: {e}")
-                logger.error(f"详细信息:\n{traceback.format_exc()}")
-                self._task_manager.reset()
+            if self._current_turn is not None:
+                print(
+                    "当前有任务正在执行。请输入 /stop 中断，或等待完成后再输入新内容。\n"
+                    "（斜杠命令如 /status、/cancel 仍可直接使用。）\n"
+                )
+                return "continue"
+
+            message = await asyncio.to_thread(user_message_from_cli_input, raw_input)
+            if message.attachments:
+                logger.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
+
+            if is_first_input:
+                task_name = message.text[:30].replace(" ", "_")
+                logger.setup_task_logger(task_name)
+                self._toolkit.set_task_directory(task_name)
+                is_first_input = False
+
+            if not self._start_user_turn(message, history):
+                print("无法启动任务（已有运行中的回合）。\n")
+            return "continue"
+
+        try:
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                from prompt_toolkit import PromptSession
+                from prompt_toolkit.patch_stdout import patch_stdout
+
+                session = PromptSession()
+
+                async def read_line() -> str:
+                    return (await session.prompt_async("\n📝 请输入您的任务: ")).strip()
+
+                with patch_stdout():
+                    while True:
+                        try:
+                            action = await process_one_line(await read_line())
+                            if action == "break":
+                                break
+                        except KeyboardInterrupt:
+                            logger.info("\n\n👋 程序已中断，再见！")
+                            break
+                        except asyncio.CancelledError:
+                            logger.info("当前 Agent 运行已取消。")
+                            break
+            else:
+                while True:
+                    try:
+                        raw = (await asyncio.to_thread(input, "\n📝 请输入您的任务: ")).strip()
+                        action = await process_one_line(raw)
+                        if action == "break":
+                            break
+                    except KeyboardInterrupt:
+                        logger.info("\n\n👋 程序已中断，再见！")
+                        break
+                    except asyncio.CancelledError:
+                        logger.info("当前 Agent 运行已取消。")
+                        break
+        finally:
+            await self.shutdown()
 
 
 def main() -> None:

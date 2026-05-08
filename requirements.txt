@@ -1,3 +1,4 @@
+prompt_toolkit>=3.0.0
 pydantic-ai==1.80.0
 tiktoken==0.12.0
 pydantic-ai-slim[anthropic]==1.80.0

@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=3.0.2",
     "pillow>=12.2.0",
     "playwright>=1.49.0",
+    "prompt-toolkit>=3.0.0",
     "pydantic-ai==1.80.0",
     "pydantic-ai-slim[anthropic]==1.80.0",
     "pyinstaller>=6.20.0",
