@@ -46,6 +46,11 @@ class ConversationLog:
         self._run_base: Path | None = existing_run_base
         self._lock = threading.Lock()
 
+    def model_messages_path(self) -> Path | None:
+        if self._run_base is None:
+            return None
+        return self._run_base.with_suffix(".model_messages.json")
+
     def save(self, model_messages: list[Any], *, extra: dict[str, Any] | None = None) -> None:
         """模型返回后调用；异步落盘，不阻塞事件循环。同一会话多次调用覆盖同一对文件。"""
         with self._lock:
@@ -198,6 +203,11 @@ class SessionConversationLogs:
         )
         if self._on_activate:
             self._on_activate(self._date, self._topic)
+
+    def session_key(self) -> str | None:
+        if self._date is not None and self._topic is not None:
+            return f"{self._date}/{self._topic}"
+        return None
 
     def for_agent(self, name: str) -> ConversationLog:
         key = _safe_segment(name, 40)

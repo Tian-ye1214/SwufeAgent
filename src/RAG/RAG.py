@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import logger
@@ -12,20 +13,28 @@ from RAG.embedding_function import embed_texts, rerank_documents
 class RAG:
     def __init__(
         self,
-        db_path: str | None = None,
-        table_name: str = "knowledge_chunks",
-        chunk_size: int = 1024,
-        overlap: int = 128,
-        vector_search_limit: int | None = 50,
-        final_top_k: int | None = 10,
-        vector_dim: int | None = 1024,
+        db_path: str | None,
+        table_name: str,
+        chunk_size: int,
+        overlap: int,
+        vector_search_limit: int,
+        final_top_k: int,
+        vector_dim: int,
         *,
-        use_rerank: bool | None = None,
+        use_rerank: bool,
+        extended_schema: bool = False,
+        index_config: dict | None = None,
     ):
         base = db_path or get_env("RAG_DB_PATH", warn=False) or os.path.join(
             os.getcwd(), "data", "rag_lancedb"
         )
-        self._db = EmbedDataBase(base, table_name=table_name, vector_dim=vector_dim)
+        self._db = EmbedDataBase(
+            base,
+            table_name=table_name,
+            vector_dim=vector_dim,
+            extended_schema=extended_schema,
+            index_config=index_config,
+        )
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.vector_search_limit = vector_search_limit
@@ -75,9 +84,34 @@ class RAG:
             {"vector": vectors[i], "text": texts[i], "source": sources[i]}
             for i in range(len(pairs))
         ]
-        await self._db.add_vectors(rows)
-        n = len(rows)
+        n = await self._db.add_vectors(rows)
         logger.info("RAG ingest_chunk_pairs: rows=%d", n)
+        return n
+
+    async def ingest_turn_rows(self, rows: list[dict[str, Any]]) -> int:
+        """短期记忆：每条含 text、source、id，及可选 agent、session_key、created_at。"""
+        if not rows:
+            return 0
+        await self._db.ensure_connected()
+        texts = [r["text"] for r in rows]
+        vectors = await embed_texts(texts)
+        now = _datetime_now_utc()
+        built: list[dict[str, Any]] = []
+        for i, r in enumerate(rows):
+            built.append(
+                {
+                    "vector": vectors[i],
+                    "text": texts[i],
+                    "source": r.get("source", "") or "",
+                    "id": r.get("id", "") or r.get("source", "") or "",
+                    "created_at": r.get("created_at", "") or now,
+                    "agent": r.get("agent", "") or "",
+                    "session_key": r.get("session_key", "") or "",
+                }
+            )
+        n = await self._db.add_vectors(built)
+        await self._db.ensure_vector_index()
+        logger.info("RAG ingest_turn_rows: rows=%d", n)
         return n
 
     async def retrieve(self, query: str) -> list[dict[str, Any]]:
@@ -102,12 +136,13 @@ class RAG:
                 return []
 
             if not self._use_rerank:
+                cap = min(self.final_top_k, len(candidates))
                 out = [
                     {
                         **candidates[i],
-                        "relevance_score": 1.0 - (i / max(self.vector_search_limit, 1)) * 0.01,
+                        "relevance_score": 1.0 - (i / max(cap, 1)) * 0.01,
                     }
-                    for i in range(self.vector_search_limit)
+                    for i in range(cap)
                 ]
                 logger.info("RAG retrieve: 无 rerank，返回条数=%d", len(out))
                 return out
@@ -127,3 +162,7 @@ class RAG:
         except Exception as e:
             logger.error("RAG retrieve 失败: %s", e, exc_info=True)
             raise
+
+
+def _datetime_now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

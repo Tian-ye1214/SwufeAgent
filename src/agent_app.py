@@ -26,6 +26,7 @@ from ModelGateway.ModelChecker import (
 )
 from app_config import get_agent_usage_limits, get_context_config, get_model_and_params, settings
 from cli_commands import handle_slash_command
+from cli_ui import consume_stream_text_to_stdout, format_user_log_text, print_startup_logo
 import logger
 import traceback
 import time
@@ -46,90 +47,6 @@ from lifecycle import (
 )
 
 
-def _print_startup_logo() -> None:
-    stdout_encoding = (sys.stdout.encoding or "").lower()
-    unicode_safe = "utf" in stdout_encoding
-
-    def color_text(r: int, g: int, b: int, text: str) -> str:
-        return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
-
-    logo_lines = [
-        "██████╗ ███████╗██████╗ ██╗      ██████╗ ████████╗██╗   ██╗███████╗",
-        "██╔══██╗██╔════╝██╔══██╗██║     ██╔═══██╗╚══██╔══╝██║   ██║██╔════╝",
-        "██████╔╝█████╗  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║███████╗",
-        "██╔══██╗██╔══╝  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║╚════██║",
-        "██║  ██║███████╗██████╔╝███████╗╚██████╔╝   ██║   ╚██████╔╝███████║",
-        "╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝ ╚═════╝    ╚═╝    ╚═════╝ ╚══════╝",
-    ]
-    shadow_char = "░" if unicode_safe else "."
-    shadow_offset_row = 1
-    shadow_offset_col = 2
-    shadow_color = (70, 40, 60)
-    start_color = (255, 80, 60)
-    end_color = (140, 50, 130)
-
-    max_width = max(len(line) for line in logo_lines)
-    total_rows = len(logo_lines)
-    canvas_rows = total_rows + shadow_offset_row
-    canvas_cols = max_width + shadow_offset_col
-    canvas = [[(" ", None) for _ in range(canvas_cols)] for _ in range(canvas_rows)]
-
-    for row_idx, line in enumerate(logo_lines):
-        for col_idx, ch in enumerate(line):
-            if ch == " ":
-                continue
-            ratio = col_idx / (max_width - 1) if max_width > 1 else 0
-            r = int(start_color[0] + (end_color[0] - start_color[0]) * ratio)
-            g = int(start_color[1] + (end_color[1] - start_color[1]) * ratio)
-            b = int(start_color[2] + (end_color[2] - start_color[2]) * ratio)
-            canvas[row_idx][col_idx] = (ch, (r, g, b))
-
-    for row_idx in range(total_rows):
-        for col_idx in range(max_width):
-            original_char = (
-                logo_lines[row_idx][col_idx] if col_idx < len(logo_lines[row_idx]) else " "
-            )
-            if original_char == " ":
-                continue
-            shadow_row = row_idx + shadow_offset_row
-            shadow_col = col_idx + shadow_offset_col
-            if (
-                0 <= shadow_row < canvas_rows
-                and 0 <= shadow_col < canvas_cols
-                and canvas[shadow_row][shadow_col][0] == " "
-            ):
-                canvas[shadow_row][shadow_col] = (shadow_char, shadow_color)
-
-    print()
-    for row in canvas:
-        line_text = ""
-        for ch, color in row:
-            if color is None:
-                line_text += ch
-            else:
-                line_text += color_text(color[0], color[1], color[2], ch)
-        print(line_text)
-
-    if unicode_safe:
-        tagline = "❦ ────  红莲极意  ·  RedLotus Agent  ──── ❦"
-    else:
-        tagline = "<>----  RedLotus Agent  ----<>"
-    pad = max(0, (max_width + shadow_offset_col - len(tagline)) // 2)
-    print(" " * pad + color_text(255, 165, 90, tagline))
-    print()
-
-
-def _format_user_log_text(message: UserMessage) -> str:
-    """供任务 .log 落盘：用户可见文本 + 附件说明。"""
-    t = (message.text or "").strip()
-    n = len(message.attachments or [])
-    if n and t:
-        return f"{t}\n（含 {n} 个多媒体附件）"
-    if n:
-        return f"（仅 {n} 个多媒体附件，无文本）"
-    return t or "（空文本）"
-
-
 class AgentSystem:
     """Agent 任务协调系统，管理 Manager/Coordinator 的对话历史与执行流程。"""
 
@@ -144,12 +61,8 @@ class AgentSystem:
         self._current_attachments: list = []
         self._long_term_memory = LongTermMemory()
         self._long_term_memory.refresh_from_disk_sync()
-        _stm_cfg = settings()["short_term_memory"]
-        _chunk_max_tokens = int(_stm_cfg["chunk_max_tokens"])
-        _cpt = float(settings()["context"]["defaults"]["token_estimate_fallback_chars_per_token"])
         self._short_term_memory = ShortTermMemory(
-            _chunk_max_tokens,
-            _cpt,
+            settings()["short_term_memory"],
             log_root=logger.LOG_DIR,
         )
         self._toolkit = BasicToolkit(
@@ -168,6 +81,7 @@ class AgentSystem:
             memory_injection_getter=self._injection_for_session,
             registry=self._registry,
             hooks=self._hooks,
+            short_term_memory=self._short_term_memory,
         )
         self._session_logs = SessionConversationLogs(
             on_activate=self._orchestrator.set_conversation_session,
@@ -177,10 +91,37 @@ class AgentSystem:
         self._memory_injection_snapshot: str | None = None
         self._current_turn: dict[str, Any] | None = None
         self._cli_turn_id: str | None = None
+        self._session_key: str | None = None
 
     @property
     def registry(self) -> AgentRegistry:
         return self._registry
+
+    @property
+    def session_key(self) -> str | None:
+        return self._session_key
+
+    async def bind_session(self, session_key: str) -> None:
+        self._session_key = session_key
+        await self._registry.ensure_agent(session_key, "coordinator")
+        await self._registry.ensure_agent(session_key, "manager")
+        self._orchestrator.set_session_key(session_key)
+
+    async def end_session_agents(self, session_key: str) -> None:
+        await self._registry.cancel_session(session_key)
+        await self._registry.remove_session(session_key)
+        if self._session_key == session_key:
+            self._session_key = None
+            self._orchestrator.set_session_key(None)
+
+    def _require_session_key(self) -> str:
+        if not self._session_key:
+            raise RuntimeError("会话未绑定，请先调用 bind_session")
+        return self._session_key
+
+    async def _agent_id(self, role: str, suffix: str | None = None) -> str:
+        sk = self._require_session_key()
+        return await self._registry.ensure_agent(sk, role, suffix)
 
     def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
         t = asyncio.create_task(coro)
@@ -191,11 +132,14 @@ class AgentSystem:
         if self._shutdown_done:
             return
         self._shutdown_done = True
+        if self._session_key:
+            await self.end_session_agents(self._session_key)
         await self._registry.cancel_all()
         pending = list(self._background_tasks)
         if pending:
             logger.info("[lifecycle] draining %s background task(s)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
+        await self._short_term_memory.drain()
         self._toolkit.close()
         logger.info("[lifecycle] shutdown complete")
 
@@ -209,7 +153,11 @@ class AgentSystem:
         if ct is None:
             return "当前没有正在执行的用户任务。"
         t: asyncio.Task = ct["task"]
-        await self._registry.cancel_all()
+        turn_id = ct.get("turn_id")
+        if turn_id:
+            await self._registry.cancel_turn(turn_id)
+        else:
+            await self._registry.cancel_all()
         if not t.done():
             t.cancel()
         try:
@@ -274,8 +222,10 @@ class AgentSystem:
     def reset_manager_history(self):
         self._manager_history.reset()
 
-    def reset_cli_interactive_session(self, history: ChatHistory) -> None:
+    async def reset_cli_interactive_session(self, history: ChatHistory) -> None:
         """与输入「新任务」相同：清空任务、工作目录绑定、双方历史与会话落盘状态。"""
+        if self._session_key:
+            await self.end_session_agents(self._session_key)
         self._task_manager.reset()
         self._toolkit.reset_task_directory()
         self.reset_manager_history()
@@ -284,12 +234,24 @@ class AgentSystem:
         history.reset()
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
-        """每轮 Coordinator 结束后：后台静默合并长期记忆（不阻塞当前回复）。"""
+        """每轮 Coordinator 结束后：后台长期记忆合并与短期记忆向量入库。"""
         msgs = list(history.messages)
         self._spawn_background(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
         self._spawn_background(
             self._long_term_memory.consolidate_from_logs(logger.LOG_DIR, silent=True)
         )
+        coord_log = self._session_logs.for_agent("coordinator")
+        mp = coord_log.model_messages_path()
+        sk = self._session_logs.session_key()
+        if mp is not None and sk is not None:
+            root = logger.LOG_DIR.resolve()
+            try:
+                log_key = mp.resolve().relative_to(root).as_posix()
+            except ValueError:
+                log_key = mp.resolve().as_posix()
+            self._short_term_memory.schedule_ingest_after_turn(
+                msgs, log_key, "coordinator", sk
+            )
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -360,13 +322,13 @@ class AgentSystem:
             )
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
+        manager_aid = await self._agent_id("manager")
         result = await run_agent_with_lifecycle(
             agent=manager_agent,
             prompt=planning_prompt,
-            role="manager",
+            agent_id=manager_aid,
             registry=self._registry,
             hooks=self._hooks,
-            parent_run_id=None,
             turn_id=tid,
             message_history=self._manager_history.messages,
             usage_limits=get_agent_usage_limits(),
@@ -403,39 +365,16 @@ class AgentSystem:
         )
         summary_prompt = [summary_text, *attachments] if attachments else summary_text
         try:
-
-            async def _consume_summary_stream(stream) -> str:
-                collected: list[str] = []
-                render_buf = ""
-                async for chunk in stream.stream_text(delta=True):
-                    if not chunk:
-                        continue
-                    collected.append(chunk)
-                    render_buf += chunk
-                    while "\n" in render_buf:
-                        line, render_buf = render_buf.split("\n", 1)
-                        print(line)
-                    if len(render_buf) >= 240:
-                        print(render_buf, end="", flush=True)
-                        render_buf = ""
-                if render_buf:
-                    print(render_buf, end="", flush=True)
-                print(flush=True)
-                final_text = "".join(collected)
-                self._manager_history.update(stream)
-                return final_text
-
             final_text = await run_agent_stream_with_lifecycle(
                 agent=manager_agent,
-                role="manager",
+                agent_id=manager_aid,
                 registry=self._registry,
                 hooks=self._hooks,
-                parent_run_id=None,
                 turn_id=tid,
                 message_history=self._manager_history.messages,
                 usage_limits=get_agent_usage_limits(),
                 prompt=summary_prompt,
-                consumer=_consume_summary_stream,
+                consumer=lambda s: consume_stream_text_to_stdout(s, self._manager_history),
             )
             self._session_logs.for_agent("manager").save(
                 self._manager_history.messages,
@@ -453,10 +392,9 @@ class AgentSystem:
                 final_result = await run_agent_with_lifecycle(
                     agent=manager_agent,
                     prompt=summary_prompt,
-                    role="manager",
+                    agent_id=manager_aid,
                     registry=self._registry,
                     hooks=self._hooks,
-                    parent_run_id=None,
                     turn_id=tid,
                     message_history=self._manager_history.messages,
                     usage_limits=get_agent_usage_limits(),
@@ -576,7 +514,7 @@ class AgentSystem:
             history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
-        logger.info(f"[用户]\n{_format_user_log_text(message)}")
+        logger.info(f"[用户]\n{format_user_log_text(message)}")
 
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
@@ -595,14 +533,18 @@ class AgentSystem:
             coord_prompt,
         )
 
+        if self._session_key is None:
+            sk = conversation_log_hint or (message.text or "")[:40] or "session"
+            await self.bind_session(sk)
+
         start_time = time.time()
+        coord_aid = await self._agent_id("coordinator")
         result = await run_agent_with_lifecycle(
             agent=agent,
             prompt=message.to_prompt(),
-            role="coordinator",
+            agent_id=coord_aid,
             registry=self._registry,
             hooks=self._hooks,
-            parent_run_id=None,
             turn_id=turn_id,
             message_history=history.messages,
             usage_limits=get_agent_usage_limits(),
@@ -626,7 +568,7 @@ class AgentSystem:
 
     async def run_interactive(self):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
-        _print_startup_logo()
+        print_startup_logo()
         logger.info("=" * 60)
         logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出；/stop 中断当前任务")
         logger.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
@@ -671,7 +613,7 @@ class AgentSystem:
                     manager_history=self._manager_history,
                     reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
                         history
-                    ),
+                    ),  # async; handle_slash_command 内 await
                     bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
                         agent, path, meta
                     ),
@@ -692,7 +634,7 @@ class AgentSystem:
                 if self._current_turn is not None:
                     print("请先输入 /stop 结束当前任务，再执行「新任务」。\n")
                     return "continue"
-                self.reset_cli_interactive_session(history)
+                await self.reset_cli_interactive_session(history)
                 is_first_input = True
                 return "continue"
 
@@ -711,6 +653,10 @@ class AgentSystem:
                 task_name = message.text[:30].replace(" ", "_")
                 logger.setup_task_logger(task_name)
                 self._toolkit.set_task_directory(task_name)
+                safe_sk = "".join(
+                    c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
+                )[:50] or "task"
+                await self.bind_session(safe_sk)
                 is_first_input = False
 
             if not self._start_user_turn(message, history):

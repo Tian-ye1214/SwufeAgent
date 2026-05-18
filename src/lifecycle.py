@@ -4,17 +4,27 @@ import asyncio
 import inspect
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypeVar
 
 import logger
+from app_config import settings
 
 T = TypeVar("T")
 
+_invocation_stack: ContextVar[tuple[str, ...]] = ContextVar("lifecycle_invocation_stack", default=())
 
-class AgentRunState(Enum):
+
+class AgentInstanceState(Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+
+
+class AgentInvocationState(Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -22,81 +32,245 @@ class AgentRunState(Enum):
     CANCELLED = "cancelled"
 
 
+def make_agent_id(session_key: str, role: str, suffix: str | None = None) -> str:
+    if suffix:
+        return f"{session_key}:{role}:{suffix}"
+    return f"{session_key}:{role}"
+
+
+def _invocation_history_limit() -> int:
+    lc = settings().get("lifecycle")
+    if not isinstance(lc, dict):
+        raise KeyError("config.json 缺少 lifecycle 配置块")
+    n = lc.get("invocation_history_per_session")
+    if not isinstance(n, int) or n < 1:
+        raise ValueError("lifecycle.invocation_history_per_session 须为正整数")
+    return n
+
+
 @dataclass
-class AgentRun:
-    run_id: str
+class AgentInstance:
+    agent_id: str
     role: str
-    parent_run_id: str | None
+    session_key: str
+    state: AgentInstanceState
+    created_at: float
+    last_active_at: float
+    current_invocation_id: str | None = None
+
+
+@dataclass
+class AgentInvocation:
+    invocation_id: str
+    agent_id: str
+    role: str
+    session_key: str
+    parent_invocation_id: str | None
     turn_id: str | None
-    state: AgentRunState
+    state: AgentInvocationState
     started_at: float
     finished_at: float | None
     error: str | None
     task_ref: asyncio.Task[Any] | None
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event)
 
+    @property
+    def run_id(self) -> str:
+        return self.invocation_id
+
+    @property
+    def parent_run_id(self) -> str | None:
+        return self.parent_invocation_id
+
+
+@dataclass
+class SessionLifecycleView:
+    session_key: str
+    agents: list[AgentInstance]
+    active_invocations: list[AgentInvocation]
+    recent_invocations: list[AgentInvocation]
+
 
 class AgentRegistry:
     def __init__(self) -> None:
-        self._runs: dict[str, AgentRun] = {}
+        self._agents: dict[str, AgentInstance] = {}
+        self._invocations: dict[str, AgentInvocation] = {}
+        self._history: dict[str, deque[AgentInvocation]] = {}
         self._lock = asyncio.Lock()
 
-    async def register(self, run: AgentRun) -> None:
-        async with self._lock:
-            self._runs[run.run_id] = run
+    def _history_for(self, session_key: str) -> deque[AgentInvocation]:
+        if session_key not in self._history:
+            self._history[session_key] = deque(maxlen=_invocation_history_limit())
+        return self._history[session_key]
 
-    async def unregister(self, run_id: str) -> None:
+    async def ensure_agent(
+        self,
+        session_key: str,
+        role: str,
+        suffix: str | None = None,
+    ) -> str:
+        agent_id = make_agent_id(session_key, role, suffix)
         async with self._lock:
-            self._runs.pop(run_id, None)
+            if agent_id not in self._agents:
+                now = time.monotonic()
+                self._agents[agent_id] = AgentInstance(
+                    agent_id=agent_id,
+                    role=role,
+                    session_key=session_key,
+                    state=AgentInstanceState.IDLE,
+                    created_at=now,
+                    last_active_at=now,
+                )
+        return agent_id
 
-    async def get(self, run_id: str) -> AgentRun | None:
+    async def get_agent(self, agent_id: str) -> AgentInstance | None:
         async with self._lock:
-            return self._runs.get(run_id)
+            return self._agents.get(agent_id)
 
-    async def list_runs(self) -> list[AgentRun]:
+    async def list_agents(self, session_key: str | None = None) -> list[AgentInstance]:
         async with self._lock:
-            return list(self._runs.values())
+            agents = list(self._agents.values())
+        if session_key is None:
+            return agents
+        return [a for a in agents if a.session_key == session_key]
 
-    async def cancel(self, run_id: str) -> bool:
+    async def remove_session(self, session_key: str) -> None:
         async with self._lock:
-            r = self._runs.get(run_id)
-        if r is None:
+            to_remove = [aid for aid, a in self._agents.items() if a.session_key == session_key]
+            for aid in to_remove:
+                self._agents.pop(aid, None)
+            self._history.pop(session_key, None)
+
+    async def register_invocation(self, inv: AgentInvocation) -> None:
+        async with self._lock:
+            self._invocations[inv.invocation_id] = inv
+            agent = self._agents.get(inv.agent_id)
+            if agent is not None:
+                agent.state = AgentInstanceState.RUNNING
+                agent.current_invocation_id = inv.invocation_id
+                agent.last_active_at = time.monotonic()
+
+    async def finish_invocation(self, invocation_id: str) -> None:
+        async with self._lock:
+            inv = self._invocations.pop(invocation_id, None)
+            if inv is None:
+                return
+            self._history_for(inv.session_key).append(inv)
+            agent = self._agents.get(inv.agent_id)
+            if agent is not None and agent.current_invocation_id == invocation_id:
+                agent.current_invocation_id = None
+                agent.state = AgentInstanceState.IDLE
+                agent.last_active_at = time.monotonic()
+
+    async def get_invocation(self, invocation_id: str) -> AgentInvocation | None:
+        async with self._lock:
+            return self._invocations.get(invocation_id)
+
+    async def list_active_invocations(
+        self, session_key: str | None = None
+    ) -> list[AgentInvocation]:
+        async with self._lock:
+            invs = list(self._invocations.values())
+        if session_key is None:
+            return invs
+        return [i for i in invs if i.session_key == session_key]
+
+    async def list_runs(self) -> list[AgentInvocation]:
+        """向后兼容：返回活跃 invocation。"""
+        return await self.list_active_invocations()
+
+    async def list_recent_invocations(
+        self, session_key: str
+    ) -> list[AgentInvocation]:
+        async with self._lock:
+            return list(self._history.get(session_key, ()))
+
+    async def get_session_view(self, session_key: str) -> SessionLifecycleView:
+        agents = await self.list_agents(session_key)
+        active = await self.list_active_invocations(session_key)
+        recent = await self.list_recent_invocations(session_key)
+        return SessionLifecycleView(
+            session_key=session_key,
+            agents=agents,
+            active_invocations=active,
+            recent_invocations=recent,
+        )
+
+    async def cancel(self, invocation_id: str) -> bool:
+        async with self._lock:
+            inv = self._invocations.get(invocation_id)
+        if inv is None:
             return False
-        r.cancel_requested.set()
-        t = r.task_ref
+        inv.cancel_requested.set()
+        t = inv.task_ref
         if t is not None and not t.done():
             t.cancel()
         return True
 
+    async def cancel_agent(self, agent_id: str) -> int:
+        async with self._lock:
+            inv = next(
+                (i for i in self._invocations.values() if i.agent_id == agent_id),
+                None,
+            )
+        if inv is None:
+            return 0
+        if await self.cancel(inv.invocation_id):
+            return 1
+        return 0
+
+    async def cancel_turn(self, turn_id: str) -> int:
+        async with self._lock:
+            ids = [
+                i.invocation_id
+                for i in self._invocations.values()
+                if i.turn_id == turn_id
+            ]
+        n = 0
+        for iid in ids:
+            if await self.cancel(iid):
+                n += 1
+        if n:
+            logger.info("[lifecycle] cancel_turn turn=%s count=%s", turn_id, n)
+        return n
+
     async def cancel_all(self) -> int:
         async with self._lock:
-            ids = list(self._runs.keys())
+            ids = list(self._invocations.keys())
         n = 0
-        for rid in ids:
-            if await self.cancel(rid):
+        for iid in ids:
+            if await self.cancel(iid):
                 n += 1
         if ids:
-            logger.info("[lifecycle] cancel_all requested for %s run(s)", len(ids))
+            logger.info("[lifecycle] cancel_all requested for %s invocation(s)", len(ids))
+        return n
+
+    async def cancel_session(self, session_key: str) -> int:
+        active = await self.list_active_invocations(session_key)
+        n = 0
+        for inv in active:
+            if await self.cancel(inv.invocation_id):
+                n += 1
         return n
 
 
 class LifecycleHooks:
     def __init__(self) -> None:
-        self._on_start: list[Callable[[AgentRun], Any]] = []
-        self._on_finish: list[Callable[[AgentRun], Any]] = []
-        self._on_error: list[Callable[[AgentRun, BaseException], Any]] = []
-        self._on_cancel: list[Callable[[AgentRun], Any]] = []
+        self._on_start: list[Callable[[AgentInvocation], Any]] = []
+        self._on_finish: list[Callable[[AgentInvocation], Any]] = []
+        self._on_error: list[Callable[[AgentInvocation, BaseException], Any]] = []
+        self._on_cancel: list[Callable[[AgentInvocation], Any]] = []
 
-    def add_on_start(self, fn: Callable[[AgentRun], Any]) -> None:
+    def add_on_start(self, fn: Callable[[AgentInvocation], Any]) -> None:
         self._on_start.append(fn)
 
-    def add_on_finish(self, fn: Callable[[AgentRun], Any]) -> None:
+    def add_on_finish(self, fn: Callable[[AgentInvocation], Any]) -> None:
         self._on_finish.append(fn)
 
-    def add_on_error(self, fn: Callable[[AgentRun, BaseException], Any]) -> None:
+    def add_on_error(self, fn: Callable[[AgentInvocation, BaseException], Any]) -> None:
         self._on_error.append(fn)
 
-    def add_on_cancel(self, fn: Callable[[AgentRun], Any]) -> None:
+    def add_on_cancel(self, fn: Callable[[AgentInvocation], Any]) -> None:
         self._on_cancel.append(fn)
 
     async def _dispatch(self, callbacks: list[Callable[..., Any]], *args: Any) -> None:
@@ -108,47 +282,64 @@ class LifecycleHooks:
             except Exception as e:
                 logger.warning("lifecycle hook %s failed: %s", getattr(fn, "__name__", fn), e)
 
-    async def dispatch_start(self, run: AgentRun) -> None:
-        await self._dispatch(self._on_start, run)
+    async def dispatch_start(self, inv: AgentInvocation) -> None:
+        await self._dispatch(self._on_start, inv)
 
-    async def dispatch_finish(self, run: AgentRun) -> None:
-        await self._dispatch(self._on_finish, run)
+    async def dispatch_finish(self, inv: AgentInvocation) -> None:
+        await self._dispatch(self._on_finish, inv)
 
-    async def dispatch_error(self, run: AgentRun, exc: BaseException) -> None:
-        await self._dispatch(self._on_error, run, exc)
+    async def dispatch_error(self, inv: AgentInvocation, exc: BaseException) -> None:
+        await self._dispatch(self._on_error, inv, exc)
 
-    async def dispatch_cancel(self, run: AgentRun) -> None:
-        await self._dispatch(self._on_cancel, run)
+    async def dispatch_cancel(self, inv: AgentInvocation) -> None:
+        await self._dispatch(self._on_cancel, inv)
+
+
+def _role_from_agent_id(agent_id: str) -> str:
+    parts = agent_id.split(":")
+    if len(parts) >= 2:
+        return parts[1]
+    return "unknown"
 
 
 def register_default_lifecycle_logging(hooks: LifecycleHooks) -> None:
-    def _on_start(run: AgentRun) -> None:
+    def _on_start(inv: AgentInvocation) -> None:
+        parent = (inv.parent_invocation_id or "-")[:8]
         logger.debug(
-            "[lifecycle] start run_id=%s role=%s parent=%s turn=%s",
-            run.run_id,
-            run.role,
-            run.parent_run_id,
-            run.turn_id,
+            "[lifecycle] agent=%s id=%s inv=%s parent=%s turn=%s state=%s",
+            inv.role,
+            inv.agent_id,
+            inv.invocation_id[:8],
+            parent,
+            inv.turn_id,
+            inv.state.value,
         )
 
-    def _on_finish(run: AgentRun) -> None:
+    def _on_finish(inv: AgentInvocation) -> None:
         logger.debug(
-            "[lifecycle] finish run_id=%s role=%s state=%s",
-            run.run_id,
-            run.role,
-            run.state.value,
+            "[lifecycle] agent=%s id=%s inv=%s state=%s",
+            inv.role,
+            inv.agent_id,
+            inv.invocation_id[:8],
+            inv.state.value,
         )
 
-    def _on_error(run: AgentRun, exc: BaseException) -> None:
+    def _on_error(inv: AgentInvocation, exc: BaseException) -> None:
         logger.warning(
-            "[lifecycle] error run_id=%s role=%s: %s",
-            run.run_id,
-            run.role,
+            "[lifecycle] error agent=%s id=%s inv=%s: %s",
+            inv.role,
+            inv.agent_id,
+            inv.invocation_id[:8],
             exc,
         )
 
-    def _on_cancel(run: AgentRun) -> None:
-        logger.debug("[lifecycle] cancel run_id=%s role=%s", run.run_id, run.role)
+    def _on_cancel(inv: AgentInvocation) -> None:
+        logger.debug(
+            "[lifecycle] cancel agent=%s id=%s inv=%s",
+            inv.role,
+            inv.agent_id,
+            inv.invocation_id[:8],
+        )
 
     hooks.add_on_start(_on_start)
     hooks.add_on_finish(_on_finish)
@@ -159,32 +350,39 @@ def register_default_lifecycle_logging(hooks: LifecycleHooks) -> None:
 async def run_coroutine_with_lifecycle(
     *,
     factory: Callable[[], Awaitable[T]],
-    role: str,
+    agent_id: str,
     registry: AgentRegistry,
     hooks: LifecycleHooks,
-    parent_run_id: str | None,
     turn_id: str | None,
+    parent_invocation_id: str | None = None,
 ) -> T:
-    run_id = str(uuid.uuid4())
+    stack = _invocation_stack.get()
+    parent = parent_invocation_id if parent_invocation_id is not None else (stack[-1] if stack else None)
+    invocation_id = str(uuid.uuid4())
+    role = _role_from_agent_id(agent_id)
+    session_key = agent_id.split(":", 1)[0]
     now = time.monotonic()
-    run = AgentRun(
-        run_id=run_id,
+    inv = AgentInvocation(
+        invocation_id=invocation_id,
+        agent_id=agent_id,
         role=role,
-        parent_run_id=parent_run_id,
+        session_key=session_key,
+        parent_invocation_id=parent,
         turn_id=turn_id,
-        state=AgentRunState.PENDING,
+        state=AgentInvocationState.PENDING,
         started_at=now,
         finished_at=None,
         error=None,
         task_ref=None,
     )
-    await registry.register(run)
+    token = _invocation_stack.set(stack + (invocation_id,))
+    await registry.register_invocation(inv)
     try:
-        await hooks.dispatch_start(run)
-        run.state = AgentRunState.RUNNING
+        await hooks.dispatch_start(inv)
+        inv.state = AgentInvocationState.RUNNING
         inner = asyncio.create_task(factory())
-        run.task_ref = inner
-        wait_cancel = asyncio.create_task(run.cancel_requested.wait())
+        inv.task_ref = inner
+        wait_cancel = asyncio.create_task(inv.cancel_requested.wait())
         done, _pending = await asyncio.wait(
             {inner, wait_cancel},
             return_when=asyncio.FIRST_COMPLETED,
@@ -195,9 +393,9 @@ async def run_coroutine_with_lifecycle(
                 await inner
             except asyncio.CancelledError:
                 pass
-            run.state = AgentRunState.CANCELLED
-            run.finished_at = time.monotonic()
-            await hooks.dispatch_cancel(run)
+            inv.state = AgentInvocationState.CANCELLED
+            inv.finished_at = time.monotonic()
+            await hooks.dispatch_cancel(inv)
             raise asyncio.CancelledError()
         wait_cancel.cancel()
         try:
@@ -207,30 +405,31 @@ async def run_coroutine_with_lifecycle(
         try:
             out: T = inner.result()
         except BaseException as e:
-            run.finished_at = time.monotonic()
-            run.error = str(e)
-            run.state = AgentRunState.FAILED
-            await hooks.dispatch_error(run, e)
+            inv.finished_at = time.monotonic()
+            inv.error = str(e)
+            inv.state = AgentInvocationState.FAILED
+            await hooks.dispatch_error(inv, e)
             raise
-        run.finished_at = time.monotonic()
-        run.state = AgentRunState.COMPLETED
-        await hooks.dispatch_finish(run)
+        inv.finished_at = time.monotonic()
+        inv.state = AgentInvocationState.COMPLETED
+        await hooks.dispatch_finish(inv)
         return out
     finally:
-        await registry.unregister(run_id)
+        _invocation_stack.reset(token)
+        await registry.finish_invocation(invocation_id)
 
 
 async def run_agent_with_lifecycle(
     *,
     agent: Any,
     prompt: Any,
-    role: str,
+    agent_id: str,
     registry: AgentRegistry,
     hooks: LifecycleHooks,
-    parent_run_id: str | None,
     turn_id: str | None,
     message_history: Any,
     usage_limits: Any,
+    parent_invocation_id: str | None = None,
 ) -> Any:
     async def _factory() -> Any:
         return await agent.run(
@@ -241,26 +440,26 @@ async def run_agent_with_lifecycle(
 
     return await run_coroutine_with_lifecycle(
         factory=_factory,
-        role=role,
+        agent_id=agent_id,
         registry=registry,
         hooks=hooks,
-        parent_run_id=parent_run_id,
         turn_id=turn_id,
+        parent_invocation_id=parent_invocation_id,
     )
 
 
 async def run_agent_stream_with_lifecycle(
     *,
     agent: Any,
-    role: str,
+    agent_id: str,
     registry: AgentRegistry,
     hooks: LifecycleHooks,
-    parent_run_id: str | None,
     turn_id: str | None,
     message_history: Any,
     usage_limits: Any,
     prompt: Any,
     consumer: Callable[[Any], Awaitable[T]],
+    parent_invocation_id: str | None = None,
 ) -> T:
     async def _factory() -> T:
         async with agent.run_stream(
@@ -272,9 +471,9 @@ async def run_agent_stream_with_lifecycle(
 
     return await run_coroutine_with_lifecycle(
         factory=_factory,
-        role=role,
+        agent_id=agent_id,
         registry=registry,
         hooks=hooks,
-        parent_run_id=parent_run_id,
         turn_id=turn_id,
+        parent_invocation_id=parent_invocation_id,
     )

@@ -93,15 +93,21 @@ class WorkerOrchestrator:
         memory_injection_getter: Callable[[], str] | None = None,
         registry: AgentRegistry | None = None,
         hooks: LifecycleHooks | None = None,
+        short_term_memory: Any = None,
     ):
         self._toolkit = toolkit
         self._task_manager = task_manager
         self._memory_injection_getter = memory_injection_getter or (lambda: "")
         self._registry = registry
         self._hooks = hooks
+        self._stm = short_term_memory
         self._conversation_date: str | None = None
         self._conversation_topic: str | None = None
         self._worker_adhoc_seq = 0
+        self._session_key: str | None = None
+
+    def set_session_key(self, session_key: str | None) -> None:
+        self._session_key = session_key
 
     def set_conversation_session(self, date: str, topic: str) -> None:
         self._conversation_date = date
@@ -122,6 +128,23 @@ class WorkerOrchestrator:
         if extra:
             merged.update(extra)
         wl.save(messages, extra=merged)
+        if self._stm is not None and self._conversation_date and self._conversation_topic:
+            mp = wl.model_messages_path()
+            if mp is not None:
+                root = logger.LOG_DIR.resolve()
+                try:
+                    log_key = mp.resolve().relative_to(root).as_posix()
+                except ValueError:
+                    log_key = mp.resolve().as_posix()
+                sk = f"{self._conversation_date}/{self._conversation_topic}"
+                self._stm.schedule_ingest_after_turn(
+                    messages, log_key, "worker", sk
+                )
+
+    async def _worker_agent_id(self, suffix: str) -> str:
+        if not self._session_key or self._registry is None:
+            raise RuntimeError("Worker 执行前须绑定 session_key")
+        return await self._registry.ensure_agent(self._session_key, "worker", suffix)
 
     async def execute_task_with_worker(
         self,
@@ -177,17 +200,25 @@ class WorkerOrchestrator:
             logger.info("=" * 50)
 
             start_time = time.time()
-            result = await run_agent_with_lifecycle(
-                agent=worker_agent,
-                prompt=prompt,
-                role="worker",
-                registry=self._registry,
-                hooks=self._hooks,
-                parent_run_id=None,
-                turn_id=turn_id,
-                message_history=adhoc_history.messages,
-                usage_limits=get_agent_usage_limits(),
-            )
+            self._worker_adhoc_seq += 1
+            worker_aid = await self._worker_agent_id(f"adhoc-{self._worker_adhoc_seq}")
+            if self._registry is not None and self._hooks is not None:
+                result = await run_agent_with_lifecycle(
+                    agent=worker_agent,
+                    prompt=prompt,
+                    agent_id=worker_aid,
+                    registry=self._registry,
+                    hooks=self._hooks,
+                    turn_id=turn_id,
+                    message_history=adhoc_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
+            else:
+                result = await worker_agent.run(
+                    prompt,
+                    message_history=adhoc_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
 
@@ -197,7 +228,6 @@ class WorkerOrchestrator:
             except Exception as ce:
                 logger.warning("Worker 上下文自动压缩失败: %s", ce)
 
-            self._worker_adhoc_seq += 1
             self._save_worker_messages(
                 list(adhoc_history.messages),
                 sub_id=f"adhoc-{self._worker_adhoc_seq}",
@@ -379,14 +409,14 @@ class WorkerOrchestrator:
             logger.info(f"{'='*50}")
 
             start_time = time.time()
+            worker_aid = await self._worker_agent_id(f"task-{task.id}")
             if self._registry is not None and self._hooks is not None:
                 result = await run_agent_with_lifecycle(
                     agent=worker_agent,
                     prompt=prompt_input,
-                    role="worker",
+                    agent_id=worker_aid,
                     registry=self._registry,
                     hooks=self._hooks,
-                    parent_run_id=str(task.id),
                     turn_id=turn_id,
                     message_history=task.worker_chat_history.messages,
                     usage_limits=get_agent_usage_limits(),

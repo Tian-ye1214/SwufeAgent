@@ -82,8 +82,21 @@
   "conversation_log": {
     "save_model_thinking_chain": true
   },
+  "lifecycle": {
+    "invocation_history_per_session": 50
+  },
   "short_term_memory": {
-    "chunk_max_tokens": 8192
+    "db_path": "data/rag_lancedb/stm",
+    "table_name": "conversation_turns",
+    "vector_search_limit": 30,
+    "final_top_k": 8,
+    "use_rerank": false,
+    "reconcile_on_query": true,
+    "index": {
+      "min_rows": 256,
+      "metric": "cosine",
+      "rebuild_every_n_adds": 100
+    }
   },
   "long_term_memory": {
     "consolidation": {

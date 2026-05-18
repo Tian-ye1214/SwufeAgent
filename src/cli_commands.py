@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from app_config import get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
+from lifecycle import AgentInvocationState
 from ModelGateway.ModelChecker import (
     compress_history_async,
     prewarm_effective_max_contexts_by_role_async,
@@ -27,9 +28,9 @@ def print_cli_help() -> None:
         "          切换: /agent <manager|worker|coordinator> <模型名称>\n"
         "/api      按提示修改 BASE_URL 与 API_KEY（写入 config.json，回车跳过单项）\n"
         "/compress 主动压缩当前 Manager / Coordinator 对话上下文（Markdown 摘要）\n"
-        "/status  列出当前已注册且未结束的 Agent 运行（run_id / turn / 角色 / 状态 / 已运行秒数）\n"
-        "/cancel  中止指定 run_id 的 Agent 运行；用法: /cancel <run_id>\n"
-        "/stop    中断当前正在执行的用户回合（等同取消本回合内所有 Agent 运行）\n"
+        "/status  树形列出会话内 Agent 实例与 invocation（活跃 + 近期历史）\n"
+        "/cancel  中止 invocation；用法: /cancel <invocation_id> 或 /cancel agent <agent_id>\n"
+        "/stop    中断当前用户回合（取消该 turn 下所有活跃 invocation）\n"
         "/load    从落盘的 *.model_messages.json 恢复对话（与「新任务」同样会清空任务状态）\n"
         "          用法: /load <文件路径>\n"
         "\n── 其他 ─────────────────────────────────────────────\n"
@@ -73,13 +74,83 @@ def print_loaded_skills(skills_manager: SkillsManager) -> None:
     print(block if block.strip() else "(无：layout 与 summary 均为空)\n")
 
 
+async def _print_lifecycle_status(system: Any) -> None:
+    sk = getattr(system, "session_key", None)
+    if not sk:
+        agents = await system.registry.list_agents()
+        if not agents:
+            print("\n── Agent 生命周期 ──\n（尚未绑定会话，无 Agent 实例）\n")
+            return
+        print("\n── Agent 生命周期（全部会话）──")
+        for a in agents:
+            print(f"  [{a.state.value}] {a.agent_id}")
+        active = await system.registry.list_active_invocations()
+        if active:
+            print("\n  活跃 invocation:")
+            now = time.monotonic()
+            for inv in active:
+                elapsed = now - inv.started_at
+                parent = (inv.parent_invocation_id or "-")[:8]
+                print(
+                    f"    inv={inv.invocation_id[:8]} agent={inv.role} "
+                    f"parent={parent} turn={inv.turn_id} state={inv.state.value} {elapsed:.1f}s"
+                )
+        print("")
+        return
+
+    view = await system.registry.get_session_view(sk)
+    print(f"\n── Agent 生命周期 ── Session: {sk}")
+    if not view.agents:
+        print("  （无 Agent 实例）")
+    for a in view.agents:
+        suffix = a.agent_id.split(":", 2)[-1] if a.agent_id.count(":") >= 2 else a.role
+        label = a.role if suffix == a.role else f"{a.role}:{suffix}"
+        print(f"  [{a.state.value}] {label}  id={a.agent_id}")
+
+    if view.active_invocations:
+        print("\n  活跃 invocation:")
+        now = time.monotonic()
+        for inv in view.active_invocations:
+            elapsed = now - inv.started_at
+            parent = (inv.parent_invocation_id or "-")[:8]
+            print(
+                f"    inv={inv.invocation_id[:8]} agent={inv.agent_id} "
+                f"parent={parent} turn={inv.turn_id} state={inv.state.value} {elapsed:.1f}s"
+            )
+
+    completed = [
+        i
+        for i in view.recent_invocations
+        if i.state == AgentInvocationState.COMPLETED
+    ]
+    failed = [
+        i
+        for i in view.recent_invocations
+        if i.state in (AgentInvocationState.FAILED, AgentInvocationState.CANCELLED)
+    ]
+    if completed or failed:
+        print(
+            f"\n  近期历史: {len(completed)} 已完成, {len(failed)} 失败/取消 "
+            f"（活跃 {len(view.active_invocations)}）"
+        )
+        for inv in list(view.recent_invocations)[-5:]:
+            parent = (inv.parent_invocation_id or "-")[:8]
+            print(
+                f"    inv={inv.invocation_id[:8]} {inv.role} parent={parent} "
+                f"turn={inv.turn_id} state={inv.state.value}"
+            )
+    elif not view.active_invocations:
+        print("\n  （无活跃 invocation）")
+    print("")
+
+
 async def handle_slash_command(
     raw: str,
     skills_manager: SkillsManager,
     *,
     coordinator_history: ChatHistory | None,
     manager_history: ChatHistory | None,
-    reset_cli_session_for_load: Callable[[], None],
+    reset_cli_session_for_load: Callable[[], Awaitable[None]],
     bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None],
     system: Any,
 ) -> tuple[bool, bool | None]:
@@ -98,21 +169,7 @@ async def handle_slash_command(
         if system is None:
             print("当前环境未绑定 AgentSystem，无法查询。\n")
             return True, None
-        runs = await system.registry.list_runs()
-        if not runs:
-            print("\n── Agent 运行状态 ──\n（当前无已注册的进行中运行）\n")
-            return True, None
-        now = time.monotonic()
-        print("\n── Agent 运行状态 ──")
-        print(f"{'run_id':<38} {'turn':<10} {'role':<14} {'parent':<8} {'state':<12} {'elapsed_s':>10}")
-        for r in runs:
-            elapsed = now - float(r.started_at)
-            parent = (r.parent_run_id or "-")[:8]
-            tid = (r.turn_id or "-")[:8]
-            print(
-                f"{r.run_id:<38} {tid:<10} {r.role:<14} {parent:<8} {r.state.value:<12} {elapsed:>10.1f}"
-            )
-        print("")
+        await _print_lifecycle_status(system)
         return True, None
     if cmd == "/stop":
         if system is None:
@@ -126,14 +183,25 @@ async def handle_slash_command(
             print("当前环境未绑定 AgentSystem，无法取消。\n")
             return True, None
         if len(parts) < 2:
-            print("用法: /cancel <run_id>（可先 /status 查看 run_id）\n")
+            print("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>\n")
             return True, None
-        rid = parts[1].strip()
-        ok = await system.registry.cancel(rid)
+        if parts[1].lower() == "agent":
+            if len(parts) < 3:
+                print("用法: /cancel agent <agent_id>\n")
+                return True, None
+            aid = parts[2].strip()
+            n = await system.registry.cancel_agent(aid)
+            if n:
+                print(f"已请求取消 agent_id={aid!r} 的当前 invocation。\n")
+            else:
+                print(f"未找到 agent_id={aid!r} 的活跃 invocation。\n")
+            return True, None
+        iid = parts[1].strip()
+        ok = await system.registry.cancel(iid)
         if ok:
-            print(f"已请求取消 run_id={rid!r}（若运行仍存在将尽快中止）。\n")
+            print(f"已请求取消 invocation_id={iid!r}。\n")
         else:
-            print(f"未找到 run_id={rid!r} 或已结束。\n")
+            print(f"未找到 invocation_id={iid!r} 或已结束。\n")
         return True, None
     if cmd == "/skills":
         print_loaded_skills(skills_manager)
@@ -190,7 +258,7 @@ async def handle_slash_command(
         if coordinator_history is None or manager_history is None:
             print("当前环境未绑定历史对象，无法加载。\n")
             return True, None
-        reset_cli_session_for_load()
+        await reset_cli_session_for_load()
         if agent == "coordinator":
             coordinator_history.set_messages(messages)
             manager_history.reset()

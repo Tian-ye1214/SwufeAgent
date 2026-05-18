@@ -10,16 +10,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-class _ColorFmt(logging.Formatter):
-    def format(self, r: logging.LogRecord) -> str:
-        s = super().format(r)
-        if not sys.stdout.isatty():
-            return s
-        n = r.levelno
-        c = "\033[91m" if n >= logging.ERROR else "\033[38;5;208m" if n >= logging.WARNING else "\033[97m" if n >= logging.INFO else "\033[94m" if n >= logging.DEBUG else ""
-        return f"{c}{s}\033[0m" if c else s
-
-
 class LoggerManager:
     """进程内单例：控制台 + 可选文件；业务侧用模块级 `logger.info` 等。"""
 
@@ -82,7 +72,8 @@ class LoggerManager:
     def _build_console_handler(self) -> logging.Handler:
         handler = logging.StreamHandler(stream=sys.stdout)
         handler.setLevel(logging.DEBUG)
-        handler.setFormatter(_ColorFmt("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S"))
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S")
+        )
         return handler
 
     def _build_file_handler(self, log_file: Path) -> logging.Handler:

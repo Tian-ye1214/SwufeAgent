@@ -3,6 +3,7 @@ import sys
 import re
 import asyncio
 import contextvars
+import uuid
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
@@ -130,8 +131,11 @@ class BotBase:
             name=f"{self.platform_tag.lower()}-queue-{session_id}",
         )
 
-    def _reset_session(self, session_id: str) -> None:
+    async def _reset_session(self, session_id: str) -> None:
         self._bump_generation(session_id)
+        agent_system = self._agent_systems.get(session_id)
+        if agent_system is not None:
+            await agent_system.end_session_agents(session_id)
         for d in (
             self._sessions,
             self._is_first,
@@ -194,6 +198,9 @@ class BotBase:
                         reply = await asyncio.wait_for(run_coro, timeout=self.AGENT_RUN_TIMEOUT_S)
                     except asyncio.TimeoutError:
                         self._bump_generation(session_id)
+                        ag = self._agent_systems.get(session_id)
+                        if ag is not None:
+                            await ag.registry.cancel_session(session_id)
                         logger.error(
                             f"[{self.platform_tag}] {session_id} Agent 超时（{self.AGENT_RUN_TIMEOUT_S:.0f}s），已作废本轮"
                         )
@@ -222,7 +229,7 @@ class BotBase:
 
     async def _end_task_and_consume_queue(self, session_id: str, send_reply: Callable[..., Awaitable[Any]]) -> None:
         drained = self._drain_queue(session_id)
-        self._reset_session(session_id)
+        await self._reset_session(session_id)
         if not drained:
             await self._safe_send(send_reply, "✓ 已结束当前任务，上下文已清空。队列中没有待处理消息。")
             return
@@ -269,6 +276,8 @@ class BotBase:
         logger.set_user_notify_callback(
             partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
         )
+        await agent_system.bind_session(session_id)
+        turn_id = uuid.uuid4().hex[:8]
         try:
             _, output = await agent_system.run_agent_system(
                 message,
@@ -277,7 +286,9 @@ class BotBase:
                 conversation_log_extra={
                     "session_id": session_id,
                     "platform": self.platform_tag,
+                    "turn_id": turn_id,
                 },
+                turn_id=turn_id,
             )
         except Exception as e:
             logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
@@ -343,7 +354,7 @@ class BotBase:
             return
 
         if user_text in self.RESET_COMMANDS:
-            self._reset_session(session_id)
+            await self._reset_session(session_id)
             await self._safe_send(send_reply, "已开始新对话，上下文已清除。")
             return
         if user_text in self.END_TASK_COMMANDS:
