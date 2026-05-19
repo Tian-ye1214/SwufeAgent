@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from persist_utils import atomic_write_json, file_lock
+
 if TYPE_CHECKING:
     from pydantic_ai.usage import UsageLimits as _UsageLimits
 
@@ -54,8 +56,8 @@ def save_config(cfg: dict[str, Any] | None = None) -> None:
     global _CONFIG
     cfg = settings() if cfg is None else cfg
     _CONFIG = cfg
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with file_lock(CONFIG_FILE):
+        atomic_write_json(CONFIG_FILE, cfg)
 
 
 def get_agent_usage_limits() -> "_UsageLimits":

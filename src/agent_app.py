@@ -31,6 +31,7 @@ import logger
 import traceback
 import time
 import asyncio
+import signal
 import sys
 import uuid
 from typing import Any, Coroutine, Tuple
@@ -38,6 +39,8 @@ from typing import Any, Coroutine, Tuple
 from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
+from RAG.embedding_function import close_http_client
+
 from lifecycle import (
     AgentRegistry,
     LifecycleHooks,
@@ -140,6 +143,8 @@ class AgentSystem:
             logger.info("[lifecycle] draining %s background task(s)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
         await self._short_term_memory.drain()
+        await self._short_term_memory.close()
+        await close_http_client()
         self._toolkit.close()
         logger.info("[lifecycle] shutdown complete")
 
@@ -566,7 +571,7 @@ class AgentSystem:
         await self._after_coordinator_turn(history)
         return history, result.output
 
-    async def run_interactive(self):
+    async def run_interactive(self, *, stop_event: asyncio.Event | None = None):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
         print_startup_logo()
         logger.info("=" * 60)
@@ -675,6 +680,8 @@ class AgentSystem:
 
                 with patch_stdout():
                     while True:
+                        if stop_event is not None and stop_event.is_set():
+                            break
                         try:
                             action = await process_one_line(await read_line())
                             if action == "break":
@@ -687,6 +694,8 @@ class AgentSystem:
                             break
             else:
                 while True:
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     try:
                         raw = (await asyncio.to_thread(input, "\n📝 请输入您的任务: ")).strip()
                         action = await process_one_line(raw)
@@ -705,7 +714,23 @@ class AgentSystem:
 def main() -> None:
     """CLI 入口：实例化 Agent 并进入交互循环（供仓库根 `main.py` 或 `python -m agent_app` 调用）。"""
     system = AgentSystem()
-    asyncio.run(system.run_interactive())
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def _request_stop() -> None:
+            stop_event.set()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _request_stop)
+            except (NotImplementedError, ValueError):
+                signal.signal(sig, lambda *_a, _sig=sig: _request_stop())
+
+        await system.run_interactive(stop_event=stop_event)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

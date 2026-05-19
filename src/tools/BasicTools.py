@@ -15,6 +15,7 @@ from tools.ExtractFileContent import extract_text
 from app_config import get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
+from path_sandbox import resolve_readable_path
 from tools.browser_session import PlaywrightBrowserSession
 
 def _get_runtime_root() -> Path:
@@ -68,7 +69,7 @@ class BasicToolkit:
         """进程退出时关闭 Playwright 等资源。"""
         bs = getattr(self, "_browser_session", None)
         if bs is not None:
-            bs.close()
+            bs.shutdown()
             del self._browser_session
 
     def set_task_directory(self, task_name: str) -> Path:
@@ -103,6 +104,9 @@ class BasicToolkit:
         self._base_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
 
+    async def _run_blocking(self, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
     def _safe_path(self, name: str) -> Path:
         path = self._resolve_path_candidate(name)
         root = self._WORK_DATABASE_ROOT.resolve()
@@ -110,13 +114,16 @@ class BasicToolkit:
             raise ValueError(f"Path not under WorkDatabase: {path}")
         return path
 
+    def _readable_path(self, name: str) -> Path:
+        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+
     def _browser_headless_from_env(self) -> bool:
         v = (get_env("BROWSER_HEADLESS", warn=False) or "").strip().lower()
         if v in ("0", "false", "no"):
             return False
         return True
 
-    def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
+    async def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """
         Open a URL in a real Chromium browser. Works for static and dynamic pages: navigate first,
         then use browser_get_content, screenshots, etc. as needed.
@@ -129,17 +136,19 @@ class BasicToolkit:
             wait_until: Load wait strategy; one of domcontentloaded, load, networkidle (default domcontentloaded)
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.navigate(url, headless=h, wait_until=wait_until)
+        return await self._run_blocking(
+            self._browser_session.navigate, url, headless=h, wait_until=wait_until
+        )
 
-    def browser_get_content(self) -> str:
+    async def browser_get_content(self) -> str:
         """
         Return visible text from the current page (body innerText), for reading dynamically rendered content.
         Returns the full text with no length truncation.
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.get_content(headless=h)
+        return await self._run_blocking(self._browser_session.get_content, headless=h)
 
-    def browser_screenshot(self, name: str, full_page: bool = False) -> str:
+    async def browser_screenshot(self, name: str, full_page: bool = False) -> str:
         """
         Capture a screenshot of the current page and save it to the given path.
         Relative paths use the same rules as read_file (WorkDatabase or src/ under repo).
@@ -154,9 +163,14 @@ class BasicToolkit:
             path.parent.mkdir(parents=True, exist_ok=True)
         except ValueError as e:
             return str(e)
-        return self._browser_session.screenshot(headless=h, filename=str(path), full_page=full_page)
+        return await self._run_blocking(
+            self._browser_session.screenshot,
+            headless=h,
+            filename=str(path),
+            full_page=full_page,
+        )
 
-    def browser_click(self, selector: str) -> str:
+    async def browser_click(self, selector: str) -> str:
         """
         Click an element on the current page. selector uses Playwright syntax (CSS, text=..., etc.).
 
@@ -164,9 +178,11 @@ class BasicToolkit:
             selector: e.g. #submit, text=Sign in
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.click(headless=h, selector=selector)
+        return await self._run_blocking(
+            self._browser_session.click, headless=h, selector=selector
+        )
 
-    def browser_fill(self, selector: str, text: str) -> str:
+    async def browser_fill(self, selector: str, text: str) -> str:
         """
         Fill an input field with text (clears the field first, then types the value).
 
@@ -175,9 +191,11 @@ class BasicToolkit:
             text: Text to enter
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.fill(headless=h, selector=selector, text=text)
+        return await self._run_blocking(
+            self._browser_session.fill, headless=h, selector=selector, text=text
+        )
 
-    def browser_press_key(self, key: str) -> str:
+    async def browser_press_key(self, key: str) -> str:
         """
         Send a keyboard key to the current page (e.g. Enter, Tab).
 
@@ -185,9 +203,9 @@ class BasicToolkit:
             key: Playwright key name, e.g. Enter, ArrowDown
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.press(headless=h, key=key)
+        return await self._run_blocking(self._browser_session.press, headless=h, key=key)
 
-    def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
+    async def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
         """
         Wait until an element appears in the DOM (useful for SPAs and async-loaded UI).
 
@@ -196,11 +214,14 @@ class BasicToolkit:
             timeout_ms: Timeout in milliseconds
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.wait_for_selector(
-            headless=h, selector=selector, timeout_ms=timeout_ms
+        return await self._run_blocking(
+            self._browser_session.wait_for_selector,
+            headless=h,
+            selector=selector,
+            timeout_ms=timeout_ms,
         )
 
-    def browser_evaluate(self, javascript_expression: str) -> str:
+    async def browser_evaluate(self, javascript_expression: str) -> str:
         """
         Evaluate a JavaScript expression in the page context and return the result (page.evaluate).
         Example: document.querySelector('h1')?.innerText
@@ -209,30 +230,20 @@ class BasicToolkit:
             javascript_expression: A single-line expression to evaluate
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.run_javascript(headless=h, expression=javascript_expression)
+        return await self._run_blocking(
+            self._browser_session.run_javascript,
+            headless=h,
+            expression=javascript_expression,
+        )
 
-    def browser_close(self) -> str:
+    async def browser_close(self) -> str:
         """Close the Playwright browser process and release resources; the next action will start a new browser."""
-        self._browser_session.close()
+        await self._run_blocking(self._browser_session.shutdown)
         return "Browser closed"
 
     def _resolve_path_candidate(self, name: str) -> Path:
-        """Resolve path without workspace/repo boundary check — for read/list only."""
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("Path name must not be empty")
-        # Align with system prompt: bare "skills" means src/skills under the repo
-        if name.replace("\\", "/").strip("/").rstrip("/") == "skills":
-            name = "src/skills"
-
-        base_r = self._base_dir.resolve()
-        repo_r = _REPO_ROOT.resolve()
-        p_in = Path(name).expanduser()
-        if p_in.is_absolute():
-            return p_in.resolve()
-        norm = name.replace("\\", "/")
-        anchor = repo_r if norm == "src" or norm.startswith("src/") else base_r
-        return (anchor / name).resolve()
+        """解析读/列路径，限制在 WorkDatabase 与 src/skills。"""
+        return self._readable_path(name)
 
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
@@ -469,7 +480,7 @@ class BasicToolkit:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
 
-    def execute_file(self, name: str, args: str = "") -> str:
+    async def execute_file(self, name: str, args: str = "") -> str:
         """
         Execute a file (supports Python, Shell scripts, etc.).
         Parameters:
@@ -496,14 +507,15 @@ class BasicToolkit:
             if args:
                 cmd.extend(args.split())
 
-            result = subprocess.run(
+            result = await self._run_blocking(
+                subprocess.run,
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=60,
-                cwd=str(self._base_dir)
+                cwd=str(self._base_dir),
             )
             output = result.stdout + result.stderr
             return_code = result.returncode
@@ -515,7 +527,7 @@ class BasicToolkit:
         except Exception as e:
             return f"Execution error: {e}"
 
-    def run_command(self, command: str, timeout: int = 60) -> str:
+    async def run_command(self, command: str, timeout: int = 60) -> str:
         """
         Execute a Shell/terminal command.
         Parameters:
@@ -544,11 +556,11 @@ class BasicToolkit:
             )
 
             if use_shell:
-                result = subprocess.run(command, shell=True, **sub_kw)
+                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
             elif _platform.system() == "Windows":
-                result = subprocess.run(command, shell=True, **sub_kw)
+                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
             else:
-                result = subprocess.run(shlex.split(command), **sub_kw)
+                result = await self._run_blocking(subprocess.run, shlex.split(command), **sub_kw)
 
             output = result.stdout + result.stderr
             return_code = result.returncode
@@ -590,9 +602,10 @@ class BasicToolkit:
 
     def _read_image_from_file(self, image_path: str) -> ToolReturn | str:
         """Load an image from a local file path."""
-        path = Path(image_path)
-        if not path.is_absolute():
-            path = (self._base_dir / image_path).resolve()
+        try:
+            path = self._readable_path(image_path)
+        except ValueError as e:
+            return f"Security error: {e}"
 
         if not path.exists():
             return f"Error: Image file not found: {image_path}"

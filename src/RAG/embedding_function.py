@@ -15,6 +15,7 @@ except ModuleNotFoundError:
     from app_config import get_env, settings
 
 _http_state: tuple[httpx.AsyncClient, str] | None = None
+_HTTP_LOCK = asyncio.Lock()
 
 
 def _require_rag_model(role: str) -> str:
@@ -32,7 +33,7 @@ async def _get_http_client() -> httpx.AsyncClient:
     base = get_env("SILICONFLOW_BASE", warn=False).strip().rstrip("/")
     if _http_state is not None and _http_state[1] == base:
         return _http_state[0]
-    async with asyncio.Lock():
+    async with _HTTP_LOCK:
         if _http_state is not None and _http_state[1] == base:
             return _http_state[0]
         if _http_state is not None:
@@ -44,6 +45,16 @@ async def _get_http_client() -> httpx.AsyncClient:
         )
         _http_state = (client, base)
     return _http_state[0]
+
+
+async def close_http_client() -> None:
+    """进程退出时关闭全局 embedding/rerank HTTP 客户端。"""
+    global _http_state
+    async with _HTTP_LOCK:
+        if _http_state is None:
+            return
+        await _http_state[0].aclose()
+        _http_state = None
 
 
 async def embed_texts(

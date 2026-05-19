@@ -79,6 +79,9 @@
       "head_max_ratio": 0.12
     }
   },
+  "bot": {
+    "session_queue_maxsize": 50
+  },
   "conversation_log": {
     "save_model_thinking_chain": true
   },

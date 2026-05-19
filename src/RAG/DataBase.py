@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import lancedb
 import logger
-from app_config import get_env
 from lancedb.pydantic import LanceModel, Vector
 from RAG.storage_path import resolve_lancedb_dir
 
@@ -267,3 +265,10 @@ class EmbedDataBase:
             self._table = None
 
         await asyncio.to_thread(_drop)
+
+    async def close(self) -> None:
+        def _close() -> None:
+            self._table = None
+            self._db = None
+
+        await asyncio.to_thread(_close)

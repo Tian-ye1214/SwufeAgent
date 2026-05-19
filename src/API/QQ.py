@@ -89,7 +89,7 @@ class QQBot(BotBase):
         return text, out
 
     async def _on_shutdown(self, _: MetaEvent) -> None:
-        self.release_all_resources()
+        await self.release_all_resources_async()
 
     async def _handle_message(self, event: BaseMessageEvent) -> None:
         raw_text = (event.raw_message or "").strip()

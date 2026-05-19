@@ -50,6 +50,9 @@ class RAG:
             self._use_rerank,
         )
 
+    async def close(self) -> None:
+        await self._db.close()
+
     def format_instruction(
         self,
         instruction: str | None,
@@ -95,7 +98,7 @@ class RAG:
         await self._db.ensure_connected()
         texts = [r["text"] for r in rows]
         vectors = await embed_texts(texts)
-        now = _datetime_now_utc()
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         built: list[dict[str, Any]] = []
         for i, r in enumerate(rows):
             built.append(
@@ -162,7 +165,3 @@ class RAG:
         except Exception as e:
             logger.error("RAG retrieve 失败: %s", e, exc_info=True)
             raise
-
-
-def _datetime_now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

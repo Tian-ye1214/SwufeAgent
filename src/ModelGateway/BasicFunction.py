@@ -1,7 +1,4 @@
 import json
-import re
-from collections.abc import Sequence
-
 from openai.types import chat as oa_chat
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.anthropic import AnthropicModel

@@ -878,6 +878,7 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/94/6f/2adb571fda448d4afd2466e1cef2963fefdc6b37847da05249983e415f17/fastavro-1.12.2-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:bc44ba6289fb1f5ee318335958dde6ad6d742dcb4bb8930de843e9024c64b68c", size = 3281842, upload-time = "2026-04-24T14:37:20.833Z" },
     { url = "https://files.pythonhosted.org/packages/17/07/4bad2e96c4c6bae40253be2573cc09c1e5b9ccf821e1ff74e0d33b64bf90/fastavro-1.12.2-cp314-cp314-win_amd64.whl", hash = "sha256:a475418f71c5aed69899813ecccf392429c08c3a63df3030129db71760b0db8f", size = 450903, upload-time = "2026-04-24T14:37:23.059Z" },
     { url = "https://files.pythonhosted.org/packages/5b/b7/180f67ba9a46ba23a1ff6432f48d3087d4f2048579ecc262b00426cb1c63/fastavro-1.12.2-cp314-cp314-win_arm64.whl", hash = "sha256:daec9f9655a1d4636613c47d6d3343f6e039150d66cdce62543e20ca36612a8a", size = 391076, upload-time = "2026-04-24T14:37:24.756Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/8f/18f60329b627d2118a4a2b19e8741fbd807d60bf0470554e1bbfb7f1bca3/fastavro-1.12.2-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:57594b72cf663bbd0f3ad8a319a999fc3d7c71065a6799b2c1d1a6a137894c5b", size = 1055430, upload-time = "2026-05-09T21:53:14.364Z" },
     { url = "https://files.pythonhosted.org/packages/d2/ac/a1fa1fc29df0efc89d4946a743b09bdc9500591b5b92083eaf8e93664916/fastavro-1.12.2-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:74412132bbfb153cbf704517f2c89f7d3e170feb681b13bceace690f66f8d5fa", size = 3503075, upload-time = "2026-04-24T14:37:26.826Z" },
     { url = "https://files.pythonhosted.org/packages/82/bf/4f669e10b6bc38a731ee3400aed1a1e2d0a3e3cf411e72f6b320d3af0eaf/fastavro-1.12.2-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e367a84c9133018e0a3bc822abe78d7f1f9a6092991a0ec409468cf4ef260282", size = 3410900, upload-time = "2026-04-24T14:37:29.233Z" },
     { url = "https://files.pythonhosted.org/packages/10/39/ecb19fdae4158a7730b5963fbf1b6d38d74678392d73083be518642af0c1/fastavro-1.12.2-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:044fafca0853e9ae14009de7763ac9e8e8f8b96f8a4e90bd58b695443266a370", size = 3335637, upload-time = "2026-04-24T14:37:31.472Z" },
@@ -1409,6 +1410,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f3/49/3b30cad09e7771a4982d9975a8cbf64f00d4a1ececb53297f1d9a7be1b10/importlib_metadata-8.7.1.tar.gz", hash = "sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb", size = 57107, upload-time = "2025-12-21T10:00:19.278Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/5e/f8e9a1d23b9c20a551a8a02ea3637b4642e22c2626e3a13a9a29cdea99eb/importlib_metadata-8.7.1-py3-none-any.whl", hash = "sha256:5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151", size = 27865, upload-time = "2025-12-21T10:00:18.329Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
 ]
 
 [[package]]
@@ -2136,67 +2146,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nanoclaw"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "akshare" },
-    { name = "ddgs" },
-    { name = "httpx", extra = ["http2"] },
-    { name = "json-repair" },
-    { name = "lancedb" },
-    { name = "matplotlib" },
-    { name = "ncatbot" },
-    { name = "numpy" },
-    { name = "openpyxl" },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "playwright" },
-    { name = "prompt-toolkit" },
-    { name = "pydantic-ai" },
-    { name = "pydantic-ai-slim", extra = ["anthropic"] },
-    { name = "pyinstaller" },
-    { name = "pymupdf" },
-    { name = "python-docx" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "reportlab" },
-    { name = "requests" },
-    { name = "tiktoken" },
-    { name = "tushare" },
-    { name = "wechatbot-sdk" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "akshare", specifier = ">=1.18.60" },
-    { name = "ddgs", specifier = ">=9.14.1" },
-    { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
-    { name = "json-repair", specifier = ">=0.59.5" },
-    { name = "lancedb", specifier = ">=0.30.2" },
-    { name = "matplotlib", specifier = ">=3.10.9" },
-    { name = "ncatbot", specifier = ">=4.4.1.post1" },
-    { name = "numpy", specifier = ">=2.4.4" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pandas", specifier = ">=3.0.2" },
-    { name = "pillow", specifier = ">=12.2.0" },
-    { name = "playwright", specifier = ">=1.49.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0.0" },
-    { name = "pydantic-ai", specifier = "==1.80.0" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = "==1.80.0" },
-    { name = "pyinstaller", specifier = ">=6.20.0" },
-    { name = "pymupdf", specifier = ">=1.27.2.3" },
-    { name = "python-docx", specifier = ">=1.2.0" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "reportlab", specifier = ">=4.5.0" },
-    { name = "requests", specifier = ">=2.33.1" },
-    { name = "tiktoken", specifier = "==0.12.0" },
-    { name = "tushare", specifier = ">=1.4.29" },
-    { name = "wechatbot-sdk", specifier = ">=0.2.1" },
-]
-
-[[package]]
 name = "ncatbot"
 version = "4.4.1.post1"
 source = { registry = "https://pypi.org/simple" }
@@ -2635,6 +2584,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/4b/236e60ab9f6d62ed0fd32150d61f1f494cefbf02304c0061e78ed80c1c32/playwright-1.58.0-py3-none-win32.whl", hash = "sha256:1e03be090e75a0fabbdaeab65ce17c308c425d879fa48bb1d7986f96bfad0b99", size = 36815998, upload-time = "2026-01-30T15:09:39.627Z" },
     { url = "https://files.pythonhosted.org/packages/41/f8/5ec599c5e59d2f2f336a05b4f318e733077cd5044f24adb6f86900c3e6a7/playwright-1.58.0-py3-none-win_amd64.whl", hash = "sha256:a2bf639d0ce33b3ba38de777e08697b0d8f3dc07ab6802e4ac53fb65e3907af8", size = 36816005, upload-time = "2026-01-30T15:09:42.449Z" },
     { url = "https://files.pythonhosted.org/packages/c8/c4/cc0229fea55c87d6c9c67fe44a21e2cd28d1d558a5478ed4d617e9fb0c93/playwright-1.58.0-py3-none-win_arm64.whl", hash = "sha256:32ffe5c303901a13a0ecab91d1c3f74baf73b84f4bedbb6b935f5bc11cc98e1b", size = 33085919, upload-time = "2026-01-30T15:09:45.71Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
 ]
 
 [[package]]
@@ -3285,6 +3243,35 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest"
+version = "9.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
+]
+
+[[package]]
+name = "pytest-asyncio"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -3409,6 +3396,78 @@ sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
 ]
+
+[[package]]
+name = "redlotus"
+version = "1.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "akshare" },
+    { name = "ddgs" },
+    { name = "filelock" },
+    { name = "httpx", extra = ["http2"] },
+    { name = "json-repair" },
+    { name = "lancedb" },
+    { name = "matplotlib" },
+    { name = "ncatbot" },
+    { name = "numpy" },
+    { name = "openpyxl" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "playwright" },
+    { name = "prompt-toolkit" },
+    { name = "pydantic-ai" },
+    { name = "pydantic-ai-slim", extra = ["anthropic"] },
+    { name = "pyinstaller" },
+    { name = "pymupdf" },
+    { name = "python-docx" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "reportlab" },
+    { name = "requests" },
+    { name = "tiktoken" },
+    { name = "tushare" },
+    { name = "wechatbot-sdk" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "akshare", specifier = ">=1.18.60" },
+    { name = "ddgs", specifier = ">=9.14.1" },
+    { name = "filelock", specifier = ">=3.29.0" },
+    { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
+    { name = "json-repair", specifier = ">=0.59.5" },
+    { name = "lancedb", specifier = ">=0.30.2" },
+    { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "ncatbot", specifier = ">=4.4.1.post1" },
+    { name = "numpy", specifier = ">=2.4.4" },
+    { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "pandas", specifier = ">=3.0.2" },
+    { name = "pillow", specifier = ">=12.2.0" },
+    { name = "playwright", specifier = ">=1.49.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.0" },
+    { name = "pydantic-ai", specifier = "==1.80.0" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], specifier = "==1.80.0" },
+    { name = "pyinstaller", specifier = ">=6.20.0" },
+    { name = "pymupdf", specifier = ">=1.27.2.3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "python-docx", specifier = ">=1.2.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "reportlab", specifier = ">=4.5.0" },
+    { name = "requests", specifier = ">=2.33.1" },
+    { name = "tiktoken", specifier = "==0.12.0" },
+    { name = "tushare", specifier = ">=1.4.29" },
+    { name = "wechatbot-sdk", specifier = ">=0.2.1" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "referencing"

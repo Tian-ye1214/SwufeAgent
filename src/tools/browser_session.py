@@ -16,6 +16,7 @@ class PlaywrightBrowserSession:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
         self._run_lock = threading.Lock()
+        self._stopped = False
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -24,14 +25,26 @@ class PlaywrightBrowserSession:
 
 
     def _run(self, fn: Callable[[], Any], timeout: float = 120.0) -> Any:
+        if self._stopped:
+            raise RuntimeError("Playwright session has been shut down")
         with self._run_lock:
             return self._executor.submit(fn).result(timeout=timeout)
 
     def close(self) -> None:
+        if self._stopped:
+            return
         try:
             self._run(self._close_impl, timeout=60.0)
         except Exception as e:
             logger.warning(f"[browser] close: {e}")
+
+    def shutdown(self) -> None:
+        """关闭浏览器并停止后台线程池（进程退出时调用）。"""
+        if self._stopped:
+            return
+        self._stopped = True
+        self.close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _close_impl(self) -> None:
         for attr, closer in (

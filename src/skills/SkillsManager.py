@@ -92,7 +92,16 @@ class SkillsManager:
         )
         return metadata, instructions
 
-    def _discover_skills(self) -> None:
+    def refresh(self) -> None:
+        fresh: Dict[str, Skill] = {}
+        with self._refresh_lock:
+            self._discover_skills(into=fresh)
+            self.skills = fresh
+
+    def _discover_skills(self, into: Dict[str, Skill] | None = None) -> None:
+        target = self.skills if into is None else into
+        if into is not None:
+            into.clear()
         if not self.skills_dir.exists():
             logger.info(f"Skills 目录不存在: {self.skills_dir}")
             self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -107,15 +116,10 @@ class SkillsManager:
             result = self._parse_skill_file(skill_file)
             if result:
                 metadata, instructions = result
-                self.skills[metadata.name] = Skill(
+                target[metadata.name] = Skill(
                     metadata=metadata,
                     instructions=instructions,
                 )
-
-    def refresh(self) -> None:
-        with self._refresh_lock:
-            self.skills.clear()
-            self._discover_skills()
 
     def get_skill(self, name: str) -> Optional[Skill]:
         return self.skills.get(name)

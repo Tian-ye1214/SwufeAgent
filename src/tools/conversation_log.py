@@ -10,6 +10,7 @@ from typing import Any
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from app_config import settings
+from persist_utils import atomic_write_json
 import logger
 
 
@@ -44,7 +45,13 @@ class ConversationLog:
             path = path / _safe_segment(sub_id, 60)
         self._dir = path
         self._run_base: Path | None = existing_run_base
-        self._lock = threading.Lock()
+        self._init_lock = threading.Lock()
+        self._write_lock: asyncio.Lock | None = None
+
+    def _write_lock_for_loop(self) -> asyncio.Lock:
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        return self._write_lock
 
     def model_messages_path(self) -> Path | None:
         if self._run_base is None:
@@ -53,7 +60,7 @@ class ConversationLog:
 
     def save(self, model_messages: list[Any], *, extra: dict[str, Any] | None = None) -> None:
         """模型返回后调用；异步落盘，不阻塞事件循环。同一会话多次调用覆盖同一对文件。"""
-        with self._lock:
+        with self._init_lock:
             if self._run_base is None:
                 self._dir.mkdir(parents=True, exist_ok=True)
                 self._run_base = self._dir / f"messages_{datetime.now().strftime('%H%M%S')}"
@@ -62,7 +69,8 @@ class ConversationLog:
 
         async def _job() -> None:
             try:
-                await asyncio.to_thread(self._write, base, snap, extra)
+                async with self._write_lock_for_loop():
+                    await asyncio.to_thread(self._write, base, snap, extra)
             except Exception as e:
                 logger.error("conversation_log 写入失败: %s", e)
 
@@ -77,10 +85,16 @@ class ConversationLog:
         meta: dict[str, Any] = {"agent": self._name, "date": self._date, "topic": self._topic}
         if extra:
             meta.update(extra)
-        with base.with_suffix(".json").open("w", encoding="utf-8") as f:
-            json.dump({"saved_at": saved_at, "meta": meta, "messages": self._to_readable(raw)}, f, ensure_ascii=False, indent=2)
-        with base.with_suffix(".model_messages.json").open("w", encoding="utf-8") as f:
-            json.dump({"saved_at": saved_at, "meta": meta, "model_messages": raw}, f, ensure_ascii=False, indent=2)
+        readable_path = base.with_suffix(".json")
+        model_path = base.with_suffix(".model_messages.json")
+        atomic_write_json(
+            readable_path,
+            {"saved_at": saved_at, "meta": meta, "messages": self._to_readable(raw)},
+        )
+        atomic_write_json(
+            model_path,
+            {"saved_at": saved_at, "meta": meta, "model_messages": raw},
+        )
 
     def _to_readable(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []

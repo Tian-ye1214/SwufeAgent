@@ -29,7 +29,7 @@ def print_cli_help() -> None:
         "/api      按提示修改 BASE_URL 与 API_KEY（写入 config.json，回车跳过单项）\n"
         "/compress 主动压缩当前 Manager / Coordinator 对话上下文（Markdown 摘要）\n"
         "/status  树形列出会话内 Agent 实例与 invocation（活跃 + 近期历史）\n"
-        "/cancel  中止 invocation；用法: /cancel <invocation_id> 或 /cancel agent <agent_id>\n"
+        "/cancel  中止 invocation；用法: /cancel <invocation_id 或前缀> 或 /cancel agent <agent_id>\n"
         "/stop    中断当前用户回合（取消该 turn 下所有活跃 invocation）\n"
         "/load    从落盘的 *.model_messages.json 恢复对话（与「新任务」同样会清空任务状态）\n"
         "          用法: /load <文件路径>\n"
@@ -135,9 +135,12 @@ async def _print_lifecycle_status(system: Any) -> None:
         )
         for inv in list(view.recent_invocations)[-5:]:
             parent = (inv.parent_invocation_id or "-")[:8]
+            state = inv.state.value
+            if inv.state in (AgentInvocationState.RUNNING, AgentInvocationState.PENDING):
+                state = f"{state}(已结束)"
             print(
                 f"    inv={inv.invocation_id[:8]} {inv.role} parent={parent} "
-                f"turn={inv.turn_id} state={inv.state.value}"
+                f"turn={inv.turn_id} state={state}"
             )
     elif not view.active_invocations:
         print("\n  （无活跃 invocation）")
@@ -197,11 +200,25 @@ async def handle_slash_command(
                 print(f"未找到 agent_id={aid!r} 的活跃 invocation。\n")
             return True, None
         iid = parts[1].strip()
+        n_match = await system.registry.count_active_invocation_prefix_matches(iid)
+        if n_match > 1:
+            print(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。\n")
+            return True, None
+        resolved = await system.registry.resolve_active_invocation_id(iid)
         ok = await system.registry.cancel(iid)
         if ok:
-            print(f"已请求取消 invocation_id={iid!r}。\n")
-        else:
-            print(f"未找到 invocation_id={iid!r} 或已结束。\n")
+            print(f"已请求取消 invocation_id={(resolved or iid)!r}。\n")
+            return True, None
+        sk = getattr(system, "session_key", None)
+        if sk:
+            recent = await system.registry.find_recent_invocation_by_prefix(sk, iid)
+            if recent is not None:
+                print(
+                    f"invocation {iid!r} 已在近期历史中结束"
+                    f"（state={recent.state.value}），无法取消。\n"
+                )
+                return True, None
+        print(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。\n")
         return True, None
     if cmd == "/skills":
         print_loaded_skills(skills_manager)
