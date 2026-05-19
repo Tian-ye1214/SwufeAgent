@@ -6,18 +6,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import logger
 
 try:
-    from app_config import get_config
+    from app_config import get_env, settings
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from app_config import get_config
+    from app_config import get_env, settings
 
 _http_state: tuple[httpx.AsyncClient, str] | None = None
+_HTTP_LOCK = asyncio.Lock()
 
 
 def _require_rag_model(role: str) -> str:
-    m = get_config().get("RAG_models")
+    m = settings().get("RAG_models")
     if not isinstance(m, dict):
         raise RuntimeError("config.json 中须包含 RAG_models 对象。")
     name = (m.get(role) or "").strip()
@@ -28,10 +30,10 @@ def _require_rag_model(role: str) -> str:
 
 async def _get_http_client() -> httpx.AsyncClient:
     global _http_state
-    base = get_config().get("SILICONFLOW_base").strip().rstrip("/")
+    base = get_env("SILICONFLOW_BASE", warn=False).strip().rstrip("/")
     if _http_state is not None and _http_state[1] == base:
         return _http_state[0]
-    async with asyncio.Lock():
+    async with _HTTP_LOCK:
         if _http_state is not None and _http_state[1] == base:
             return _http_state[0]
         if _http_state is not None:
@@ -45,6 +47,16 @@ async def _get_http_client() -> httpx.AsyncClient:
     return _http_state[0]
 
 
+async def close_http_client() -> None:
+    """进程退出时关闭全局 embedding/rerank HTTP 客户端。"""
+    global _http_state
+    async with _HTTP_LOCK:
+        if _http_state is None:
+            return
+        await _http_state[0].aclose()
+        _http_state = None
+
+
 async def embed_texts(
     texts: str | list[str],
     *,
@@ -53,14 +65,14 @@ async def embed_texts(
     """异步获取文本向量；支持单条字符串或多条批量。"""
     if isinstance(texts, str):
        texts = [texts]
-
+    logger.debug("RAG embed: batch_size=%d", len(texts))
     model = _require_rag_model("embedding")
     body = {"model": model, "input": texts}
     client = await _get_http_client()
     response = await client.post(
         "/embeddings",
         headers={
-            "Authorization": f"Bearer {get_config().get('SILICONFLOW_key').strip()}",
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
             "Content-Type": "application/json",
         },
         json=body,
@@ -86,7 +98,7 @@ async def rerank_documents(
     """调用与 OpenAI 兼容的 /v1/rerank，返回按相关度排序的结果（含原始下标与分数）。"""
     if not documents:
         return []
-
+    logger.debug("RAG rerank: n_docs=%d, top_n=%s", len(documents), top_n)
     model = _require_rag_model("reranker")
     body: dict[str, Any] = {
         "model": model,
@@ -101,7 +113,7 @@ async def rerank_documents(
     response = await client.post(
         "/rerank",
         headers={
-            "Authorization": f"Bearer {get_config().get('SILICONFLOW_key').strip()}",
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
             "Content-Type": "application/json",
         },
         json=body,

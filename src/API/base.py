@@ -3,6 +3,7 @@ import sys
 import re
 import asyncio
 import contextvars
+import uuid
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
@@ -15,6 +16,7 @@ for _p in (_SRC, _API_DIR):
         sys.path.insert(0, _p)
 os.chdir(_REPO_ROOT)
 
+from app_config import get_env, settings
 from agent_app import AgentSystem
 from tools.Memory import ChatHistory, UserMessage
 import logger
@@ -58,9 +60,13 @@ class BotBase:
             f"{self.__class__.__name__}_ctx", default=None
         )
         if self._ENV_AGENT_TIMEOUT:
-            self.AGENT_RUN_TIMEOUT_S = float(os.environ.get(self._ENV_AGENT_TIMEOUT, self.AGENT_RUN_TIMEOUT_S))
+            s = get_env(self._ENV_AGENT_TIMEOUT, default="", warn=False)
+            if s.strip():
+                self.AGENT_RUN_TIMEOUT_S = float(s)
         if self._ENV_SEND_TIMEOUT:
-            self.SEND_REPLY_TIMEOUT_S = float(os.environ.get(self._ENV_SEND_TIMEOUT, self.SEND_REPLY_TIMEOUT_S))
+            s = get_env(self._ENV_SEND_TIMEOUT, default="", warn=False)
+            if s.strip():
+                self.SEND_REPLY_TIMEOUT_S = float(s)
 
     @property
     def platform_tag(self) -> str:
@@ -77,9 +83,15 @@ class BotBase:
             self._agent_systems[session_id] = s
         return self._agent_systems[session_id]
 
+    def _queue_maxsize(self) -> int:
+        raw = settings().get("bot")
+        if not isinstance(raw, dict):
+            raise RuntimeError("config.json 中须包含 bot 对象。")
+        return int(raw["session_queue_maxsize"])
+
     def _get_queue(self, session_id: str) -> asyncio.Queue[QueuedTurn]:
         if session_id not in self._session_queues:
-            self._session_queues[session_id] = asyncio.Queue()
+            self._session_queues[session_id] = asyncio.Queue(maxsize=self._queue_maxsize())
         return self._session_queues[session_id]
 
     def _bump_generation(self, session_id: str) -> int:
@@ -125,8 +137,12 @@ class BotBase:
             name=f"{self.platform_tag.lower()}-queue-{session_id}",
         )
 
-    def _reset_session(self, session_id: str) -> None:
+    async def _reset_session(self, session_id: str) -> None:
         self._bump_generation(session_id)
+        agent_system = self._agent_systems.get(session_id)
+        if agent_system is not None:
+            await agent_system.end_session_agents(session_id)
+            await agent_system.shutdown()
         for d in (
             self._sessions,
             self._is_first,
@@ -189,6 +205,9 @@ class BotBase:
                         reply = await asyncio.wait_for(run_coro, timeout=self.AGENT_RUN_TIMEOUT_S)
                     except asyncio.TimeoutError:
                         self._bump_generation(session_id)
+                        ag = self._agent_systems.get(session_id)
+                        if ag is not None:
+                            await ag.registry.cancel_session(session_id)
                         logger.error(
                             f"[{self.platform_tag}] {session_id} Agent 超时（{self.AGENT_RUN_TIMEOUT_S:.0f}s），已作废本轮"
                         )
@@ -217,7 +236,7 @@ class BotBase:
 
     async def _end_task_and_consume_queue(self, session_id: str, send_reply: Callable[..., Awaitable[Any]]) -> None:
         drained = self._drain_queue(session_id)
-        self._reset_session(session_id)
+        await self._reset_session(session_id)
         if not drained:
             await self._safe_send(send_reply, "✓ 已结束当前任务，上下文已清空。队列中没有待处理消息。")
             return
@@ -264,6 +283,8 @@ class BotBase:
         logger.set_user_notify_callback(
             partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
         )
+        await agent_system.bind_session(session_id)
+        turn_id = uuid.uuid4().hex[:8]
         try:
             _, output = await agent_system.run_agent_system(
                 message,
@@ -272,7 +293,9 @@ class BotBase:
                 conversation_log_extra={
                     "session_id": session_id,
                     "platform": self.platform_tag,
+                    "turn_id": turn_id,
                 },
+                turn_id=turn_id,
             )
         except Exception as e:
             logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
@@ -338,7 +361,7 @@ class BotBase:
             return
 
         if user_text in self.RESET_COMMANDS:
-            self._reset_session(session_id)
+            await self._reset_session(session_id)
             await self._safe_send(send_reply, "已开始新对话，上下文已清除。")
             return
         if user_text in self.END_TASK_COMMANDS:
@@ -352,21 +375,32 @@ class BotBase:
 
         msg = UserMessage(text=user_text, attachments=attachments)
         q = self._get_queue(session_id)
+        if q.full():
+            logger.warning(
+                f"[{self.platform_tag}] {session_id} 队列已满（maxsize={q.maxsize}），拒绝入队"
+            )
+            await self._safe_send(
+                send_reply,
+                f"当前会话待处理消息过多（上限 {q.maxsize} 条），请稍后再试或发送「新任务」清空。",
+            )
+            return
         if (n := q.qsize()):
             logger.info(f"[{self.platform_tag}] {session_id} 入队（前方还有 {n} 条待处理）")
         await q.put(QueuedTurn(msg, send_reply, loop))
         self._ensure_consumer(session_id)
 
-
-    def release_all_resources(self) -> None:
+    async def release_all_resources_async(self) -> None:
         if self._released:
             return
         self._released = True
-        n = len(self._agent_systems)
+        agents = list(self._agent_systems.values())
+        n = len(agents)
         for pending in list(self._pending_questions.values()):
             pf = pending.get("future")
             if pf is not None and not pf.done():
                 pf.cancel()
+        for ag in agents:
+            await ag.shutdown()
         for attr in (
             self._pending_questions,
             self._sessions,
@@ -382,6 +416,19 @@ class BotBase:
         self._session_queues.clear()
         self._session_generation.clear()
         logger.info(f"[{self.platform_tag}] 已释放全部会话与 Agent 资源（共 {n} 个 Agent 实例）")
+
+    def release_all_resources(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.release_all_resources_async(), loop
+                )
+                fut.result(timeout=180)
+                return
+        except RuntimeError:
+            pass
+        asyncio.run(self.release_all_resources_async())
 
     def clean_text(self, raw: str) -> str:
         return re.sub(r"\s+", " ", (raw or "").strip())

@@ -4,20 +4,26 @@ import inspect
 import os
 import re
 import subprocess
-import time
 import mimetypes
+import sys
 from ddgs import DDGS
-import requests
 import logger
 import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
+from app_config import get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
+from path_sandbox import resolve_readable_path
 from tools.browser_session import PlaywrightBrowserSession
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+def _get_runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+_REPO_ROOT = _get_runtime_root()
 
 
 class BasicToolkit:
@@ -59,6 +65,13 @@ class BasicToolkit:
     def base_dir(self) -> Path:
         return self._base_dir
 
+    def close(self) -> None:
+        """进程退出时关闭 Playwright 等资源。"""
+        bs = getattr(self, "_browser_session", None)
+        if bs is not None:
+            bs.shutdown()
+            del self._browser_session
+
     def set_task_directory(self, task_name: str) -> Path:
         """
         Set a dedicated work directory for the current task.
@@ -91,13 +104,26 @@ class BasicToolkit:
         self._base_dir = self._WORK_DATABASE_ROOT
         logger.info(f"📁 工作目录已重置为: {self._base_dir}")
 
+    async def _run_blocking(self, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    def _safe_path(self, name: str) -> Path:
+        path = self._resolve_path_candidate(name)
+        root = self._WORK_DATABASE_ROOT.resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"Path not under WorkDatabase: {path}")
+        return path
+
+    def _readable_path(self, name: str) -> Path:
+        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+
     def _browser_headless_from_env(self) -> bool:
-        v = (os.environ.get("BROWSER_HEADLESS") or "").strip().lower()
+        v = (get_env("BROWSER_HEADLESS", warn=False) or "").strip().lower()
         if v in ("0", "false", "no"):
             return False
         return True
 
-    def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
+    async def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """
         Open a URL in a real Chromium browser. Works for static and dynamic pages: navigate first,
         then use browser_get_content, screenshots, etc. as needed.
@@ -110,17 +136,19 @@ class BasicToolkit:
             wait_until: Load wait strategy; one of domcontentloaded, load, networkidle (default domcontentloaded)
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.navigate(url, headless=h, wait_until=wait_until)
+        return await self._run_blocking(
+            self._browser_session.navigate, url, headless=h, wait_until=wait_until
+        )
 
-    def browser_get_content(self) -> str:
+    async def browser_get_content(self) -> str:
         """
         Return visible text from the current page (body innerText), for reading dynamically rendered content.
         Returns the full text with no length truncation.
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.get_content(headless=h)
+        return await self._run_blocking(self._browser_session.get_content, headless=h)
 
-    def browser_screenshot(self, name: str, full_page: bool = False) -> str:
+    async def browser_screenshot(self, name: str, full_page: bool = False) -> str:
         """
         Capture a screenshot of the current page and save it to the given path.
         Relative paths use the same rules as read_file (WorkDatabase or src/ under repo).
@@ -135,9 +163,14 @@ class BasicToolkit:
             path.parent.mkdir(parents=True, exist_ok=True)
         except ValueError as e:
             return str(e)
-        return self._browser_session.screenshot(headless=h, filename=str(path), full_page=full_page)
+        return await self._run_blocking(
+            self._browser_session.screenshot,
+            headless=h,
+            filename=str(path),
+            full_page=full_page,
+        )
 
-    def browser_click(self, selector: str) -> str:
+    async def browser_click(self, selector: str) -> str:
         """
         Click an element on the current page. selector uses Playwright syntax (CSS, text=..., etc.).
 
@@ -145,9 +178,11 @@ class BasicToolkit:
             selector: e.g. #submit, text=Sign in
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.click(headless=h, selector=selector)
+        return await self._run_blocking(
+            self._browser_session.click, headless=h, selector=selector
+        )
 
-    def browser_fill(self, selector: str, text: str) -> str:
+    async def browser_fill(self, selector: str, text: str) -> str:
         """
         Fill an input field with text (clears the field first, then types the value).
 
@@ -156,9 +191,11 @@ class BasicToolkit:
             text: Text to enter
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.fill(headless=h, selector=selector, text=text)
+        return await self._run_blocking(
+            self._browser_session.fill, headless=h, selector=selector, text=text
+        )
 
-    def browser_press_key(self, key: str) -> str:
+    async def browser_press_key(self, key: str) -> str:
         """
         Send a keyboard key to the current page (e.g. Enter, Tab).
 
@@ -166,9 +203,9 @@ class BasicToolkit:
             key: Playwright key name, e.g. Enter, ArrowDown
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.press(headless=h, key=key)
+        return await self._run_blocking(self._browser_session.press, headless=h, key=key)
 
-    def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
+    async def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
         """
         Wait until an element appears in the DOM (useful for SPAs and async-loaded UI).
 
@@ -177,11 +214,14 @@ class BasicToolkit:
             timeout_ms: Timeout in milliseconds
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.wait_for_selector(
-            headless=h, selector=selector, timeout_ms=timeout_ms
+        return await self._run_blocking(
+            self._browser_session.wait_for_selector,
+            headless=h,
+            selector=selector,
+            timeout_ms=timeout_ms,
         )
 
-    def browser_evaluate(self, javascript_expression: str) -> str:
+    async def browser_evaluate(self, javascript_expression: str) -> str:
         """
         Evaluate a JavaScript expression in the page context and return the result (page.evaluate).
         Example: document.querySelector('h1')?.innerText
@@ -190,42 +230,21 @@ class BasicToolkit:
             javascript_expression: A single-line expression to evaluate
         """
         h = self._browser_headless_from_env()
-        return self._browser_session.run_javascript(headless=h, expression=javascript_expression)
+        return await self._run_blocking(
+            self._browser_session.run_javascript,
+            headless=h,
+            expression=javascript_expression,
+        )
 
-    def browser_close(self) -> str:
+    async def browser_close(self) -> str:
         """Close the Playwright browser process and release resources; the next action will start a new browser."""
-        self._browser_session.close()
+        await self._run_blocking(self._browser_session.shutdown)
         return "Browser closed"
 
     def _resolve_path_candidate(self, name: str) -> Path:
-        """Resolve path (same rules as _safe_path) without workspace/repo boundary check — for read/list only."""
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("Path name must not be empty")
-        # Align with system prompt: bare "skills" means src/skills under the repo
-        if name.replace("\\", "/").strip("/").rstrip("/") == "skills":
-            name = "src/skills"
+        """解析读/列路径，限制在 WorkDatabase 与 src/skills。"""
+        return self._readable_path(name)
 
-        base_r = self._base_dir.resolve()
-        repo_r = _REPO_ROOT.resolve()
-        p_in = Path(name).expanduser()
-        if p_in.is_absolute():
-            return p_in.resolve()
-        norm = name.replace("\\", "/")
-        anchor = repo_r if norm == "src" or norm.startswith("src/") else base_r
-        return (anchor / name).resolve()
-
-    def _safe_path(self, name: str) -> Path:
-        """Resolve path and confine to task workspace or Agent repo root (write/delete/move/execute)."""
-        path = self._resolve_path_candidate(name)
-        base_r = self._base_dir.resolve()
-        repo_r = _REPO_ROOT.resolve()
-        if not (path.is_relative_to(base_r) or path.is_relative_to(repo_r)):
-            raise ValueError(
-                "Path traversal detected: path must be inside the task workspace "
-                f"({base_r}) or the Agent project directory ({repo_r})"
-            )
-        return path
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""
@@ -336,27 +355,10 @@ class BasicToolkit:
 
         Parameters:
             name: File name/path (relative to WorkDatabase directory)
-            content: Content to write (must be a string)
-
-        CRITICAL LIMITATIONS - READ CAREFULLY:
-        - For larger content: Use append_to_file() to write in chunks
-        - For code files: Keep under 200 lines per file
-        - For long documents: Split into multiple files or write a Python script to generate the file
-
-        DO NOT use this for:
-        - Large code files (>200 lines)
-        - Long documents or reports
-        - Generated content that might be lengthy
-
-        INSTEAD, for large content:
-        1. Write a Python script that generates the file using standard file I/O
-        2. Use append_to_file() to write content in multiple chunks
-        3. Split content into multiple smaller files
+            content: Content to write
         """
         content_len = len(content) if content else 0
         try:
-            if content is None:
-                return "Write error: content cannot be None"
             if not isinstance(content, str):
                 content = str(content)
 
@@ -383,11 +385,6 @@ class BasicToolkit:
         Parameters:
             name: File name/path (relative to WorkDatabase directory)
             content: Content to append (keep each chunk under 5000 characters)
-
-        Usage Pattern for Large Files:
-        1. First chunk: write_file("myfile.txt", "first part...")
-        2. Next chunks: append_to_file("myfile.txt", "second part...")
-        3. Continue until done
         """
         content_len = len(content) if content else 0
         try:
@@ -418,7 +415,7 @@ class BasicToolkit:
             name: Directory name/path
         """
         try:
-            dir_path = self._safe_path(name)
+            dir_path = self._resolve_path_candidate(name)
             os.makedirs(dir_path, exist_ok=True)
             return f"Directory '{name}' created successfully"
         except ValueError as e:
@@ -483,7 +480,7 @@ class BasicToolkit:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
 
-    def execute_file(self, name: str, args: str = "") -> str:
+    async def execute_file(self, name: str, args: str = "") -> str:
         """
         Execute a file (supports Python, Shell scripts, etc.).
         Parameters:
@@ -510,14 +507,15 @@ class BasicToolkit:
             if args:
                 cmd.extend(args.split())
 
-            result = subprocess.run(
+            result = await self._run_blocking(
+                subprocess.run,
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=60,
-                cwd=str(self._base_dir)
+                cwd=str(self._base_dir),
             )
             output = result.stdout + result.stderr
             return_code = result.returncode
@@ -529,7 +527,7 @@ class BasicToolkit:
         except Exception as e:
             return f"Execution error: {e}"
 
-    def run_command(self, command: str, timeout: int = 60) -> str:
+    async def run_command(self, command: str, timeout: int = 60) -> str:
         """
         Execute a Shell/terminal command.
         Parameters:
@@ -558,11 +556,11 @@ class BasicToolkit:
             )
 
             if use_shell:
-                result = subprocess.run(command, shell=True, **sub_kw)
+                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
             elif _platform.system() == "Windows":
-                result = subprocess.run(command, shell=True, **sub_kw)
+                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
             else:
-                result = subprocess.run(shlex.split(command), **sub_kw)
+                result = await self._run_blocking(subprocess.run, shlex.split(command), **sub_kw)
 
             output = result.stdout + result.stderr
             return_code = result.returncode
@@ -604,9 +602,10 @@ class BasicToolkit:
 
     def _read_image_from_file(self, image_path: str) -> ToolReturn | str:
         """Load an image from a local file path."""
-        path = Path(image_path)
-        if not path.is_absolute():
-            path = (self._base_dir / image_path).resolve()
+        try:
+            path = self._readable_path(image_path)
+        except ValueError as e:
+            return f"Security error: {e}"
 
         if not path.exists():
             return f"Error: Image file not found: {image_path}"
@@ -640,107 +639,6 @@ class BasicToolkit:
             ]
         )
 
-    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> str:
-        """
-        Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
-
-        This is the PRIMARY tool for ALL image generation requests. Keywords that should trigger this tool:
-        - "create image" / "generate image" / "make a picture" / "draw" / "paint" / "illustrate"
-        - "give me an image" / "produce image"
-        - Any request involving creating visual content, artwork, diagrams, or images (any language)
-
-        Parameters:
-            prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
-            width: Image width in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
-            height: Image height in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
-            max_wait_time: Maximum wait time in seconds. Default: 300 (5 minutes).
-
-        Returns:
-            Success: Returns the image URL and generation details.
-            Failure: Returns an error message.
-        """
-        bfl_base_url = os.environ.get('BFL_BASE_URL')
-        bfl_api_key = os.environ.get("BFL_API_KEY")
-        if not bfl_api_key:
-            return "Error: BFL_API_KEY environment variable is not set. Please set it before using image generation."
-
-        try:
-            logger.info(f"正在提交图像生成请求: {prompt[:50]}...")
-            response = requests.post(
-                bfl_base_url,
-                headers={
-                    "accept": "application/json",
-                    "x-key": bfl_api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "prompt": prompt,
-                    "width": width,
-                    "height": height,
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-            response_data = response.json()
-
-            request_id = response_data.get("id")
-            polling_url = response_data.get("polling_url")
-
-            if not polling_url:
-                return f"Error: No polling_url received from API. Response: {response_data}"
-
-            logger.info(f"请求已提交，Request ID: {request_id}")
-            logger.info("正在等待图像生成完成...")
-
-            start_time = time.time()
-            poll_count = 0
-
-            while True:
-                elapsed_time = time.time() - start_time
-                if elapsed_time > max_wait_time:
-                    return f"Error: Image generation timed out after {max_wait_time} seconds. Request ID: {request_id}"
-
-                poll_count += 1
-                if poll_count % 10 == 0:
-                    logger.info(f"仍在等待中... (已等待 {elapsed_time:.1f} 秒)")
-
-                result_response = requests.get(
-                    polling_url,
-                    headers={
-                        "accept": "application/json",
-                        "x-key": bfl_api_key
-                    },
-                    timeout=30
-                )
-                result_response.raise_for_status()
-                result = result_response.json()
-
-                status = result.get("status", "Unknown")
-
-                if status == "Ready":
-                    image_url = result.get("result", {}).get("sample")
-                    if image_url:
-                        logger.info("图像生成成功！")
-                        logger.info(f"图像URL: {image_url}")
-                        return f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}\nDimensions: {width}x{height}"
-                    else:
-                        return f"Error: Image generation completed but no image URL found in response. Response: {result}"
-
-                elif status == "Failed":
-                    error_msg = result.get("error", "Unknown error")
-                    logger.error(f"图像生成失败: {error_msg}")
-                    return f"Error: Image generation failed - {error_msg}"
-
-                time.sleep(0.5)
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API请求错误: {e}")
-            return f"Error: API request failed - {e}"
-        except Exception as e:
-            logger.error(f"图像生成异常: {e}")
-            return f"Error: Image generation exception - {type(e).__name__}: {e}"
-
-
     @property
     def workers_tools(self) -> list:
         """List of tool callables exposed to the Worker Agent."""
@@ -771,7 +669,6 @@ class BasicToolkit:
             self.run_command,
             self.execute_file,
             # Images and user input
-            self.generate_image,
             self.ask_user,
             extract_text,
             *self._extra_worker_tools,

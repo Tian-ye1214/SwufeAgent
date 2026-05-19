@@ -1,65 +1,50 @@
-"""Playwright 浏览器会话（同步 API）。
-
-Playwright 要求在同一线程上启动与操作浏览器；Agent 可能在不同线程调用工具，
-因此所有操作通过单 worker 的 ThreadPoolExecutor 串行执行。
-"""
-
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import logger
-
-try:
-    from playwright.sync_api import (
-        Browser,
-        BrowserContext,
-        Page,
-        Playwright,
-        sync_playwright,
-    )
-
-    _PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    _PLAYWRIGHT_AVAILABLE = False
-    Playwright = Browser = BrowserContext = Page = Any  # type: ignore
+from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
 
-def playwright_import_error_message() -> str:
-    return (
-        "未安装 Playwright。请执行: pip install playwright && playwright install chromium"
-    )
 
 
 class PlaywrightBrowserSession:
     """持久 Chromium 会话；内部仅在单后台线程上触碰 Playwright 对象。"""
 
     def __init__(self) -> None:
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="playwright",
-        )
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+        self._run_lock = threading.Lock()
+        self._stopped = False
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._headless: bool | None = None
 
-    @property
-    def available(self) -> bool:
-        return _PLAYWRIGHT_AVAILABLE
 
     def _run(self, fn: Callable[[], Any], timeout: float = 120.0) -> Any:
-        return self._executor.submit(fn).result(timeout=timeout)
+        if self._stopped:
+            raise RuntimeError("Playwright session has been shut down")
+        with self._run_lock:
+            return self._executor.submit(fn).result(timeout=timeout)
 
     def close(self) -> None:
-        if not _PLAYWRIGHT_AVAILABLE:
+        if self._stopped:
             return
         try:
             self._run(self._close_impl, timeout=60.0)
         except Exception as e:
             logger.warning(f"[browser] close: {e}")
+
+    def shutdown(self) -> None:
+        """关闭浏览器并停止后台线程池（进程退出时调用）。"""
+        if self._stopped:
+            return
+        self._stopped = True
+        self.close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _close_impl(self) -> None:
         for attr, closer in (
@@ -109,9 +94,6 @@ class PlaywrightBrowserSession:
         headless: bool,
         wait_until: str = "domcontentloaded",
     ) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -119,9 +101,7 @@ class PlaywrightBrowserSession:
             assert self._page is not None
             try:
                 self._page.goto(url, wait_until=wait_until, timeout=60_000)
-                msg = (
-                    f"OK\nURL: {self._page.url}\nTitle: {self._page.title()}"
-                )
+                msg = f"OK\nURL: {self._page.url}\nTitle: {self._page.title()}"
                 if headless:
                     msg += (
                         "\n\n说明: 当前为无头 Chromium，页面在 Agent 进程内打开，"
@@ -135,9 +115,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def get_content(self, headless: bool) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -157,9 +134,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def screenshot(self, headless: bool, filename: str, full_page: bool = False) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -174,9 +148,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def click(self, headless: bool, selector: str) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -191,9 +162,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def fill(self, headless: bool, selector: str, text: str) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -208,9 +176,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def press(self, headless: bool, key: str) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -225,9 +190,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def wait_for_selector(self, headless: bool, selector: str, timeout_ms: int = 30_000) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -242,9 +204,6 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def run_javascript(self, headless: bool, expression: str) -> str:
-        if not _PLAYWRIGHT_AVAILABLE:
-            return playwright_import_error_message()
-
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:

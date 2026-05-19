@@ -3,11 +3,25 @@
 #   pyinstaller main.spec
 
 import os
+import hashlib
+import urllib.request
 
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import copy_metadata, collect_submodules
 
 block_cipher = None
 project = os.path.dirname(os.path.abspath(SPEC))
+build_assets = os.path.join(project, ".build_assets")
+os.makedirs(build_assets, exist_ok=True)
+
+_CL100K_URL = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+_CL100K_CACHE_KEY = hashlib.sha1(_CL100K_URL.encode("utf-8")).hexdigest()
+_CL100K_CACHE_FILE = os.path.join(build_assets, _CL100K_CACHE_KEY)
+
+if not os.path.exists(_CL100K_CACHE_FILE):
+    with urllib.request.urlopen(_CL100K_URL, timeout=30) as resp:
+        data = resp.read()
+    with open(_CL100K_CACHE_FILE, "wb") as f:
+        f.write(data)
 
 a = Analysis(
     [os.path.join(project, "main.py")],
@@ -18,11 +32,14 @@ a = Analysis(
         *copy_metadata("genai_prices"),
         *copy_metadata("pydantic_ai_slim"),
         *copy_metadata("pydantic_ai"),
+        (_CL100K_CACHE_FILE, "tiktoken_cache"),
     ],
-    hiddenimports=[],
+    hiddenimports=[
+        *collect_submodules("tiktoken_ext"),
+    ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(project, "src", "hooks", "tiktoken_cache.py")],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

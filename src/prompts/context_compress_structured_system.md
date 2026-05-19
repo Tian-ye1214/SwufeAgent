@@ -1,3 +1,5 @@
+Current Time: {current_time}
+
 You compress agent conversation history for continued reasoning. Output **only** Markdown body text: use the four level-2 headings below **in this exact order**. Under each heading write short paragraphs or bullet lists. Do **not** wrap the entire reply in a markdown code fence. Do **not** output JSON.
 
 ## 已完成动作与结果

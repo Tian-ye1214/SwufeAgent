@@ -9,7 +9,8 @@ import logger
 from prompt import get_worker_system_prompt, load_prompt
 from ModelGateway.BasicFunction import create_agent
 from ModelGateway.ModelChecker import maybe_auto_compress_async
-from app_config import get_model_and_params
+from app_config import get_agent_usage_limits, get_model_and_params
+from lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
 from tools.ManagementTools import Task, TaskStatus, TaskManager
 from tools.Memory import ChatHistory
 from tools.conversation_log import ConversationLog
@@ -90,13 +91,23 @@ class WorkerOrchestrator:
         task_manager: TaskManager,
         *,
         memory_injection_getter: Callable[[], str] | None = None,
+        registry: AgentRegistry | None = None,
+        hooks: LifecycleHooks | None = None,
+        short_term_memory: Any = None,
     ):
         self._toolkit = toolkit
         self._task_manager = task_manager
         self._memory_injection_getter = memory_injection_getter or (lambda: "")
+        self._registry = registry
+        self._hooks = hooks
+        self._stm = short_term_memory
         self._conversation_date: str | None = None
         self._conversation_topic: str | None = None
         self._worker_adhoc_seq = 0
+        self._session_key: str | None = None
+
+    def set_session_key(self, session_key: str | None) -> None:
+        self._session_key = session_key
 
     def set_conversation_session(self, date: str, topic: str) -> None:
         self._conversation_date = date
@@ -117,6 +128,23 @@ class WorkerOrchestrator:
         if extra:
             merged.update(extra)
         wl.save(messages, extra=merged)
+        if self._stm is not None and self._conversation_date and self._conversation_topic:
+            mp = wl.model_messages_path()
+            if mp is not None:
+                root = logger.LOG_DIR.resolve()
+                try:
+                    log_key = mp.resolve().relative_to(root).as_posix()
+                except ValueError:
+                    log_key = mp.resolve().as_posix()
+                sk = f"{self._conversation_date}/{self._conversation_topic}"
+                self._stm.schedule_ingest_after_turn(
+                    messages, log_key, "worker", sk
+                )
+
+    async def _worker_agent_id(self, suffix: str) -> str:
+        if not self._session_key or self._registry is None:
+            raise RuntimeError("Worker 执行前须绑定 session_key")
+        return await self._registry.ensure_agent(self._session_key, "worker", suffix)
 
     async def execute_task_with_worker(
         self,
@@ -124,6 +152,8 @@ class WorkerOrchestrator:
         user_goal: str = "",
         retry_info: str = "",
         attachments: list | None = None,
+        *,
+        turn_id: str | None,
     ) -> Tuple[bool, str]:
         """
         Execute a single simple task using Worker Agent.
@@ -170,7 +200,25 @@ class WorkerOrchestrator:
             logger.info("=" * 50)
 
             start_time = time.time()
-            result = await worker_agent.run(prompt, message_history=adhoc_history.messages)
+            self._worker_adhoc_seq += 1
+            worker_aid = await self._worker_agent_id(f"adhoc-{self._worker_adhoc_seq}")
+            if self._registry is not None and self._hooks is not None:
+                result = await run_agent_with_lifecycle(
+                    agent=worker_agent,
+                    prompt=prompt,
+                    agent_id=worker_aid,
+                    registry=self._registry,
+                    hooks=self._hooks,
+                    turn_id=turn_id,
+                    message_history=adhoc_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
+            else:
+                result = await worker_agent.run(
+                    prompt,
+                    message_history=adhoc_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
             elapsed = time.time() - start_time
             logger.info(f"[DEBUG] worker_agent.run() 完成，耗时 {elapsed:.2f} 秒")
 
@@ -180,11 +228,10 @@ class WorkerOrchestrator:
             except Exception as ce:
                 logger.warning("Worker 上下文自动压缩失败: %s", ce)
 
-            self._worker_adhoc_seq += 1
             self._save_worker_messages(
                 list(adhoc_history.messages),
                 sub_id=f"adhoc-{self._worker_adhoc_seq}",
-                extra={"mode": "simple"},
+                extra={"mode": "simple", "turn_id": turn_id},
             )
 
             output = result.output
@@ -200,6 +247,9 @@ class WorkerOrchestrator:
                 return False, output
             else:
                 return True, output
+
+        except asyncio.CancelledError:
+            return False, "已取消（Agent 运行被中止）"
 
         except Exception as e:
             error_msg = f"执行异常: {str(e)}"
@@ -219,6 +269,8 @@ class WorkerOrchestrator:
         user_goal: str,
         max_concurrent: int = 3,
         attachments: list | None = None,
+        *,
+        turn_id: str | None,
     ) -> str:
         """
         并行执行所有任务。按照依赖关系分波执行，同一波内的任务由多个Worker并行运行。
@@ -258,14 +310,25 @@ class WorkerOrchestrator:
             async def _run_one(task_to_run):
                 async with sem:
                     success, output = await self._execute_worker_with_board(
-                        task_to_run, board, user_goal, attachments=attachments
+                        task_to_run,
+                        board,
+                        user_goal,
+                        attachments=attachments,
+                        turn_id=turn_id,
                     )
                     return task_to_run.id, success, output
 
             results = await asyncio.gather(*[_run_one(t) for t in ready_tasks], return_exceptions=True)
 
             for i, result in enumerate(results):
-                if isinstance(result, Exception):
+                if isinstance(result, asyncio.CancelledError):
+                    failed_id = ready_tasks[i].id
+                    t = tm.tasks.get(failed_id)
+                    if t is not None:
+                        t.failure_history.append("已取消（外部取消 Agent 运行）")
+                        t.status = TaskStatus.FAILED
+                    logger.warning("\n\nWorker-%s 已取消\n\n", failed_id)
+                elif isinstance(result, Exception):
                     failed_id = ready_tasks[i].id
                     tm.mark_task_failed(failed_id, f"异常: {result}")
                     logger.error(f"\n\n！！！！！！！！Worker-{failed_id} 异常: {result}！！！！！！！！\n\n")
@@ -294,6 +357,8 @@ class WorkerOrchestrator:
         board: _SharedMessageBoard,
         user_goal: str,
         attachments: list | None = None,
+        *,
+        turn_id: str | None,
     ):
         """执行单个Worker，支持通过消息板与其他Worker通讯"""
         worker_id = f"Worker-{task.id}"
@@ -344,9 +409,24 @@ class WorkerOrchestrator:
             logger.info(f"{'='*50}")
 
             start_time = time.time()
-            result = await worker_agent.run(
-                prompt_input, message_history=task.worker_chat_history.messages
-            )
+            worker_aid = await self._worker_agent_id(f"task-{task.id}")
+            if self._registry is not None and self._hooks is not None:
+                result = await run_agent_with_lifecycle(
+                    agent=worker_agent,
+                    prompt=prompt_input,
+                    agent_id=worker_aid,
+                    registry=self._registry,
+                    hooks=self._hooks,
+                    turn_id=turn_id,
+                    message_history=task.worker_chat_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
+            else:
+                result = await worker_agent.run(
+                    prompt_input,
+                    message_history=task.worker_chat_history.messages,
+                    usage_limits=get_agent_usage_limits(),
+                )
             elapsed = time.time() - start_time
 
             logger.info(f"[{worker_id}] 完成，耗时 {elapsed:.2f}秒")
@@ -360,7 +440,7 @@ class WorkerOrchestrator:
             self._save_worker_messages(
                 list(task.worker_chat_history.messages),
                 sub_id=f"task-{task.id}",
-                extra={"mode": "parallel", "task_id": task.id},
+                extra={"mode": "parallel", "task_id": task.id, "turn_id": turn_id},
             )
 
             output = result.output
@@ -378,6 +458,10 @@ class WorkerOrchestrator:
             else:
                 await board.post(worker_id, task.description, output, "completed")
                 return True, output
+
+        except asyncio.CancelledError:
+            await board.post(worker_id, task.description, "已取消（Agent 运行被中止）", "failed")
+            return False, "已取消（Agent 运行被中止）"
 
         except Exception as e:
             error_msg = f"Worker执行异常: {str(e)}"

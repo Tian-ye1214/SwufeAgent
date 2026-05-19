@@ -1,72 +1,116 @@
 {
-  "api_base": "",
-  "api_key": "",
-  "SILICONFLOW_base": "",
-  "SILICONFLOW_key": "",
+  "BASE_URL": "",
+  "API_KEY": "",
+  "SILICONFLOW_BASE": "",
+  "SILICONFLOW_KEY": "",
   "RAG_models": {
     "embedding": "Qwen/Qwen3-Embedding-0.6B",
     "reranker": "Qwen/Qwen3-Reranker-0.6B"
   },
   "models": {
     "manager": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 131072,
+      "top_p": 1.0,
+      "reasoning_effort": "xhigh",
+      "thinking": "enabled"
     },
     "worker": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-flash",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 131072,
+      "top_p": 1.0,
+      "reasoning_effort": "high",
+      "thinking": "enabled"
     },
     "coordinator": {
-      "name": "qwen3.5-397b-a17b",
+      "name": "deepseek-v4-pro",
       "temperature": 1.0,
-      "max_tokens": 32768
+      "max_tokens": 131072,
+      "top_p": 1.0,
+      "reasoning_effort": "xhigh",
+      "thinking": "enabled"
+    },
+    "compressor": {
+      "name": "deepseek-v4-flash",
+      "temperature": 0.2,
+      "max_tokens": 2048,
+      "top_p": 1.0,
+      "reasoning_effort": "xhigh",
+      "thinking": "enabled"
     }
   },
   "context": {
     "defaults": {
-      "models_api_path": "v1/models",
-      "token_estimate_fallback_chars_per_token": 4
+      "token_estimate_fallback_chars_per_token": 4,
+      "litellm_model_prices_json_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    },
+    "compression": {
+      "weak_streak_max": 2,
+      "min_saved_ratio": 0.1,
+      "middle_tool_args_max_chars": 1200
     },
     "coordinator": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     },
     "manager": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     },
     "worker": {
       "max_context_tokens": null,
-      "default_context_tokens": 131072,
+      "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
-      "tail_reserve_ratio": 0.2,
+      "tail_turns": 2,
+      "tail_max_ratio": 0.12,
       "head_turns": 2,
-      "head_max_ratio": 0.12,
-      "compressor": {
-        "model": null,
-        "max_tokens": 4096,
-        "temperature": 0.2
-      }
+      "head_max_ratio": 0.12
     }
-  }
+  },
+  "bot": {
+    "session_queue_maxsize": 50
+  },
+  "conversation_log": {
+    "save_model_thinking_chain": true
+  },
+  "lifecycle": {
+    "invocation_history_per_session": 50
+  },
+  "short_term_memory": {
+    "db_path": "data/rag_lancedb/stm",
+    "table_name": "conversation_turns",
+    "vector_search_limit": 30,
+    "final_top_k": 8,
+    "use_rerank": false,
+    "reconcile_on_query": true,
+    "index": {
+      "min_rows": 256,
+      "metric": "cosine",
+      "rebuild_every_n_adds": 100
+    }
+  },
+  "long_term_memory": {
+    "consolidation": {
+      "max_transcript_chars": 28000,
+      "max_output_tokens": 4096,
+      "log_read_chunk_bytes": 72000,
+      "merge_min_similarity": 0.35,
+      "merge_max_len_ratio": 2.6,
+      "merge_min_len_ratio": 0.35,
+      "merge_len_check_min_old_chars": 200
+    }
+  },
+  "request_limit": null
 }

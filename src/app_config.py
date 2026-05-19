@@ -1,147 +1,175 @@
-"""从 config.json 加载/保存 API 与模型配置；运行时修改会写回文件。"""
 from __future__ import annotations
 
 import json
-import os
+import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from logger import get_logger
+from persist_utils import atomic_write_json, file_lock
 
-logger = get_logger()
+if TYPE_CHECKING:
+    from pydantic_ai.usage import UsageLimits as _UsageLimits
 
-CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+import logger
+from dotenv import dotenv_values
+from pydantic_ai.usage import UsageLimits
+
+_d = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+CONFIG_FILE = _d / "config.json"
+DOTENV_FILE = _d / ".env" if getattr(sys, "frozen", False) else _d.parent / ".env"
 
 _CONFIG: dict[str, Any] | None = None
 
 
 def load_config() -> dict[str, Any]:
     global _CONFIG
-    if not CONFIG_FILE.is_file():
-        raise FileNotFoundError(f"缺少配置文件: {CONFIG_FILE}，请创建 config.json（含 api_base、api_key、models）。")
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    with open(CONFIG_FILE, encoding="utf-8") as f:
         _CONFIG = json.load(f)
     return _CONFIG
 
 
-def get_config() -> dict[str, Any]:
+def settings() -> dict[str, Any]:
     if _CONFIG is None:
         load_config()
-    assert _CONFIG is not None
-    return _CONFIG
+    return _CONFIG  # type: ignore[return-value]
+
+
+def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
+    env: dict[str, str] = {}
+    if DOTENV_FILE.is_file():
+        for k, v in (dotenv_values(DOTENV_FILE) or {}).items():
+            if v and str(v).strip():
+                env[str(k).strip()] = str(v).strip()
+    if val := (env.get(key) or "").strip():
+        return val
+    raw = settings().get(key)
+    if raw is not None and not isinstance(raw, (dict, list)):
+        s = raw.strip() if isinstance(raw, str) else str(raw).strip()
+        if s:
+            return s
+    if warn and not default:
+        logger.warning("未配置 %r，请在 .env 或 config.json 根中填写。", key)
+    return default
 
 
 def save_config(cfg: dict[str, Any] | None = None) -> None:
     global _CONFIG
-    cfg = cfg if cfg is not None else get_config()
+    cfg = settings() if cfg is None else cfg
     _CONFIG = cfg
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with file_lock(CONFIG_FILE):
+        atomic_write_json(CONFIG_FILE, cfg)
 
 
-def get_api_base() -> str:
-    c = (get_config().get("api_base") or "").strip()
-    if c:
-        return c
-    return (os.environ.get("BASE_URL") or "").strip()
+def get_agent_usage_limits() -> "_UsageLimits":
+    """单次 Agent 运行对模型请求次数上限"""
+    cfg = settings()
+    raw = cfg["request_limit"]
+    if raw is None or raw.strip().lower() in ("none", "unlimited", "null"):
+        return UsageLimits(request_limit=None)
+    return UsageLimits(request_limit=int(raw))
 
 
-def get_api_key() -> str:
-    c = (get_config().get("api_key") or "").strip()
-    if c:
-        return c
-    return (os.environ.get("API_KEY") or "").strip()
+def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+    from ModelGateway.ModelChecker import merge_litellm_into_model_params
+
+    raw: dict[str, Any] = dict(settings()["models"][role])
+    name = str(raw.pop("name")).strip()
+    reff = raw.pop("reasoning_effort")
+    s = str(reff).strip().lower()
+    if s in ("none", "off", "false"):
+        raw["reasoning_effort"] = False
+    elif s in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        raw["reasoning_effort"] = s
+    else:
+        raw["reasoning_effort"] = "medium"
+    raw["thinking"] = str(raw.pop("thinking")).strip().lower()
+
+    out = merge_litellm_into_model_params(name, raw)
+    out.update(kwargs)
+    return name, out
 
 
-def apply_api_to_process_env() -> None:
-    """将当前配置中的 api_base / api_key 同步到进程环境，供依赖环境变量的代码使用。"""
-    cfg = get_config()
-    base = (cfg.get("api_base") or "").strip()
-    key = (cfg.get("api_key") or "").strip()
-    if base:
-        os.environ["BASE_URL"] = base
-    if key:
-        os.environ["API_KEY"] = key
+def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
+    reasoning_effort = model_params["reasoning_effort"]
+    thinking_type = str(model_params["thinking"]).strip().lower()
+    if thinking_type == "enabled" and reasoning_effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort}
+    return {"thinking": {"type": "disabled"}}
 
 
-def get_model_and_params(role: str) -> tuple[str, dict[str, Any]]:
-    if role not in ("manager", "worker", "coordinator"):
-        raise ValueError(f"未知角色: {role}")
-    m = get_config()["models"][role]
-    name = m["name"]
-    params = {
-        "temperature": float(m["temperature"]),
-        "max_tokens": int(m["max_tokens"]),
-    }
-    return name, params
+def chat_completion_inference_request_fields(
+    model_params: dict[str, Any],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """OpenAI 兼容 chat/completions 请求体中除 model、messages 外的推理相关字段；config 与运行时 kwargs 均可扩展。"""
+    mp = dict(model_params)
+    tex = http_chat_completions_thinking_extras(mp)
+    mp.pop("thinking")
+    mp.update(tex)
+    mp.update(kwargs)
+    return mp
 
 
 def set_model_name(role: str, model_name: str) -> None:
-    if role not in ("manager", "worker", "coordinator"):
-        raise ValueError(f"未知角色: {role}")
-    cfg = get_config()
+    cfg = settings()
     cfg["models"][role]["name"] = model_name.strip()
     save_config(cfg)
 
 
-def set_api(api_base: str | None, api_key: str | None) -> None:
-    cfg = get_config()
-    if api_base is not None:
-        cfg["api_base"] = api_base.strip()
+def set_api(base_url: str | None = None, api_key: str | None = None) -> None:
+    cfg = settings()
+    if base_url is not None:
+        cfg["BASE_URL"] = base_url.strip()
     if api_key is not None:
-        cfg["api_key"] = api_key.strip()
+        cfg["API_KEY"] = api_key.strip()
     save_config(cfg)
-    apply_api_to_process_env()
-
-CONTEXT_ROLE_KEYS = frozenset({"coordinator", "manager", "worker"})
 
 
-def _merge_context_layer(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """将一层 overlay 合并进 base（处理 compressor 子 dict）。"""
+def _merge_ctx(base: dict[str, Any], overlay: dict[str, Any], roles: tuple[str, ...]) -> dict[str, Any]:
     out = dict(base)
     for k, v in overlay.items():
-        if k in CONTEXT_ROLE_KEYS:
+        if k in roles:
             continue
-        if k == "compressor" and isinstance(v, dict):
-            prev = out.get("compressor")
-            comp = dict(prev) if isinstance(prev, dict) else {}
-            comp.update(v)
-            out["compressor"] = comp
-        else:
-            out[k] = v
+        out[k] = v
     return out
 
 
-def _context_root_is_per_role(raw: Any) -> bool:
+def get_agent_roles(**kwargs: Any) -> tuple[str, ...]:
+    cfg = kwargs.pop("cfg", settings())
+    models = cfg.get("models")
+    roles: list[str] = []
+    for role in models.keys():
+        roles.append(role)
+    return tuple(roles)
+
+
+def get_context_profile_roles() -> tuple[str, ...]:
+    """参与上下文配置（有独立 context 段）的角色，顺序与 config 中 context 键顺序一致。"""
+    raw = settings().get("context")
     if not isinstance(raw, dict):
-        return False
-    return any(
-        k in CONTEXT_ROLE_KEYS and isinstance(raw.get(k), dict) for k in CONTEXT_ROLE_KEYS
-    )
+        return ()
+    return tuple(k for k, v in raw.items() if k != "defaults" and isinstance(v, dict))
 
 
 def get_context_config(role: str) -> dict[str, Any]:
-    """
-    返回指定角色合并后的 context 配置（不写回文件）。
-    - 新格式：context.coordinator / context.manager / context.worker 各自独立；
-      可选 context.defaults 先于角色层合并。
-    - 旧格式：context 为单层扁平 dict（无角色子对象），则三角色共用该配置。
-    """
-    if role not in CONTEXT_ROLE_KEYS:
-        role = "coordinator"
-        logger.warning("警告，发现未知role，默认配置为coordinator")
-    raw_root = get_config().get("context")
+    raw = settings().get("context")
+    if not isinstance(raw, dict):
+        return {}
+    roles = get_agent_roles()
+    if role not in roles:
+        if not roles:
+            return {}
+        role = roles[0]
+        logger.warning("警告，发现未知role，默认配置为%r", role)
+    per_role = any(isinstance(raw.get(k), dict) for k in roles)
     out: dict[str, Any] = {}
-    if not isinstance(raw_root, dict):
-        return out
-    if _context_root_is_per_role(raw_root):
-        defaults = raw_root.get("defaults")
-        if isinstance(defaults, dict):
-            out = _merge_context_layer(out, defaults)
-        role_raw = raw_root.get(role)
-        if isinstance(role_raw, dict):
-            out = _merge_context_layer(out, role_raw)
+    if per_role:
+        d = raw.get("defaults")
+        if isinstance(d, dict):
+            out = _merge_ctx(out, d, roles)
+        r = raw.get(role)
+        if isinstance(r, dict):
+            out = _merge_ctx(out, r, roles)
     else:
-        out = _merge_context_layer(out, raw_root)
+        out = _merge_ctx(out, raw, roles)
     return out

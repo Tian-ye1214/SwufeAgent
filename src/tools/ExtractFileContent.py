@@ -5,7 +5,9 @@ import re
 
 from pathlib import Path
 
-base_dir = Path("./WorkDatabase")
+from path_sandbox import resolve_readable_path, runtime_repo_root
+
+_WORK_DATABASE_ROOT = runtime_repo_root() / "WorkDatabase"
 
 
 def _clean_extracted_text(content: str) -> str:
@@ -17,14 +19,8 @@ def _clean_extracted_text(content: str) -> str:
 
 
 def _resolve_read_path(name: str) -> Path:
-    """读取用路径解析：绝对路径任意可读；相对路径相对于 WorkDatabase。"""
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("路径不能为空")
-    p = Path(name).expanduser()
-    if p.is_absolute():
-        return p.resolve()
-    return (base_dir / name).resolve()
+    """读取用路径：限制在 WorkDatabase 与 src/skills。"""
+    return resolve_readable_path(name, work_base=_WORK_DATABASE_ROOT, repo_root=runtime_repo_root())
 
 
 def extract_text_from_pdf(file_path):
@@ -81,54 +77,36 @@ def extract_text_from_docx(docx_file):
     return text
 
 
-def extract_text_from_txt(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        return f.read()
-
-
-def extract_text(file_path):
+def extract_text(name: str) -> str:
     """
-    Extract text content from a specified file.
+    Extract text from a file (PDF, Excel, Word, plain text, etc.).
 
-    This function supports text extraction from multiple file formats, including
-    PDF, Word (doc/docx), Excel (xlsx/xls), and plain text (txt) files. After
-    extraction, the text is automatically cleaned by removing excess whitespace,
-    line breaks, and duplicate punctuation marks.
-
-    Args:
-        file_path (str): 本地文件路径（绝对路径任意；相对路径相对于 WorkDatabase）。需含扩展名。
-
-    Returns:
-        str: The extracted and cleaned text content. Returns None if an error
-             occurs during processing.
+    Parameters:
+        name: File path relative to WorkDatabase, or under src/skills
     """
     try:
-        resolved = _resolve_read_path(file_path)
+        file_path = _resolve_read_path(name)
+        if not file_path.exists():
+            return f"Error: File '{name}' does not exist"
 
-        if not resolved.exists():
-            print(f"文件不存在：{resolved}")
-            return None
-
-        file_type = resolved.suffix.lstrip('.').lower()
-
-        if file_type == 'pdf':
-            content = extract_text_from_pdf(resolved)
-        elif file_type in ['doc', 'docx']:
-            content = extract_text_from_docx(resolved)
-        elif file_type in ['xlsx', 'xls']:
-            content = extract_text_from_excel(resolved)
-        elif file_type == 'txt':
-            content = extract_text_from_txt(resolved)
+        ext = file_path.suffix.lower()
+        if ext == ".pdf":
+            content = extract_text_from_pdf(str(file_path))
+        elif ext in (".xlsx", ".xls"):
+            content = extract_text_from_excel(str(file_path))
+        elif ext == ".docx":
+            content = extract_text_from_docx(str(file_path))
+        elif ext in (".txt", ".md", ".csv", ".json"):
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         else:
-            raise ValueError(f"不支持的文件格式：{file_type}")
+            return f"Error: Unsupported file type '{ext}'"
 
-        if content is None or len(content) == 0:
-            raise ValueError("提取内容为空，请检查文件情况")
-
-        return _clean_extracted_text(content)
+        if content is None:
+            return f"Error: Could not extract content from '{name}'"
+        if isinstance(content, str):
+            content = _clean_extracted_text(content)
+        return content if content else "File is empty"
     except ValueError as e:
-        print(f"路径错误：{str(e)}")
-        return None
+        return f"Security error: {e}"
     except Exception as e:
-        print(f"处理文件时出错：{str(e)}")
-        return None
+        return f"Error extracting text: {e}"

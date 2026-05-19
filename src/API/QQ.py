@@ -1,4 +1,3 @@
-import os
 import re
 import asyncio
 import inspect
@@ -10,11 +9,13 @@ from ncatbot.utils import config
 from pydantic_ai import BinaryContent
 
 import logger
+from app_config import get_env
 from base import BotBase
 from qq_media_helpers import extract_media
 from tools.ExtractFileContent import extract_text_from_pdf_bytes
 
-config.set_bot_uin(os.environ.get("QQBOT_ID", None))
+_u = get_env("QQBOT_ID", warn=False)
+config.set_bot_uin(_u if _u else None)
 
 _FILE_ALLOW_EXT = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm",
@@ -88,7 +89,7 @@ class QQBot(BotBase):
         return text, out
 
     async def _on_shutdown(self, _: MetaEvent) -> None:
-        self.release_all_resources()
+        await self.release_all_resources_async()
 
     async def _handle_message(self, event: BaseMessageEvent) -> None:
         raw_text = (event.raw_message or "").strip()

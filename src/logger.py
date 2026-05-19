@@ -3,75 +3,24 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
-import os
 import sys
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, List, Optional
-
-os.environ.setdefault("PYTHONUNBUFFERED", "1")
-
-class _ImmediateStreamHandler(logging.StreamHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        super().emit(record)
-        self.flush()
+from typing import Any, Callable
 
 
-class _ColorFormatter(logging.Formatter):
-    _COLORS = {
-        logging.DEBUG: "\033[36m",
-        logging.INFO: "\033[0m",
-        logging.WARNING: "\033[33m",
-        logging.ERROR: "\033[31m",
-        logging.CRITICAL: "\033[91m",
-    }
-    _RESET = "\033[0m"
+class LoggerManager:
+    """进程内单例：控制台 + 可选文件；业务侧用模块级 `logger.info` 等。"""
 
-    def __init__(self, fmt: str | None = None, datefmt: str | None = None) -> None:
-        super().__init__(fmt, datefmt)
-        if sys.platform == "win32":
-            try:
-                import ctypes
-
-                k = ctypes.windll.kernel32
-                k.SetConsoleMode(k.GetStdHandle(-11), 7)
-                k.SetConsoleMode(k.GetStdHandle(-12), 7)
-            except Exception:
-                pass
-
-    def format(self, record: logging.LogRecord) -> str:
-        color = self._COLORS.get(record.levelno, self._RESET)
-        return f"{color}{super().format(record)}{self._RESET}"
-
-
-class AppLogger:
-    _LOGGER_NAME = "NanoClaw"
-    _FMT_CONSOLE = "%(asctime)s | %(levelname)-8s | %(message)s"
-    _FMT_FILE = "%(asctime)s | %(levelname)-8s | %(message)s"
-    _MAX_NOTIFY_LEN = 400
-    _LARGE_KW_KEYS = frozenset(
-        {
-            "content",
-            "tasks_json",
-            "text",
-            "body",
-            "html",
-            "message",
-            "prompt",
-            "user_input",
-            "task_description",
-            "question",
-        }
-    )
-
-    def __init__(self, log_dir: Path | str | None = None) -> None:
-        self._log_dir = Path(log_dir) if log_dir else Path("./logs")
+    def __init__(self, log_dir: Path | str = "./logs", logger_name: str = "NanoClaw") -> None:
+        self._log_dir = Path(log_dir)
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._py_logger: logging.Logger | None = None
+        self._logger_name = logger_name
+        self._logger: logging.Logger | None = None
         self._current_log_file: Path | None = None
         self._session_files: dict[str, Path] = {}
-        self._notify_cv: ContextVar[Optional[Callable[[str], None]]] = ContextVar(
+        self._notify_callback: ContextVar[Callable[[str], None] | None] = ContextVar(
             "user_notify_callback", default=None
         )
 
@@ -79,226 +28,148 @@ class AppLogger:
     def log_dir(self) -> Path:
         return self._log_dir
 
-    def debug(self, msg: Any, *args: Any, **kwargs: Any) -> None:
-        self.get_logger().debug(msg, *args, **kwargs)
-
-    def info(self, msg: Any, *args: Any, **kwargs: Any) -> None:
-        self.get_logger().info(msg, *args, **kwargs)
-
-    def warning(self, msg: Any, *args: Any, **kwargs: Any) -> None:
-        self.get_logger().warning(msg, *args, **kwargs)
-
-    def error(self, msg: Any, *args: Any, **kwargs: Any) -> None:
-        self.get_logger().error(msg, *args, **kwargs)
+    @staticmethod
+    def _release_handlers(logger: logging.Logger) -> None:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            h.close()
 
     def get_logger(self) -> logging.Logger:
-        """返回已配置好的标准库 `Logger`（懒初始化，仅控制台）。"""
-        if self._py_logger is None:
-            lg = logging.getLogger(self._LOGGER_NAME)
-            lg.setLevel(logging.DEBUG)
-            lg.propagate = False
-            if not lg.handlers:
-                lg.addHandler(self._make_console_handler())
-            self._py_logger = lg
-        return self._py_logger
-
-    def set_user_notify_callback(self, fn: Optional[Callable[[str], None]]) -> None:
-        """注册或清除（``None``）进度回调；回调异常会被吞掉，不中断主流程。"""
-        self._notify_cv.set(fn)
+        if self._logger is None:
+            logger = logging.getLogger(self._logger_name)
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            self._release_handlers(logger)
+            logger.addHandler(self._build_console_handler())
+            self._logger = logger
+        return self._logger
 
     def setup_task_logger(self, task_name: str = "task") -> logging.Logger:
-        """按任务名创建带时间戳的日志文件，并重置为「控制台 + 该文件」。"""
-        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in task_name)[:50]
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = self._log_dir / f"{safe}_{ts}.log"
-        self._rebuild_handlers(path)
-        self.get_logger().info("日志文件已创建: %s", path)
-        return self.get_logger()
+        safe_name = self._sanitize_name(task_name)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = self._log_dir / f"{safe_name}_{timestamp}.log"
+        return self._switch_to_file(log_file, announce=True)
 
     def setup_session_logger(self, session_name: str) -> logging.Logger:
-        """同一会话名复用同一日志文件（不含时间戳）。"""
-        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in session_name)[:50]
-        if safe not in self._session_files:
-            self._session_files[safe] = self._log_dir / f"{safe}.log"
-        path = self._session_files[safe]
-        if self._current_log_file == path and self._py_logger is not None:
-            return self.get_logger()
-        self._rebuild_handlers(path)
-        return self.get_logger()
+        safe_name = self._sanitize_name(session_name)
+        log_file = self._session_files.setdefault(safe_name, self._log_dir / f"{safe_name}.log")
+        return self._switch_to_file(log_file, announce=False)
 
-    def wrap_tools_for_user_notify(self, tools: List[Any]) -> List[Any]:
-        """包装可调用工具：每次调用前记录「工具名 + 参数摘要」。"""
+    def set_user_notify_callback(self, fn: Callable[[str], None] | None) -> None:
+        self._notify_callback.set(fn)
+
+    def wrap_tools_for_user_notify(self, tools: list[Any]) -> list[Any]:
         if not tools:
             return tools
-        out: List[Any] = []
-        for t in tools:
-            if t is not None and callable(t) and not inspect.isclass(t):
-                out.append(self._wrap_tool(t))
+        wrapped: list[Any] = []
+        for tool in tools:
+            if tool is not None and callable(tool) and not inspect.isclass(tool):
+                wrapped.append(self._wrap_tool(tool))
             else:
-                out.append(t)
-        return out
+                wrapped.append(tool)
+        return wrapped
 
-    def _make_console_handler(self) -> logging.Handler:
-        h = _ImmediateStreamHandler(sys.stderr)
-        h.setLevel(logging.DEBUG)
-        h.setFormatter(_ColorFormatter(self._FMT_CONSOLE, datefmt="%H:%M:%S"))
-        return h
+    def _build_console_handler(self) -> logging.Handler:
+        handler = logging.StreamHandler(stream=sys.stdout)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S")
+        )
+        return handler
 
-    def _make_file_handler(self, log_filepath: Path) -> logging.Handler:
-        h = logging.FileHandler(log_filepath, encoding="utf-8")
-        h.setLevel(logging.DEBUG)
-        h.setFormatter(logging.Formatter(self._FMT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
-        return h
+    def _build_file_handler(self, log_file: Path) -> logging.Handler:
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
+        return handler
 
-    def _rebuild_handlers(self, log_filepath: Path) -> None:
-        lg = logging.getLogger(self._LOGGER_NAME)
-        lg.setLevel(logging.DEBUG)
-        lg.propagate = False
-        lg.handlers.clear()
-        lg.addHandler(self._make_console_handler())
-        lg.addHandler(self._make_file_handler(log_filepath))
-        self._py_logger = lg
-        self._current_log_file = log_filepath
+    def _sanitize_name(self, name: str) -> str:
+        cleaned = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name)
+        return cleaned[:50] or "task"
 
-    def _run_notify(self, fn: Optional[Callable[[str], None]], text: str) -> None:
-        if not fn:
-            return
-        try:
-            fn(text)
-        except Exception:
-            pass
-
-    def _truncate_repr(self, v: Any, max_len: int = 96) -> str:
-        s = repr(v)
-        if len(s) > max_len:
-            return s[: max_len - 1] + "…"
-        return s
-
-    def _format_kwargs_for_notify(self, kwargs: dict) -> str:
-        parts: list[str] = []
-        for k, v in list(kwargs.items())[:10]:
-            if k in self._LARGE_KW_KEYS and isinstance(v, str) and len(v) > 120:
-                sv = f"<{len(v)} chars>"
-            else:
-                sv = self._truncate_repr(v, 100)
-            parts.append(f"{k}={sv}")
-        return ", ".join(parts)
-
-    def _is_likely_bound_self(self, x: Any) -> bool:
-        n = getattr(x.__class__, "__name__", "")
-        return n in ("BasicToolkit", "TaskManager", "SkillsToolkit", "AgentSystem")
-
-    def _format_tool_args_for_notify(self, args: tuple, kwargs: dict) -> str:
-        if kwargs:
-            return self._format_kwargs_for_notify(kwargs)
-        if not args:
-            return ""
-        al = list(args)
-        if al and self._is_likely_bound_self(al[0]):
-            al = al[1:]
-        if not al:
-            return ""
-        if len(al) == 1:
-            return self._truncate_repr(al[0], 120)
-        return f"({len(al)} args) " + ", ".join(self._truncate_repr(a, 60) for a in al[:4])
-
-    def _emit_tool_line(self, tool_name: str, detail: str) -> None:
-        detail = (detail or "").strip()
-        line = f"\U0001f527 {tool_name}"
-        if detail:
-            if len(detail) > 280:
-                detail = detail[:277] + "…"
-            line += f" · {detail}"
-        if len(line) > self._MAX_NOTIFY_LEN:
-            line = line[: self._MAX_NOTIFY_LEN - 1] + "…"
-        cb = self._notify_cv.get()
+    def _switch_to_file(self, log_file: Path, announce: bool) -> logging.Logger:
         logger = self.get_logger()
-        if cb:
-            logger.info(line)
-            self._run_notify(cb, line)
-        else:
-            logger.debug(line)
+        if self._current_log_file == log_file:
+            return logger
+        self._release_handlers(logger)
+        logger.addHandler(self._build_console_handler())
+        logger.addHandler(self._build_file_handler(log_file))
+        self._current_log_file = log_file
+        if announce:
+            logger.info("日志文件已创建: %s", log_file)
+        return logger
 
-    def _wrap_tool(self, fn: Callable) -> Callable:
+    def _safe_repr(self, value: Any, max_len: int = 120) -> str:
+        text = repr(value)
+        return text if len(text) <= max_len else f"{text[: max_len - 1]}…"
+
+    def _emit_tool_notify(self, tool_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        pieces = [f"🔧 {tool_name}"]
+        if kwargs:
+            summary = ", ".join(f"{k}={self._safe_repr(v, 80)}" for k, v in list(kwargs.items())[:5])
+            pieces.append(summary)
+        elif args:
+            summary = ", ".join(self._safe_repr(v, 80) for v in list(args)[:3])
+            pieces.append(summary)
+        line = " · ".join(pieces)
+        callback = self._notify_callback.get()
+        log = self.get_logger()
+        if callback:
+            log.info(line)
+            try:
+                callback(line)
+            except Exception:
+                log.debug("user_notify_callback 执行失败", exc_info=True)
+        else:
+            log.debug(line)
+
+    def _wrap_tool(self, fn: Callable[..., Any]) -> Callable[..., Any]:
         if getattr(fn, "_notify_tool_wrapped", False):
             return fn
-        name = getattr(fn, "__name__", "tool")
-
-        def emit(args: tuple, kwargs: dict) -> None:
-            self._emit_tool_line(name, self._format_tool_args_for_notify(args, kwargs))
+        tool_name = getattr(fn, "__name__", "tool")
 
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
-            async def async_wrapper(*args: Any, **kwargs: Any):
-                emit(args, kwargs)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                self._emit_tool_notify(tool_name, args, kwargs)
                 return await fn(*args, **kwargs)
 
-            async_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
+            setattr(async_wrapper, "_notify_tool_wrapped", True)
             return async_wrapper
 
         @functools.wraps(fn)
-        def sync_wrapper(*args: Any, **kwargs: Any):
-            emit(args, kwargs)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            self._emit_tool_notify(tool_name, args, kwargs)
             return fn(*args, **kwargs)
 
-        sync_wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
+        setattr(sync_wrapper, "_notify_tool_wrapped", True)
         return sync_wrapper
 
 
-_default = AppLogger()
-LOG_DIR = _default.log_dir
+_MANAGER = LoggerManager()
+LOG_DIR = _MANAGER.log_dir
 
+_root_logger = _MANAGER.get_logger()
+debug = _root_logger.debug
+info = _root_logger.info
+warning = _root_logger.warning
+error = _root_logger.error
 
-def get_logger() -> logging.Logger:
-    return _default.get_logger()
+setup_task_logger = _MANAGER.setup_task_logger
+setup_session_logger = _MANAGER.setup_session_logger
+set_user_notify_callback = _MANAGER.set_user_notify_callback
+wrap_tools_for_user_notify = _MANAGER.wrap_tools_for_user_notify
 
-
-def set_user_notify_callback(fn: Optional[Callable[[str], None]]) -> None:
-    _default.set_user_notify_callback(fn)
-
-
-def setup_task_logger(task_name: str = "task") -> logging.Logger:
-    return _default.setup_task_logger(task_name)
-
-
-def setup_session_logger(session_name: str) -> logging.Logger:
-    return _default.setup_session_logger(session_name)
-
-
-def wrap_tools_for_user_notify(tools: List[Any]) -> List[Any]:
-    return _default.wrap_tools_for_user_notify(tools)
-
-
-def debug(msg: Any, *args: Any, **kwargs: Any) -> None:
-    _default.debug(msg, *args, **kwargs)
-
-
-def info(msg: Any, *args: Any, **kwargs: Any) -> None:
-    _default.info(msg, *args, **kwargs)
-
-
-def warning(msg: Any, *args: Any, **kwargs: Any) -> None:
-    _default.warning(msg, *args, **kwargs)
-
-
-def error(msg: Any, *args: Any, **kwargs: Any) -> None:
-    _default.error(msg, *args, **kwargs)
-
-
-def log_conversation_user(text: str) -> None:
-    """任务日志中显式标记用户输入（与模型输出区分）。"""
-    body = (text or "").strip() or "（空）"
-    _default.get_logger().info("[用户]\n%s", body)
-
-
-def log_conversation_model(text: str) -> None:
-    """任务日志中显式标记模型 / 助手回复。"""
-    body = (text or "").strip() or "（无输出）"
-    _default.get_logger().info("[模型]\n%s", body)
-
-
-def log_conversation_task_summary(text: str) -> None:
-    """多 Worker 编排阶段产生的汇总文本（非单轮 Coordinator 直连输出时可用）。"""
-    body = (text or "").strip() or "（无汇总）"
-    _default.get_logger().info("[任务汇总]\n%s", body)
+__all__ = [
+    "LOG_DIR",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "setup_task_logger",
+    "setup_session_logger",
+    "set_user_notify_callback",
+    "wrap_tools_for_user_notify",
+]
