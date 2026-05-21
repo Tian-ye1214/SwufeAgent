@@ -4,10 +4,13 @@ import functools
 import inspect
 import logging
 import sys
+import time
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+
+from runtime_state import AgentRunPolicy, TRACE_STORE, current_turn_id
 
 
 class LoggerManager:
@@ -58,13 +61,18 @@ class LoggerManager:
     def set_user_notify_callback(self, fn: Callable[[str], None] | None) -> None:
         self._notify_callback.set(fn)
 
-    def wrap_tools_for_user_notify(self, tools: list[Any]) -> list[Any]:
+    def wrap_tools_for_user_notify(
+        self,
+        tools: list[Any],
+        *,
+        policy: AgentRunPolicy | None = None,
+    ) -> list[Any]:
         if not tools:
             return tools
         wrapped: list[Any] = []
         for tool in tools:
             if tool is not None and callable(tool) and not inspect.isclass(tool):
-                wrapped.append(self._wrap_tool(tool))
+                wrapped.append(self._wrap_tool(tool, policy=policy))
             else:
                 wrapped.append(tool)
         return wrapped
@@ -124,7 +132,36 @@ class LoggerManager:
         else:
             log.debug(line)
 
-    def _wrap_tool(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+    def _normalize_tool_result(self, value: Any, policy: AgentRunPolicy | None) -> Any:
+        if isinstance(value, str) and policy is not None:
+            return policy.truncate_text(value)
+        return value
+
+    def _record_tool_event(
+        self,
+        tool_name: str,
+        started: float,
+        success: bool,
+        result: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        text = result if isinstance(result, str) else repr(result)
+        TRACE_STORE.record(
+            current_turn_id(),
+            "tool_call",
+            tool_name=tool_name,
+            success=success,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            output_chars=len(text or ""),
+            error=f"{type(error).__name__}: {error}" if error else "",
+        )
+
+    def _wrap_tool(
+        self,
+        fn: Callable[..., Any],
+        *,
+        policy: AgentRunPolicy | None = None,
+    ) -> Callable[..., Any]:
         if getattr(fn, "_notify_tool_wrapped", False):
             return fn
         tool_name = getattr(fn, "__name__", "tool")
@@ -133,16 +170,32 @@ class LoggerManager:
 
             @functools.wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                started = time.monotonic()
                 self._emit_tool_notify(tool_name, args, kwargs)
-                return await fn(*args, **kwargs)
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as e:
+                    self._record_tool_event(tool_name, started, False, error=e)
+                    raise
+                result = self._normalize_tool_result(result, policy)
+                self._record_tool_event(tool_name, started, True, result=result)
+                return result
 
             setattr(async_wrapper, "_notify_tool_wrapped", True)
             return async_wrapper
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
             self._emit_tool_notify(tool_name, args, kwargs)
-            return fn(*args, **kwargs)
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as e:
+                self._record_tool_event(tool_name, started, False, error=e)
+                raise
+            result = self._normalize_tool_result(result, policy)
+            self._record_tool_event(tool_name, started, True, result=result)
+            return result
 
         setattr(sync_wrapper, "_notify_tool_wrapped", True)
         return sync_wrapper

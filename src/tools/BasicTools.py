@@ -5,29 +5,23 @@ import os
 import re
 import subprocess
 import mimetypes
-import sys
 from ddgs import DDGS
 import logger
 import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
-from app_config import get_env
+from app_config import get_agent_run_policy, get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
-from path_sandbox import resolve_readable_path
+from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
 from tools.browser_session import PlaywrightBrowserSession
 
-def _get_runtime_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
-
-_REPO_ROOT = _get_runtime_root()
+_REPO_ROOT = runtime_repo_root()
 
 
 class BasicToolkit:
-    _WORK_DATABASE_ROOT = _REPO_ROOT / "WorkDatabase"
+    _WORK_DATABASE_ROOT = work_database_root()
 
     def __init__(
         self,
@@ -539,7 +533,11 @@ class BasicToolkit:
             return f"Security error: {reason}"
 
         try:
+            policy = get_agent_run_policy()
+            timeout = policy.clamp_command_timeout(timeout)
             use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
+            if use_shell and re.search(r"\b(start|nohup|setsid)\b|&\s*$", command, re.I):
+                return "Security error: background shell processes are not allowed"
             cwd = str(self._base_dir.resolve())
             sub_kw: dict = {}
             if re.search(r"\bclawhub\b", command, re.I):

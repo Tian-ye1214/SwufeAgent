@@ -9,11 +9,12 @@ import logger
 from prompt import get_worker_system_prompt, load_prompt
 from ModelGateway.BasicFunction import create_agent
 from ModelGateway.ModelChecker import maybe_auto_compress_async
-from app_config import get_agent_usage_limits, get_model_and_params
+from app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
 from lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
 from tools.ManagementTools import Task, TaskStatus, TaskManager
-from tools.Memory import ChatHistory
+from tools.memory import ChatHistory
 from tools.conversation_log import ConversationLog
+from worker_result import parse_worker_result
 
 if TYPE_CHECKING:
     from tools.BasicTools import BasicToolkit
@@ -234,19 +235,8 @@ class WorkerOrchestrator:
                 extra={"mode": "simple", "turn_id": turn_id},
             )
 
-            output = result.output
-            output_upper = output.upper().strip()
-            output_lines = output.strip().split('\n')
-            first_line = output_lines[0].upper() if output_lines else ""
-
-            if first_line.startswith("FAILED:") or first_line.startswith("FAILED："):
-                return False, output
-            elif first_line.startswith("SUCCESS:") or first_line.startswith("SUCCESS："):
-                return True, output
-            elif output_upper.startswith("ERROR:") or output_upper.startswith("错误:") or "执行异常" in output:
-                return False, output
-            else:
-                return True, output
+            parsed = parse_worker_result(result.output)
+            return parsed.success, result.output
 
         except asyncio.CancelledError:
             return False, "已取消（Agent 运行被中止）"
@@ -282,6 +272,7 @@ class WorkerOrchestrator:
             attachments: 可选的多模态附件列表
         """
         board = _SharedMessageBoard()
+        max_concurrent = min(max_concurrent, get_agent_run_policy().max_worker_concurrent)
         max_waves = 15
         tm = self._task_manager
 
@@ -445,19 +436,18 @@ class WorkerOrchestrator:
 
             output = result.output
 
-            output_lines = output.strip().split('\n')
-            first_line = output_lines[0].upper() if output_lines else ""
-            output_upper = output.upper().strip()
+            parsed = parse_worker_result(output)
+            task.artifacts.extend(parsed.artifacts)
+            if parsed.risks:
+                task.tool_summaries.append("risks: " + "; ".join(parsed.risks))
+            if parsed.needs_user_confirmation:
+                task.tool_summaries.append("needs user confirmation")
 
-            if first_line.startswith("FAILED:") or first_line.startswith("FAILED："):
+            if not parsed.success:
                 await board.post(worker_id, task.description, output, "failed")
                 return False, output
-            elif output_upper.startswith("ERROR:") or output_upper.startswith("错误:") or "执行异常" in output:
-                await board.post(worker_id, task.description, output, "failed")
-                return False, output
-            else:
-                await board.post(worker_id, task.description, output, "completed")
-                return True, output
+            await board.post(worker_id, task.description, output, "completed")
+            return True, output
 
         except asyncio.CancelledError:
             await board.post(worker_id, task.description, "已取消（Agent 运行被中止）", "failed")

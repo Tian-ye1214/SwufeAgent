@@ -22,7 +22,7 @@ from app_config import (
     settings,
 )
 from prompt import format_prompt_current_time, load_prompt
-from tools.Memory import ChatHistory, _pydantic_messages_to_text
+from tools.memory import ChatHistory, pydantic_messages_to_text
 
 import tiktoken
 
@@ -486,13 +486,13 @@ def _save_compress_debug_artifacts(
     run_dir = root / f"{int(time.time() * 1000)}_{role}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "before_messages.md").write_text(
-        _pydantic_messages_to_text(messages_before), encoding="utf-8"
+        pydantic_messages_to_text(messages_before), encoding="utf-8"
     )
     before_llm = f"## compressor system\n\n{system_prompt}\n\n## compressor user\n\n{user_content}\n"
     (run_dir / "before_compress.md").write_text(before_llm, encoding="utf-8")
     (run_dir / "compressor_output.md").write_text(summary_md, encoding="utf-8")
     (run_dir / "after_context.md").write_text(
-        _pydantic_messages_to_text(new_messages), encoding="utf-8"
+        pydantic_messages_to_text(new_messages), encoding="utf-8"
     )
     (run_dir / "slice_bounds.txt").write_text(
         f"role={role}\nhead_end={head_end}\ntail_start={tail_start}\n",

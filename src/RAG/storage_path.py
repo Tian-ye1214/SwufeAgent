@@ -6,6 +6,7 @@ from pathlib import Path
 
 import logger
 from app_config import get_env
+from path_sandbox import runtime_repo_root
 
 _UNSUPPORTED_FS = frozenset({"EXFAT", "FAT32", "FAT"})
 
@@ -39,17 +40,11 @@ def _is_unsupported_fs(path: Path) -> bool:
     return bool(fs and fs.upper() in _UNSUPPORTED_FS)
 
 
-def _project_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
-
-
 def resolve_lancedb_dir(configured_path: str) -> str:
     """将配置的 LanceDB 目录解析为绝对路径；exFAT/FAT 上自动改到 NTFS（RAG_DB_PATH 或 LOCALAPPDATA）。"""
     p = Path(configured_path)
     if not p.is_absolute():
-        p = (_project_root() / p).resolve()
+        p = (runtime_repo_root() / p).resolve()
     else:
         p = p.resolve()
 
@@ -60,7 +55,7 @@ def resolve_lancedb_dir(configured_path: str) -> str:
     if override:
         op = Path(override)
         if not op.is_absolute():
-            op = (_project_root() / op).resolve()
+            op = (runtime_repo_root() / op).resolve()
         else:
             op = op.resolve()
         if not _is_unsupported_fs(op):

@@ -6,7 +6,7 @@ from enum import Enum
 import json_repair as json
 import logger
 
-from tools.Memory import ChatHistory
+from tools.memory import ChatHistory
 
 
 class TaskStatus(Enum):
@@ -28,6 +28,9 @@ class Task:
     dependencies: List[str] = field(default_factory=list)
     failure_history: List[str] = field(default_factory=list)
     worker_chat_history: ChatHistory = field(default_factory=ChatHistory)
+    blocked_reason: str = ""
+    artifacts: List[str] = field(default_factory=list)
+    tool_summaries: List[str] = field(default_factory=list)
 
 
 class TaskManager:
@@ -55,6 +58,9 @@ class TaskManager:
             tasks_data = json.loads(tasks_json)
             if not isinstance(tasks_data, list):
                 return f"Error: Expected a JSON array, got {type(tasks_data).__name__}"
+            validation_error = self._validate_tasks_data(tasks_data)
+            if validation_error:
+                return f"Error: {validation_error}"
             self.tasks.clear()
             self.task_order.clear()
             
@@ -71,6 +77,60 @@ class TaskManager:
             return self._format_todo_list()
         except Exception as e:
             return f"Error: Failed to create task list - {e}"
+
+    def _validate_tasks_data(self, tasks_data: list) -> str:
+        seen: set[str] = set()
+        deps_by_id: dict[str, list[str]] = {}
+        for i, task_data in enumerate(tasks_data):
+            if not isinstance(task_data, dict):
+                return f"task #{i + 1} must be an object"
+            task_id = str(task_data.get("id", i + 1)).strip()
+            if not task_id:
+                return f"task #{i + 1} id must not be empty"
+            if task_id in seen:
+                return f"duplicate task id: {task_id}"
+            seen.add(task_id)
+            desc = str(task_data.get("description", "")).strip()
+            if not desc:
+                return f"task {task_id} description must not be empty"
+            raw_deps = task_data.get("dependencies", [])
+            if raw_deps is None:
+                raw_deps = []
+            if not isinstance(raw_deps, list):
+                return f"task {task_id} dependencies must be an array"
+            deps = [str(d).strip() for d in raw_deps]
+            if any(not d for d in deps):
+                return f"task {task_id} dependencies must not contain empty ids"
+            deps_by_id[task_id] = deps
+
+        for task_id, deps in deps_by_id.items():
+            for dep_id in deps:
+                if dep_id not in seen:
+                    return f"task {task_id} has unknown dependency: {dep_id}"
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(task_id: str, path: list[str]) -> str | None:
+            if task_id in visited:
+                return None
+            if task_id in visiting:
+                cycle = " -> ".join(path + [task_id])
+                return f"dependency cycle detected: {cycle}"
+            visiting.add(task_id)
+            for dep_id in deps_by_id.get(task_id, []):
+                err = visit(dep_id, path + [task_id])
+                if err:
+                    return err
+            visiting.remove(task_id)
+            visited.add(task_id)
+            return None
+
+        for task_id in deps_by_id:
+            err = visit(task_id, [])
+            if err:
+                return err
+        return ""
     
     def _format_todo_list(self) -> str:
         """Format and output the Todo List"""
@@ -173,6 +233,43 @@ class TaskManager:
         """Get current Todo List status. """
         logger.debug("(get_todo_list)")
         return self._format_todo_list()
+
+    def structured_status(self) -> str:
+        if not self.tasks:
+            return "Task Status\n(no tasks)"
+        lines = ["Task Status"]
+        for task_id in self.task_order:
+            task = self.tasks[task_id]
+            blocked = self._blocked_reason(task)
+            task.blocked_reason = blocked
+            lines.append(
+                f"[{task.status.value}] {task.id}: {task.description}"
+                f" deps={task.dependencies or []} retries={task.retry_count}/{task.max_retries}"
+            )
+            if blocked:
+                lines.append(f"  blocked_reason: {blocked}")
+            if task.failure_history:
+                lines.append(f"  last_failure: {task.failure_history[-1]}")
+            if task.artifacts:
+                lines.append(f"  artifacts: {', '.join(task.artifacts)}")
+            if task.tool_summaries:
+                lines.append(f"  tools: {'; '.join(task.tool_summaries[-3:])}")
+        return "\n".join(lines)
+
+    def _blocked_reason(self, task: Task) -> str:
+        if task.status != TaskStatus.PENDING:
+            return ""
+        missing = [d for d in task.dependencies if d not in self.tasks]
+        if missing:
+            return f"unknown dependencies: {', '.join(missing)}"
+        incomplete = [
+            d
+            for d in task.dependencies
+            if self.tasks[d].status != TaskStatus.COMPLETED
+        ]
+        if incomplete:
+            return f"waiting for dependencies: {', '.join(incomplete)}"
+        return ""
     
     def is_all_completed(self) -> bool:
         """Check if all tasks are completed"""

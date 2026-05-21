@@ -2,7 +2,7 @@
 from tools.BasicTools import BasicToolkit
 from tools.ExtractFileContent import extract_text
 from tools.ManagementTools import Task, TaskManager, TaskStatus
-from tools.Memory import ChatHistory, UserMessage
+from tools.memory import ChatHistory, UserMessage
 from tools.WorkerOrchestrator import WorkerOrchestrator
 
 __all__ = [

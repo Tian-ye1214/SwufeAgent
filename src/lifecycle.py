@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 import logger
 from app_config import settings
+from runtime_state import TRACE_STORE, turn_context
 
 T = TypeVar("T")
 
@@ -416,7 +417,19 @@ async def run_coroutine_with_lifecycle(
     try:
         await hooks.dispatch_start(inv)
         inv.state = AgentInvocationState.RUNNING
-        inner = asyncio.create_task(factory())
+        TRACE_STORE.record(
+            turn_id,
+            "invocation_start",
+            invocation_id=invocation_id,
+            agent_id=agent_id,
+            role=role,
+            parent=parent or "",
+        )
+        async def _run_in_turn_context() -> T:
+            with turn_context(turn_id):
+                return await factory()
+
+        inner = asyncio.create_task(_run_in_turn_context())
         inv.task_ref = inner
         wait_cancel = asyncio.create_task(inv.cancel_requested.wait())
         done, _pending = await asyncio.wait(
@@ -431,6 +444,13 @@ async def run_coroutine_with_lifecycle(
                 pass
             inv.state = AgentInvocationState.CANCELLED
             inv.finished_at = time.monotonic()
+            TRACE_STORE.record(
+                turn_id,
+                "invocation_cancelled",
+                invocation_id=invocation_id,
+                agent_id=agent_id,
+                role=role,
+            )
             await hooks.dispatch_cancel(inv)
             raise asyncio.CancelledError()
         wait_cancel.cancel()
@@ -444,16 +464,38 @@ async def run_coroutine_with_lifecycle(
             inv.finished_at = time.monotonic()
             inv.error = str(e)
             inv.state = AgentInvocationState.FAILED
+            TRACE_STORE.record(
+                turn_id,
+                "invocation_failed",
+                invocation_id=invocation_id,
+                agent_id=agent_id,
+                role=role,
+                error=str(e),
+            )
             await hooks.dispatch_error(inv, e)
             raise
         inv.finished_at = time.monotonic()
         inv.state = AgentInvocationState.COMPLETED
+        TRACE_STORE.record(
+            turn_id,
+            "invocation_completed",
+            invocation_id=invocation_id,
+            agent_id=agent_id,
+            role=role,
+        )
         await hooks.dispatch_finish(inv)
         return out
     except asyncio.CancelledError:
         if inv.state in (AgentInvocationState.RUNNING, AgentInvocationState.PENDING):
             inv.state = AgentInvocationState.CANCELLED
             inv.finished_at = time.monotonic()
+            TRACE_STORE.record(
+                turn_id,
+                "invocation_cancelled",
+                invocation_id=invocation_id,
+                agent_id=agent_id,
+                role=role,
+            )
             await hooks.dispatch_cancel(inv)
         raise
     finally:

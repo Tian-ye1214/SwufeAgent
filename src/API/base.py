@@ -18,7 +18,7 @@ os.chdir(_REPO_ROOT)
 
 from app_config import get_env, settings
 from agent_app import AgentSystem
-from tools.Memory import ChatHistory, UserMessage
+from tools.memory import ChatHistory, UserMessage
 import logger
 
 

@@ -8,8 +8,8 @@ from wechatbot import WeChatBot
 
 import logger
 from base import BotBase
-from tools.ExtractFileContent import extract_text_from_pdf_bytes
-from tools.Memory import UserMessage
+from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
+from tools.memory import UserMessage
 
 _MIME_MAP = {
     "image": "image/jpeg",
@@ -38,14 +38,8 @@ class WeChatAgentBot(BotBase):
                 return mime
         return _MIME_MAP.get((media.type or "").lower(), "application/octet-stream")
 
-    def _is_pdf_media(self, media, mime: str) -> bool:
-        if mime in ("application/pdf", "application/x-pdf"):
-            return True
-        fn = (getattr(media, "file_name", None) or "").lower()
-        return fn.endswith(".pdf")
-
     async def _build_user_message(self, bot: WeChatBot, msg) -> UserMessage:
-        """文本 + 下载得到的媒体字节 → UserMessage（后续 to_prompt 即模型输入）。"""
+        """Build a UserMessage from text plus downloaded media bytes."""
         text = (msg.text or "").strip()
         attachments: list = []
         try:
@@ -55,24 +49,20 @@ class WeChatAgentBot(BotBase):
             media = None
         if media is not None and getattr(media, "data", None):
             mime = self._mime_for_downloaded(media)
+            filename = getattr(media, "file_name", None) or ""
             mtype = (getattr(media, "type", None) or "").lower()
             if mtype == "image":
                 b64 = base64.standard_b64encode(media.data).decode("ascii")
                 attachments.append(ImageUrl(url=f"data:{mime};base64,{b64}"))
-            elif self._is_pdf_media(media, mime):
-                extracted = await asyncio.to_thread(extract_text_from_pdf_bytes, media.data)
-                label = (
-                    f"【PDF 附件：{media.file_name}】\n\n"
-                    if getattr(media, "file_name", None)
-                    else "【PDF 附件】\n\n"
+            elif is_pdf_content(media.data, media_type=mime, filename=filename):
+                body = await asyncio.to_thread(
+                    pdf_attachment_text_block,
+                    media.data,
+                    filename=filename or None,
                 )
-                if extracted:
-                    body = f"{label}{extracted}"
-                    text = f"{text}\n\n{body}".strip() if text else body
-                else:
+                if body.startswith("（"):
                     logger.warning("[WeChat] PDF 解析失败，未注入文本")
-                    hint = "（PDF 附件无法解析为文本，请尝试发送截图或纯文本。）"
-                    text = f"{text}\n\n{hint}".strip() if text else hint
+                text = f"{text}\n\n{body}".strip() if text else body
             else:
                 attachments.append(BinaryContent(data=media.data, media_type=mime))
         return UserMessage(text=text, attachments=attachments)
@@ -94,7 +84,7 @@ class WeChatAgentBot(BotBase):
         self._released = False
         kwargs: dict = {
             "on_qr_url": lambda url: logger.info(f"[WeChat] 请扫码登录: {url}"),
-            "on_scanned": lambda: logger.info("[WeChat] 已扫码，确认登录中…"),
+            "on_scanned": lambda: logger.info("[WeChat] 已扫码，确认登录中..."),
             "on_expired": lambda: logger.warning("[WeChat] 登录二维码已过期"),
             "on_error": lambda err: logger.error(f"[WeChat] SDK 错误: {err}"),
         }

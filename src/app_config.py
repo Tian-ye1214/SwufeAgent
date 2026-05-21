@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 import logger
 from dotenv import dotenv_values
 from pydantic_ai.usage import UsageLimits
+from runtime_state import AgentRunPolicy
 
 _d = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG_FILE = _d / "config.json"
@@ -67,6 +68,10 @@ def get_agent_usage_limits() -> "_UsageLimits":
     if raw is None or raw.strip().lower() in ("none", "unlimited", "null"):
         return UsageLimits(request_limit=None)
     return UsageLimits(request_limit=int(raw))
+
+
+def get_agent_run_policy() -> AgentRunPolicy:
+    return AgentRunPolicy.from_config(settings())
 
 
 def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:

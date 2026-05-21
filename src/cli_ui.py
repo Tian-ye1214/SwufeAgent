@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from tools.Memory import ChatHistory, UserMessage
+from tools.memory import ChatHistory, UserMessage
 
 
 def print_startup_logo() -> None:

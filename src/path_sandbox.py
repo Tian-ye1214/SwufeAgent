@@ -10,6 +10,10 @@ def runtime_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def work_database_root() -> Path:
+    return runtime_repo_root() / "WorkDatabase"
+
+
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:
     repo = runtime_repo_root()
     return (

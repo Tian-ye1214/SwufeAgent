@@ -6,7 +6,7 @@ from prompt import get_manager_system_prompt, get_coordinator_system_prompt, loa
 from tools.BasicTools import BasicToolkit
 from tools.ManagementTools import TaskManager
 from tools.WorkerOrchestrator import WorkerOrchestrator
-from tools.Memory import (
+from tools.memory import (
     ChatHistory,
     LongTermMemory,
     ShortTermMemory,
@@ -52,7 +52,6 @@ from lifecycle import (
 
 class AgentSystem:
     """Agent 任务协调系统，管理 Manager/Coordinator 的对话历史与执行流程。"""
-
     def __init__(self):
         self._registry = AgentRegistry()
         self._hooks = LifecycleHooks()
@@ -95,14 +94,6 @@ class AgentSystem:
         self._current_turn: dict[str, Any] | None = None
         self._cli_turn_id: str | None = None
         self._session_key: str | None = None
-
-    @property
-    def registry(self) -> AgentRegistry:
-        return self._registry
-
-    @property
-    def session_key(self) -> str | None:
-        return self._session_key
 
     async def bind_session(self, session_key: str) -> None:
         self._session_key = session_key
@@ -196,10 +187,7 @@ class AgentSystem:
             body = e.body or {}
             code = body.get("code", "") if isinstance(body, dict) else ""
             if code == "data_inspection_failed":
-                logger.warning(
-                    "\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n"
-                    '   请尝试换一种表达方式重新输入，或输入"新任务"清空上下文后重试。'
-                )
+                logger.warning("\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n请尝试换一种表达方式重新输入，或输入\"新任务\"清空上下文后重试。")
             else:
                 logger.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
                 logger.error(f"详细信息:\n{traceback.format_exc()}")
@@ -226,6 +214,9 @@ class AgentSystem:
 
     def reset_manager_history(self):
         self._manager_history.reset()
+
+    def structured_task_status(self) -> str:
+        return self._task_manager.structured_status()
 
     async def reset_cli_interactive_session(self, history: ChatHistory) -> None:
         """与输入「新任务」相同：清空任务、工作目录绑定、双方历史与会话落盘状态。"""

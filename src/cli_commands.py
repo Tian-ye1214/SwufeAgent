@@ -7,15 +7,16 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from app_config import get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
+from app_config import get_agent_roles, get_env, get_model_and_params, set_api, set_model_name, settings
 from lifecycle import AgentInvocationState
+from runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
     compress_history_async,
     prewarm_effective_max_contexts_by_role_async,
 )
 from prompt import get_skills_as_in_system_prompt
 from skills.SkillsManager import SkillsManager
-from tools.Memory import ChatHistory
+from tools.memory import ChatHistory
 from tools.conversation_log import read_saved_model_messages_file
 
 
@@ -169,22 +170,22 @@ async def handle_slash_command(
         print_cli_help()
         return True, None
     if cmd == "/status":
-        if system is None:
-            print("当前环境未绑定 AgentSystem，无法查询。\n")
-            return True, None
         await _print_lifecycle_status(system)
         return True, None
-    if cmd == "/stop":
-        if system is None:
-            print("当前环境未绑定 AgentSystem。\n")
+    if cmd == "/trace":
+        if len(parts) < 2:
+            print("Usage: /trace <turn_id>\n")
             return True, None
+        print(TRACE_STORE.format_turn(parts[1].strip()) + "\n")
+        return True, None
+    if cmd == "/tasks":
+        print(system.structured_task_status() + "\n")
+        return True, None
+    if cmd == "/stop":
         msg = await system.cancel_current_turn()
         print(f"{msg}\n")
         return True, None
     if cmd == "/cancel":
-        if system is None:
-            print("当前环境未绑定 AgentSystem，无法取消。\n")
-            return True, None
         if len(parts) < 2:
             print("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>\n")
             return True, None

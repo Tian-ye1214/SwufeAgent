@@ -15,7 +15,7 @@ from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 import logger
-from app_config import get_env, http_chat_completions_thinking_extras
+from app_config import get_agent_run_policy, get_env, http_chat_completions_thinking_extras
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
@@ -205,7 +205,11 @@ def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: s
         }
 
     model = create_model(model_name, parameter)
-    wrapped_tools = logger.wrap_tools_for_user_notify(list(tools)) if tools else tools
+    wrapped_tools = (
+        logger.wrap_tools_for_user_notify(list(tools), policy=get_agent_run_policy())
+        if tools
+        else tools
+    )
     agent = Agent(
         model,
         tools=wrapped_tools,
