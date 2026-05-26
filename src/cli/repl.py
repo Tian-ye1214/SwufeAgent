@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 
@@ -17,6 +18,7 @@ from cli.render import print_success, print_warning
 
 # 连续两次 Ctrl+C（空输入）间隔内退出
 _INTERRUPT_EXIT_WINDOW_SEC = 1.5
+_INPUT_LABEL = "📝 请输入您的任务:"
 
 
 def _history_path() -> Path:
@@ -25,17 +27,15 @@ def _history_path() -> Path:
     return base / "history"
 
 
-def create_prompt_session() -> PromptSession:
+def _create_prompt_session() -> PromptSession:
     kb = KeyBindings()
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
         buffer = event.app.current_buffer
         if buffer.text:
-            # 有内容：仅清空当前行，不退出
             buffer.reset()
             return
-        # 空行：交给外层 KeyboardInterrupt 处理（支持连按两次退出）
         event.app.exit(exception=KeyboardInterrupt())
 
     return PromptSession(
@@ -43,13 +43,14 @@ def create_prompt_session() -> PromptSession:
         completer=AgentCompleter(),
         complete_while_typing=False,
         key_bindings=kb,
+        bottom_toolbar=HTML(f" <b>{_INPUT_LABEL}</b> "),
     )
 
 
 class InteractiveRepl:
     """TTY 交互循环；非 TTY 回退到标准 input。"""
 
-    def __init__(self, *, prompt: str = "\n📝 请输入您的任务: ") -> None:
+    def __init__(self, *, prompt: str = "> ") -> None:
         self.prompt = prompt
         self._session: PromptSession | None = None
         self._interrupt_hits = 0
@@ -57,7 +58,7 @@ class InteractiveRepl:
 
     def _get_session(self) -> PromptSession:
         if self._session is None:
-            self._session = create_prompt_session()
+            self._session = _create_prompt_session()
         return self._session
 
     def _on_keyboard_interrupt(self) -> bool:

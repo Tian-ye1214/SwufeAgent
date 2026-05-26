@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 import logger
-from rich.console import Console, Group
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -75,41 +75,6 @@ def print_repl_welcome() -> None:
     )
 
 
-def print_startup_banner() -> None:
-    """Rich 版启动 Logo。"""
-    logo_lines = [
-        "██████╗ ███████╗██████╗ ██╗      ██████╗ ████████╗██╗   ██╗███████╗",
-        "██╔══██╗██╔════╝██╔══██╗██║     ██╔═══██╗╚══██╔══╝██║   ██║██╔════╝",
-        "██████╔╝█████╗  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║███████╗",
-        "██╔══██╗██╔══╝  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║╚════██║",
-        "██║  ██║███████╗██████╔╝███████╗╚██████╔╝   ██║   ╚██████╔╝███████║",
-        "╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝ ╚═════╝    ╚═╝    ╚═════╝ ╚══════╝",
-    ]
-    max_width = max(len(line) for line in logo_lines)
-    start = (255, 80, 60)
-    end = (140, 50, 130)
-
-    lines: list[Text] = []
-    for row in logo_lines:
-        t = Text()
-        for col, ch in enumerate(row):
-            if ch == " ":
-                t.append(" ")
-                continue
-            ratio = col / (max_width - 1) if max_width > 1 else 0
-            r = int(start[0] + (end[0] - start[0]) * ratio)
-            g = int(start[1] + (end[1] - start[1]) * ratio)
-            b = int(start[2] + (end[2] - start[2]) * ratio)
-            t.append(ch, style=f"rgb({r},{g},{b})")
-        lines.append(t)
-
-    tagline = Text("❦ ────  红莲极意  ·  RedLotus Agent  ──── ❦", style="rgb(255,165,90)")
-    console.print()
-    console.print(Group(*lines))
-    console.print(tagline, justify="center")
-    console.print()
-
-
 async def consume_stream_markdown(
     stream: Any,
     history: Any,
@@ -130,6 +95,3 @@ async def consume_stream_markdown(
         show_model_output(final_text, title=title)
     history.update(stream)
     return final_text
-
-
-consume_stream_text = consume_stream_markdown

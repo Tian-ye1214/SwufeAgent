@@ -1,15 +1,83 @@
-"""CLI 展示层兼容入口（Rich + 历史落盘格式）。"""
+"""CLI 启动 Logo 与日志文本格式化。"""
 
 from __future__ import annotations
 
-from typing import Any
+import sys
 
-from cli.render import consume_stream_markdown, print_startup_banner
 from tools.memory import UserMessage
 
-# 向后兼容：agent_app 仍从此处导入
-print_startup_logo = print_startup_banner
-consume_stream_text_to_stdout = consume_stream_markdown
+
+def print_startup_logo() -> None:
+    stdout_encoding = (sys.stdout.encoding or "").lower()
+    unicode_safe = "utf" in stdout_encoding
+
+    def color_text(r: int, g: int, b: int, text: str) -> str:
+        return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+
+    logo_lines = [
+        "██████╗ ███████╗██████╗ ██╗      ██████╗ ████████╗██╗   ██╗███████╗",
+        "██╔══██╗██╔════╝██╔══██╗██║     ██╔═══██╗╚══██╔══╝██║   ██║██╔════╝",
+        "██████╔╝█████╗  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║███████╗",
+        "██╔══██╗██╔══╝  ██║  ██║██║     ██║   ██║   ██║   ██║   ██║╚════██║",
+        "██║  ██║███████╗██████╔╝███████╗╚██████╔╝   ██║   ╚██████╔╝███████║",
+        "╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝ ╚═════╝    ╚═╝    ╚═════╝ ╚══════╝",
+    ]
+    shadow_char = "░" if unicode_safe else "."
+    shadow_offset_row = 1
+    shadow_offset_col = 2
+    shadow_color = (70, 40, 60)
+    start_color = (255, 80, 60)
+    end_color = (140, 50, 130)
+
+    max_width = max(len(line) for line in logo_lines)
+    total_rows = len(logo_lines)
+    canvas_rows = total_rows + shadow_offset_row
+    canvas_cols = max_width + shadow_offset_col
+    canvas = [[(" ", None) for _ in range(canvas_cols)] for _ in range(canvas_rows)]
+
+    for row_idx, line in enumerate(logo_lines):
+        for col_idx, ch in enumerate(line):
+            if ch == " ":
+                continue
+            ratio = col_idx / (max_width - 1) if max_width > 1 else 0
+            r = int(start_color[0] + (end_color[0] - start_color[0]) * ratio)
+            g = int(start_color[1] + (end_color[1] - start_color[1]) * ratio)
+            b = int(start_color[2] + (end_color[2] - start_color[2]) * ratio)
+            canvas[row_idx][col_idx] = (ch, (r, g, b))
+
+    for row_idx in range(total_rows):
+        for col_idx in range(max_width):
+            original_char = (
+                logo_lines[row_idx][col_idx] if col_idx < len(logo_lines[row_idx]) else " "
+            )
+            if original_char == " ":
+                continue
+            shadow_row = row_idx + shadow_offset_row
+            shadow_col = col_idx + shadow_offset_col
+            if (
+                0 <= shadow_row < canvas_rows
+                and 0 <= shadow_col < canvas_cols
+                and canvas[shadow_row][shadow_col][0] == " "
+            ):
+                canvas[shadow_row][shadow_col] = (shadow_char, shadow_color)
+
+    print()
+    for row in canvas:
+        line_text = ""
+        for ch, color in row:
+            if color is None:
+                line_text += ch
+            else:
+                line_text += color_text(color[0], color[1], color[2], ch)
+        print(line_text)
+
+    if unicode_safe:
+        tagline = "❦ ────  红莲极意  ·  RedLotus Agent  ──── ❦"
+    else:
+        tagline = "<>----  RedLotus Agent  ----<>"
+    pad = max(0, (max_width + shadow_offset_col - len(tagline)) // 2)
+    print(" " * pad + color_text(255, 165, 90, tagline))
+    print()
 
 
 def format_user_log_text(message: UserMessage) -> str:

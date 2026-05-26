@@ -11,13 +11,12 @@ from cli.render import (
     show_model_output,
     consume_stream_markdown,
 )
-from cli.repl import InteractiveRepl, create_prompt_session
+from cli.repl import InteractiveRepl
 
 __all__ = [
     "InteractiveRepl",
     "console",
     "consume_stream_markdown",
-    "create_prompt_session",
     "print_error",
     "print_markdown",
     "print_markdown_panel",
