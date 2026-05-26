@@ -23,6 +23,21 @@ class _StmIngestConsoleQuietFilter(logging.Filter):
         return record.levelno >= logging.WARNING
 
 
+class _PromptAwareStreamHandler(logging.StreamHandler):
+    """Write log lines above an active prompt_toolkit input area."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        def _emit() -> None:
+            super(_PromptAwareStreamHandler, self).emit(record)
+
+        try:
+            from cli.terminal import run_above_prompt
+
+            run_above_prompt(_emit)
+        except Exception:
+            super().emit(record)
+
+
 class LoggerManager:
     """进程内单例：控制台 + 可选文件；业务侧用模块级 `logger.info` 等。"""
 
@@ -88,7 +103,7 @@ class LoggerManager:
         return wrapped
 
     def _build_console_handler(self) -> logging.Handler:
-        handler = logging.StreamHandler(stream=sys.stdout)
+        handler = _PromptAwareStreamHandler(stream=sys.stdout)
         handler.setLevel(logging.DEBUG)
         handler.addFilter(_StmIngestConsoleQuietFilter())
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S")

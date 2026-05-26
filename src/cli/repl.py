@@ -14,6 +14,7 @@ from prompt_toolkit.key_binding import KeyBindings
 
 from cli.completer import AgentCompleter
 from cli.render import print_success, print_warning
+from cli.terminal import register_prompt_app
 
 def _history_path() -> Path:
     base = Path.home() / ".redlotus"
@@ -73,7 +74,9 @@ class InteractiveRepl:
     async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
         if sys.stdin.isatty() and sys.stdout.isatty():
             session = self._get_session()
+            loop = asyncio.get_running_loop()
             try:
+                register_prompt_app(session.app, loop)
                 read_coro = session.prompt_async(self.prompt)
                 if stop_event is None:
                     return (await read_coro).strip()
@@ -96,6 +99,8 @@ class InteractiveRepl:
                 return None
             except asyncio.CancelledError:
                 return None
+            finally:
+                register_prompt_app(None, None)
         try:
             return (await asyncio.to_thread(input, self.prompt)).strip()
         except EOFError:

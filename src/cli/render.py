@@ -11,6 +11,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from cli.terminal import is_prompt_active, run_above_prompt
+
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
     for _s in (sys.stdout, sys.stderr):
@@ -20,7 +22,17 @@ if _IS_WINDOWS:
             except Exception:
                 pass
 
-console = Console(highlight=False, legacy_windows=_IS_WINDOWS)
+class PromptAwareConsole(Console):
+    """Rich console that prints above an active prompt_toolkit input area."""
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        run_above_prompt(lambda: super(PromptAwareConsole, self).print(*args, **kwargs))
+
+    def rule(self, *args: Any, **kwargs: Any) -> None:
+        run_above_prompt(lambda: super(PromptAwareConsole, self).rule(*args, **kwargs))
+
+
+console = PromptAwareConsole(highlight=False, legacy_windows=_IS_WINDOWS)
 
 
 def print_error(message: str) -> None:
@@ -86,10 +98,16 @@ async def consume_stream_markdown(
     不使用 Live（避免 Windows 下光标控制序列乱码）。
     """
     chunks: list[str] = []
-    with console.status("[dim]模型回复生成中…[/dim]", spinner="dots"):
+    if is_prompt_active():
+        console.print("[dim]模型回复生成中...[/dim]")
         async for chunk in stream.stream_text(delta=True):
             if chunk:
                 chunks.append(chunk)
+    else:
+        with console.status("[dim]模型回复生成中…[/dim]", spinner="dots"):
+            async for chunk in stream.stream_text(delta=True):
+                if chunk:
+                    chunks.append(chunk)
     final_text = "".join(chunks)
     if final_text.strip():
         show_model_output(final_text, title=title)
