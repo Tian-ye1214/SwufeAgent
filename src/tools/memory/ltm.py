@@ -27,7 +27,7 @@ class LongTermMemory:
 
     - MEMORY_GUIDANCE.md：给模型的长期记忆**使用**说明（随 load 注入 get_injection，不是抽取提示词）
     - soul_user_consolidation.md：从对话或日志增量中**合并**出 SOUL/USER 整篇正文的**唯一**提示词
-    - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；旧版无标题的纯文本会在加载时整篇当正文；\\n---\\n 分隔的段落会合并
+    - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；无标题时整篇当正文；`\\n---\\n` 分隔的段落会合并
     - log_sources_state.json：各 .log 已读字节偏移，避免重复喂给模型；**不存在时首次加载会自动创建**（version + 空 sources）
     """
     _CHAR_LIMIT = 8000
@@ -176,7 +176,7 @@ class LongTermMemory:
         return path.read_text(encoding="utf-8")
 
     def _parse_consolidation_response(self, raw: str) -> dict[str, str | None]:
-        """输出整篇正文的 JSON：soul / user 为字符串或 null。兼容旧版数组，将合并为一段。"""
+        """输出整篇正文的 JSON：soul / user 为字符串或 null。"""
         text = (raw or "").strip()
         if "```" in text:
             fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
@@ -196,9 +196,6 @@ class LongTermMemory:
             elif isinstance(val, str):
                 s = val.strip()
                 out[key] = s if s else None
-            elif isinstance(val, list):
-                parts = [p.strip() for p in val if isinstance(p, str) and p.strip()]
-                out[key] = "\n\n".join(parts) if parts else None
             else:
                 out[key] = None
         return out

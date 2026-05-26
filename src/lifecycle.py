@@ -209,10 +209,6 @@ class AgentRegistry:
             return invs
         return [i for i in invs if i.session_key == session_key]
 
-    async def list_runs(self) -> list[AgentInvocation]:
-        """向后兼容：返回活跃 invocation。"""
-        return await self.list_active_invocations()
-
     async def list_recent_invocations(
         self, session_key: str
     ) -> list[AgentInvocation]:

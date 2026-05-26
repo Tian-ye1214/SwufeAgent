@@ -13,10 +13,10 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from tools.Memory import (
-    _split_messages_into_turns,
-    _turn_has_agent_content,
-    _turn_texts_from_messages,
+from tools.memory import (
+    split_messages_into_turns,
+    turn_has_agent_content,
+    turn_texts_from_messages,
 )
 
 
@@ -25,10 +25,10 @@ def test_split_single_turn():
         ModelRequest(parts=[UserPromptPart(content="hello")]),
         ModelResponse(parts=[TextPart(content="hi there")]),
     ]
-    turns = _split_messages_into_turns(msgs)
+    turns = split_messages_into_turns(msgs)
     assert len(turns) == 1
-    assert _turn_has_agent_content(turns[0])
-    texts = _turn_texts_from_messages(msgs)
+    assert turn_has_agent_content(turns[0])
+    texts = turn_texts_from_messages(msgs)
     assert len(texts) == 1
     assert "[USER]: hello" in texts[0]
     assert "[ASSISTANT]: hi there" in texts[0]
@@ -41,21 +41,21 @@ def test_split_two_turns():
         ModelRequest(parts=[UserPromptPart(content="q2")]),
         ModelResponse(parts=[ToolCallPart(tool_name="t", args="{}")]),
     ]
-    turns = _split_messages_into_turns(msgs)
+    turns = split_messages_into_turns(msgs)
     assert len(turns) == 2
-    assert "[USER]: q1" in _turn_texts_from_messages(msgs)[0]
-    assert "[TOOL_CALL:t]" in _turn_texts_from_messages(msgs)[1]
+    assert "[USER]: q1" in turn_texts_from_messages(msgs)[0]
+    assert "[TOOL_CALL:t]" in turn_texts_from_messages(msgs)[1]
 
 
 def test_skip_user_only_turn():
     msgs = [
         ModelRequest(parts=[UserPromptPart(content="alone")]),
     ]
-    assert _split_messages_into_turns(msgs) == []
+    assert split_messages_into_turns(msgs) == []
 
 
 def test_empty_messages():
-    assert _split_messages_into_turns([]) == []
+    assert split_messages_into_turns([]) == []
 
 
 if __name__ == "__main__":

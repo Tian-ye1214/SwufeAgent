@@ -36,7 +36,7 @@ def test_parse_worker_result_accepts_fenced_structured_json() -> None:
     assert parsed.risks == ["none"]
 
 
-def test_parse_worker_result_keeps_legacy_prefix_compatibility() -> None:
+def test_parse_worker_result_accepts_status_prefixes() -> None:
     assert parse_worker_result("FAILED: no file").success is False
     assert parse_worker_result("SUCCESS: wrote file").success is True
     assert parse_worker_result("plain answer").success is True
