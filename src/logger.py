@@ -5,12 +5,22 @@ import inspect
 import logging
 import sys
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from runtime_state import AgentRunPolicy, TRACE_STORE, current_turn_id
+
+_stm_ingest_console_quiet: ContextVar[int] = ContextVar("stm_ingest_console_quiet", default=0)
+
+
+class _StmIngestConsoleQuietFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if _stm_ingest_console_quiet.get() <= 0:
+            return True
+        return record.levelno >= logging.WARNING
 
 
 class LoggerManager:
@@ -80,9 +90,19 @@ class LoggerManager:
     def _build_console_handler(self) -> logging.Handler:
         handler = logging.StreamHandler(stream=sys.stdout)
         handler.setLevel(logging.DEBUG)
+        handler.addFilter(_StmIngestConsoleQuietFilter())
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S")
         )
         return handler
+
+    @contextmanager
+    def stm_ingest_console_quiet(self) -> Iterator[None]:
+        """短期记忆后台入库时压制控制台 INFO/DEBUG，文件日志不受影响。"""
+        token = _stm_ingest_console_quiet.set(_stm_ingest_console_quiet.get() + 1)
+        try:
+            yield
+        finally:
+            _stm_ingest_console_quiet.reset(token)
 
     def _build_file_handler(self, log_file: Path) -> logging.Handler:
         handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -107,6 +127,15 @@ class LoggerManager:
         if announce:
             logger.info("日志文件已创建: %s", log_file)
         return logger
+
+    def info_file_only(self, msg: str, *args: Any) -> None:
+        """仅写入文件 Handler，避免与 Rich 控制台输出重复。"""
+        log = self.get_logger()
+        formatted = msg % args if args else msg
+        record = log.makeRecord(log.name, logging.INFO, "(cli)", 0, formatted, (), None)
+        for h in log.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.handle(record)
 
     def _safe_repr(self, value: Any, max_len: int = 120) -> str:
         text = repr(value)
@@ -214,15 +243,19 @@ setup_task_logger = _MANAGER.setup_task_logger
 setup_session_logger = _MANAGER.setup_session_logger
 set_user_notify_callback = _MANAGER.set_user_notify_callback
 wrap_tools_for_user_notify = _MANAGER.wrap_tools_for_user_notify
+info_file_only = _MANAGER.info_file_only
+stm_ingest_console_quiet = _MANAGER.stm_ingest_console_quiet
 
 __all__ = [
     "LOG_DIR",
     "debug",
     "info",
+    "info_file_only",
     "warning",
     "error",
     "setup_task_logger",
     "setup_session_logger",
     "set_user_notify_callback",
     "wrap_tools_for_user_notify",
+    "stm_ingest_console_quiet",
 ]

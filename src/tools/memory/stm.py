@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,8 +34,29 @@ def _stm_rag_from_config(cfg: dict[str, Any]) -> Any:
     )
 
 
+class _AsyncThreadLock:
+    """跨主事件循环与 STM 入库线程的互斥锁。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def __aenter__(self) -> _AsyncThreadLock:
+        await asyncio.to_thread(self._lock.acquire)
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> _AsyncThreadLock:
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self._lock.release()
+
+
 class ShortTermMemory:
-    """短期记忆：每轮 user→agent（含工具）单向量；回合结束后异步入库，供 Worker 检索。"""
+    """短期记忆：每轮 user→agent（含工具）单向量；回合结束后后台线程异步入库，供 Worker 检索。"""
 
     def __init__(
         self,
@@ -44,8 +67,9 @@ class ShortTermMemory:
         self._cfg = dict(stm_config)
         self._rag = rag
         self._log_root = log_root
-        self._write_lock = asyncio.Lock()
-        self._pending: set[asyncio.Task] = set()
+        self._lock = _AsyncThreadLock()
+        self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
+        self._pending_threads: list[threading.Thread] = []
         self._reconcile_on_query = bool(self._cfg["reconcile_on_query"])
 
     def _get_rag(self) -> Any:
@@ -53,16 +77,25 @@ class ShortTermMemory:
             self._rag = _stm_rag_from_config(self._cfg)
         return self._rag
 
+    def _ingest_log_context(self):
+        if self._verbose_ingest:
+            return nullcontext()
+        return logger.stm_ingest_console_quiet()
+
     def _log_root_resolved(self) -> Path:
         return (self._log_root if self._log_root is not None else logger.LOG_DIR).resolve()
 
+    def _db_dir(self) -> Path:
+        p = Path(str(self._cfg["db_path"]))
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        return p
+
     def _stm_state_path(self) -> Path:
-        rag = self._get_rag()
-        return Path(rag._db.db_path) / "conversation_stm_state.json"
+        return self._db_dir() / "conversation_stm_state.json"
 
     def _failures_path(self) -> Path:
-        rag = self._get_rag()
-        return Path(rag._db.db_path) / "conversation_stm_failures.jsonl"
+        return self._db_dir() / "conversation_stm_failures.jsonl"
 
     def _rel_log_key(self, path: Path, root: Path) -> str:
         try:
@@ -147,10 +180,10 @@ class ShortTermMemory:
         log_key: str,
         rows: list[dict[str, Any]],
         new_turns_done: int,
+        rag: Any,
     ) -> None:
         if not rows:
             return
-        rag = self._get_rag()
         await rag.connect()
         try:
             await rag.ingest_turn_rows(rows)
@@ -164,12 +197,13 @@ class ShortTermMemory:
         sources = state.setdefault("sources", {})
         sources[log_key] = {"turns_done": new_turns_done}
         await asyncio.to_thread(self._save_stm_state_sync, state)
-        logger.info(
-            "STM ingest: log_key=%s turns=%d new_rows=%d",
-            log_key,
-            new_turns_done,
-            len(rows),
-        )
+        if self._verbose_ingest:
+            logger.info(
+                "STM ingest: log_key=%s turns=%d new_rows=%d",
+                log_key,
+                new_turns_done,
+                len(rows),
+            )
 
     async def ingest_after_turn(
         self,
@@ -181,18 +215,38 @@ class ShortTermMemory:
         """回合结束后异步入库自上次 turns_done 起的新轮。"""
         if not log_key or not messages:
             return
-        async with self._write_lock:
-            turn_texts = turn_texts_from_messages(messages)
-            state = await asyncio.to_thread(self._load_stm_state_sync)
-            sources = state.setdefault("sources", {})
-            done = self._turns_done_for_key(sources, log_key)
-            if len(turn_texts) < done:
-                done = 0
-            rows = self._collect_pending_turn_rows(
-                log_key, turn_texts, done, agent, session_key
-            )
-            if rows:
-                await self._ingest_rows_unlocked(log_key, rows, len(turn_texts))
+        with self._ingest_log_context():
+            async with self._lock:
+                turn_texts = turn_texts_from_messages(messages)
+                state = await asyncio.to_thread(self._load_stm_state_sync)
+                sources = state.setdefault("sources", {})
+                done = self._turns_done_for_key(sources, log_key)
+                if len(turn_texts) < done:
+                    done = 0
+                rows = self._collect_pending_turn_rows(
+                    log_key, turn_texts, done, agent, session_key
+                )
+                if not rows:
+                    return
+                rag = _stm_rag_from_config(self._cfg)
+                try:
+                    await self._ingest_rows_unlocked(
+                        log_key, rows, len(turn_texts), rag
+                    )
+                finally:
+                    await rag.close()
+
+    def _ingest_thread_main(
+        self,
+        messages: list,
+        log_key: str,
+        agent: str,
+        session_key: str,
+    ) -> None:
+        try:
+            asyncio.run(self.ingest_after_turn(messages, log_key, agent, session_key))
+        except Exception as e:
+            logger.warning("STM ingest 后台失败: %s", e)
 
     def schedule_ingest_after_turn(
         self,
@@ -201,16 +255,25 @@ class ShortTermMemory:
         agent: str,
         session_key: str,
     ) -> None:
-        t = asyncio.create_task(
-            self.ingest_after_turn(messages, log_key, agent, session_key)
+        if not log_key or not messages:
+            return
+        msgs = list(messages)
+        t = threading.Thread(
+            target=self._ingest_thread_main,
+            args=(msgs, log_key, agent, session_key),
+            daemon=True,
+            name="stm-ingest",
         )
-        self._pending.add(t)
-        t.add_done_callback(self._pending.discard)
+        self._pending_threads = [x for x in self._pending_threads if x.is_alive()]
+        self._pending_threads.append(t)
+        t.start()
 
-    async def drain(self) -> None:
-        pending = list(self._pending)
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+    async def drain(self, *, timeout: float = 60.0) -> None:
+        threads = [x for x in self._pending_threads if x.is_alive()]
+        for t in threads:
+            await asyncio.to_thread(t.join, timeout)
+            if t.is_alive():
+                logger.warning("STM ingest 线程未在 %.0fs 内结束，继续 shutdown", timeout)
 
     async def close(self) -> None:
         if self._rag is not None:
@@ -288,7 +351,7 @@ class ShortTermMemory:
         inner = ""
         if not q:
             return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
-        async with self._write_lock:
+        async with self._lock:
             if self._reconcile_on_query:
                 await self._reconcile_from_logs()
             rag = self._get_rag()

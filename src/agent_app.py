@@ -26,13 +26,23 @@ from ModelGateway.ModelChecker import (
 )
 from app_config import get_agent_usage_limits, get_context_config, get_model_and_params, settings
 from cli_commands import handle_slash_command
-from cli_ui import consume_stream_text_to_stdout, format_user_log_text, print_startup_logo
+from cli.repl import InteractiveRepl
+from cli.file_ref import augment_text_with_file_refs, load_file_refs
+from cli.render import (
+    consume_stream_markdown,
+    print_panel,
+    print_phase,
+    print_repl_welcome,
+    print_success,
+    print_warning,
+    show_model_output,
+)
+from cli_ui import format_user_log_text, print_startup_logo
 import logger
 import traceback
 import time
 import asyncio
 import signal
-import sys
 import uuid
 from typing import Any, Coroutine, Tuple
 
@@ -113,6 +123,14 @@ class AgentSystem:
             raise RuntimeError("会话未绑定，请先调用 bind_session")
         return self._session_key
 
+    @property
+    def registry(self) -> AgentRegistry:
+        return self._registry
+
+    @property
+    def session_key(self) -> str | None:
+        return self._session_key
+
     async def _agent_id(self, role: str, suffix: str | None = None) -> str:
         sk = self._require_session_key()
         return await self._registry.ensure_agent(sk, role, suffix)
@@ -187,14 +205,17 @@ class AgentSystem:
             body = e.body or {}
             code = body.get("code", "") if isinstance(body, dict) else ""
             if code == "data_inspection_failed":
-                logger.warning("\n⚠️  模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。\n请尝试换一种表达方式重新输入，或输入\"新任务\"清空上下文后重试。")
+                print_warning(
+                    "模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。"
+                    "请尝试换一种表达方式，或 /clear 清空上下文后重试。"
+                )
             else:
-                logger.error(f"\n❌ 模型请求错误 (HTTP {e.status_code}): {e}")
-                logger.error(f"详细信息:\n{traceback.format_exc()}")
+                print_warning(f"模型请求错误 (HTTP {e.status_code}): {e}")
+                logger.error("详细信息:\n%s", traceback.format_exc())
                 self._task_manager.reset()
         except Exception as e:
-            logger.error(f"\n❌ 未预期的系统错误: {e}")
-            logger.error(f"详细信息:\n{traceback.format_exc()}")
+            print_warning(f"未预期的系统错误: {e}")
+            logger.error("详细信息:\n%s", traceback.format_exc())
             self._task_manager.reset()
 
     def _injection_for_session(self) -> str:
@@ -305,11 +326,11 @@ class AgentSystem:
         attachments = self._current_attachments
 
         if not continue_from_previous:
-            logger.info("第一阶段: Manager 规划任务列表")
+            print_phase("第一阶段: Manager 规划任务列表")
             tmpl = await asyncio.to_thread(load_prompt, "manager_planning_new.md")
             planning_text = tmpl.format(user_input=user_input)
         else:
-            logger.info("第一阶段: 基于用户反馈调整任务")
+            print_phase("第一阶段: 基于用户反馈调整任务")
             current_todo = self._task_manager.get_todo_list()
             tmpl = await asyncio.to_thread(load_prompt, "manager_planning_continue.md")
             planning_text = tmpl.format(
@@ -339,20 +360,16 @@ class AgentSystem:
                 logger.info("已自动压缩 Manager 上下文（达到配置阈值）")
         except Exception as ce:
             logger.warning("Manager 自动压缩失败: %s", ce)
-        logger.info(f"[模型]\n{result.output}")
+        show_model_output(result.output, title="Manager 规划")
 
-        logger.info("=" * 60)
-        logger.info("第二阶段: 多Worker并行执行任务")
-        logger.info("=" * 60)
+        print_phase("第二阶段: 多Worker并行执行任务")
 
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
             user_input, attachments=attachments, turn_id=tid
         )
-        logger.info(f"[任务汇总]\n{final_summary}")
+        show_model_output(final_summary, title="任务汇总")
 
-        logger.info("=" * 60)
-        logger.info("第三阶段: 生成最终报告")
-        logger.info("=" * 60)
+        print_phase("第三阶段: 生成最终报告")
 
         summary_tmpl = await asyncio.to_thread(load_prompt, "manager_summary.md")
         summary_text = summary_tmpl.format(
@@ -370,7 +387,9 @@ class AgentSystem:
                 message_history=self._manager_history.messages,
                 usage_limits=get_agent_usage_limits(),
                 prompt=summary_prompt,
-                consumer=lambda s: consume_stream_text_to_stdout(s, self._manager_history),
+                consumer=lambda s: consume_stream_markdown(
+                    s, self._manager_history, title="最终报告"
+                ),
             )
             self._session_logs.for_agent("manager").save(
                 self._manager_history.messages,
@@ -405,10 +424,10 @@ class AgentSystem:
                         logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
                 except Exception as ce:
                     logger.warning("Manager 自动压缩失败: %s", ce)
-                logger.info(f"[模型]\n{final_result.output}")
+                show_model_output(final_result.output, title="最终报告")
                 return final_result.output
             except Exception:
-                logger.info(f"{final_summary}")
+                show_model_output(final_summary, title="任务汇总")
                 return final_summary
 
     async def _execute_task_with_worker(
@@ -510,7 +529,7 @@ class AgentSystem:
             history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
-        logger.info(f"[用户]\n{format_user_log_text(message)}")
+        logger.info_file_only("[用户]\n%s", format_user_log_text(message))
 
         c_name, c_params = get_model_and_params("coordinator")
         coordinator_tools = [
@@ -535,21 +554,39 @@ class AgentSystem:
 
         start_time = time.time()
         coord_aid = await self._agent_id("coordinator")
-        result = await run_agent_with_lifecycle(
-            agent=agent,
-            prompt=message.to_prompt(),
-            agent_id=coord_aid,
-            registry=self._registry,
-            hooks=self._hooks,
-            turn_id=turn_id,
-            message_history=history.messages,
-            usage_limits=get_agent_usage_limits(),
-        )
+        output = ""
+        try:
+            output = await run_agent_stream_with_lifecycle(
+                agent=agent,
+                prompt=message.to_prompt(),
+                agent_id=coord_aid,
+                registry=self._registry,
+                hooks=self._hooks,
+                turn_id=turn_id,
+                message_history=history.messages,
+                usage_limits=get_agent_usage_limits(),
+                consumer=lambda s: consume_stream_markdown(
+                    s, history, title="Coordinator"
+                ),
+            )
+        except Exception as e:
+            logger.warning("Coordinator 流式输出回退到普通模式: %s", e)
+            result = await run_agent_with_lifecycle(
+                agent=agent,
+                prompt=message.to_prompt(),
+                agent_id=coord_aid,
+                registry=self._registry,
+                hooks=self._hooks,
+                turn_id=turn_id,
+                message_history=history.messages,
+                usage_limits=get_agent_usage_limits(),
+            )
+            output = result.output
+            show_model_output(output, title="Coordinator")
+            history.update(result)
         elapsed = time.time() - start_time
 
-        logger.info(f"[DEBUG] run_agent_system agent.run() 完成，耗时 {elapsed:.2f} 秒")
-        logger.info(f"[模型]\n{result.output}")
-        history.update(result)
+        logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
         extra: dict = {"kind": "coordinator"}
         if conversation_log_extra:
             extra.update(conversation_log_extra)
@@ -560,20 +597,18 @@ class AgentSystem:
         except Exception as ce:
             logger.warning("Coordinator 自动压缩失败: %s", ce)
         await self._after_coordinator_turn(history)
-        return history, result.output
+        return history, output
 
     async def run_interactive(self, *, stop_event: asyncio.Event | None = None):
         """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
         print_startup_logo()
-        logger.info("=" * 60)
-        logger.info("输入 /help 查看斜杠命令；输入 '新任务' 清除上下文；quit/exit 退出；/stop 中断当前任务")
-        logger.info("输入中可包含图片/视频文件路径，系统会自动识别为附件")
-        logger.info("=" * 60)
+        print_repl_welcome()
         await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
         self._context_prewarmed = True
 
         is_first_input = True
         history = ChatHistory()
+        repl = InteractiveRepl()
 
         async def process_one_line(raw_input: str) -> str:
             nonlocal history, is_first_input
@@ -581,9 +616,25 @@ class AgentSystem:
             if not raw_input:
                 return "continue"
 
+            cmd_lower = raw_input.lower()
+            if cmd_lower in ("/exit", "/quit"):
+                if self._current_turn is not None:
+                    print_warning("请先输入 /stop 结束当前任务，再退出。")
+                    return "continue"
+                print_success("再见！")
+                return "break"
+
+            if cmd_lower == "/clear" or "新任务" in raw_input:
+                if self._current_turn is not None:
+                    print_warning("请先输入 /stop 结束当前任务，再执行「新任务」或 /clear。")
+                    return "continue"
+                await self.reset_cli_interactive_session(history)
+                is_first_input = True
+                return "continue"
+
             has_any_history = bool(history.messages) or bool(self._manager_history.messages)
             if has_any_history:
-                print("\n── 上下文占用 ──")
+                usage_lines = []
                 roles_and_histories = [
                     ("manager", "Manager", [self._manager_history]),
                     ("coordinator", "Coordinator", [history]),
@@ -598,9 +649,21 @@ class AgentSystem:
                             used_tok += await estimate_history_tokens_async(
                                 h.messages, chars_per_token=cpt, role=role
                             )
-                    print(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
+                    usage_lines.append(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
+                print_panel("\n".join(usage_lines), title="上下文占用")
 
             if raw_input.startswith("/"):
+                if self._current_turn is not None:
+                    cmd = raw_input.split()[0].lower()
+                    busy_ok = {
+                        "/stop", "/status", "/cancel", "/help", "/trace", "/tasks",
+                        "/pwd", "/config", "/skills",
+                    }
+                    if cmd not in busy_ok:
+                        print_warning(
+                            "当前有任务正在执行，此命令暂不可用。请先 /stop 或等待完成。"
+                        )
+                        return "continue"
                 await self._sync_skills_for_user_turn()
                 _consumed, first_override = await handle_slash_command(
                     raw_input,
@@ -609,7 +672,7 @@ class AgentSystem:
                     manager_history=self._manager_history,
                     reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
                         history
-                    ),  # async; handle_slash_command 内 await
+                    ),
                     bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
                         agent, path, meta
                     ),
@@ -621,27 +684,29 @@ class AgentSystem:
 
             if raw_input.lower() in ["quit", "exit", "退出"]:
                 if self._current_turn is not None:
-                    print("请先输入 /stop 结束当前任务，再退出。\n")
+                    print_warning("请先输入 /stop 结束当前任务，再退出。")
                     return "continue"
-                logger.info("👋 再见！")
+                print_success("再见！")
                 return "break"
 
-            if "新任务" in raw_input:
-                if self._current_turn is not None:
-                    print("请先输入 /stop 结束当前任务，再执行「新任务」。\n")
-                    return "continue"
-                await self.reset_cli_interactive_session(history)
-                is_first_input = True
-                return "continue"
-
             if self._current_turn is not None:
-                print(
-                    "当前有任务正在执行。请输入 /stop 中断，或等待完成后再输入新内容。\n"
-                    "（斜杠命令如 /status、/cancel 仍可直接使用。）\n"
+                print_warning(
+                    "当前有任务正在执行。请输入 /stop 中断，或等待完成后再输入新内容。"
+                    "（斜杠命令如 /status、/cancel 仍可直接使用。）"
                 )
                 return "continue"
 
-            message = await asyncio.to_thread(user_message_from_cli_input, raw_input)
+            file_refs = await asyncio.to_thread(load_file_refs, raw_input)
+            for ref in file_refs:
+                if not ref.ok:
+                    print_warning(f"@{ref.path}: {ref.error}")
+                elif ref.truncated:
+                    print_success(f"📄 @{ref.path}（已截断，超出字符限制）")
+                else:
+                    print_success(f"📄 @{ref.path}")
+
+            augmented = augment_text_with_file_refs(raw_input, file_refs)
+            message = await asyncio.to_thread(user_message_from_cli_input, augmented)
             if message.attachments:
                 logger.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
 
@@ -656,48 +721,11 @@ class AgentSystem:
                 is_first_input = False
 
             if not self._start_user_turn(message, history):
-                print("无法启动任务（已有运行中的回合）。\n")
+                print_warning("无法启动任务（已有运行中的回合）。")
             return "continue"
 
         try:
-            if sys.stdin.isatty() and sys.stdout.isatty():
-                from prompt_toolkit import PromptSession
-                from prompt_toolkit.patch_stdout import patch_stdout
-
-                session = PromptSession()
-
-                async def read_line() -> str:
-                    return (await session.prompt_async("\n📝 请输入您的任务: ")).strip()
-
-                with patch_stdout():
-                    while True:
-                        if stop_event is not None and stop_event.is_set():
-                            break
-                        try:
-                            action = await process_one_line(await read_line())
-                            if action == "break":
-                                break
-                        except KeyboardInterrupt:
-                            logger.info("\n\n👋 程序已中断，再见！")
-                            break
-                        except asyncio.CancelledError:
-                            logger.info("当前 Agent 运行已取消。")
-                            break
-            else:
-                while True:
-                    if stop_event is not None and stop_event.is_set():
-                        break
-                    try:
-                        raw = (await asyncio.to_thread(input, "\n📝 请输入您的任务: ")).strip()
-                        action = await process_one_line(raw)
-                        if action == "break":
-                            break
-                    except KeyboardInterrupt:
-                        logger.info("\n\n👋 程序已中断，再见！")
-                        break
-                    except asyncio.CancelledError:
-                        logger.info("当前 Agent 运行已取消。")
-                        break
+            await repl.run(process_one_line, stop_event=stop_event)
         finally:
             await self.shutdown()
 

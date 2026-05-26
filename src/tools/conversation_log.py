@@ -50,7 +50,9 @@ class ConversationLog:
 
     def _write_lock_for_loop(self) -> asyncio.Lock:
         if self._write_lock is None:
-            self._write_lock = asyncio.Lock()
+            with self._init_lock:
+                if self._write_lock is None:
+                    self._write_lock = asyncio.Lock()
         return self._write_lock
 
     def model_messages_path(self) -> Path | None:

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from app_config import get_agent_roles, get_env, get_model_and_params, set_api, set_model_name, settings
+from app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
 from lifecycle import AgentInvocationState
 from runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
@@ -18,120 +19,148 @@ from prompt import get_skills_as_in_system_prompt
 from skills.SkillsManager import SkillsManager
 from tools.memory import ChatHistory
 from tools.conversation_log import read_saved_model_messages_file
+from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
+
+
+def _out(text: str = "") -> None:
+    console.print(text)
 
 
 def print_cli_help() -> None:
-    print(
-        "\n── HELP ─────────────────────────────────────────\n"
-        "/help     显示本帮助\n"
-        "/skills   查看当前已加载 Skills（与系统提示中 {skills_layout}+{skills_summary} 一致）\n"
-        "/agent    查看 Manager / Worker / Coordinator 的模型名与 temperature、max_tokens；\n"
-        "          切换: /agent <manager|worker|coordinator> <模型名称>\n"
-        "/api      按提示修改 BASE_URL 与 API_KEY（写入 config.json，回车跳过单项）\n"
-        "/compress 主动压缩当前 Manager / Coordinator 对话上下文（Markdown 摘要）\n"
-        "/status  树形列出会话内 Agent 实例与 invocation（活跃 + 近期历史）\n"
-        "/cancel  中止 invocation；用法: /cancel <invocation_id 或前缀> 或 /cancel agent <agent_id>\n"
-        "/stop    中断当前用户回合（取消该 turn 下所有活跃 invocation）\n"
-        "/load    从落盘的 *.model_messages.json 恢复对话（与「新任务」同样会清空任务状态）\n"
-        "          用法: /load <文件路径>\n"
-        "\n── 其他 ─────────────────────────────────────────────\n"
-        "新任务     清空任务与对话上下文\n"
-        "quit/exit  退出程序\n"
-        "输入中可包含图片/视频路径作为附件\n"
-        "────────────────────────────────────────────────────\n"
+    print_markdown(
+        """
+## 斜杠命令
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示本帮助 |
+| `/exit` / `/quit` | 退出程序 |
+| `/clear` | 清空任务与对话上下文 |
+| `/pwd` | 查看当前工作目录 |
+| `/cd <path>` | 切换工作目录 |
+| `/config` | 查看配置摘要 |
+| `/skills` | 查看已加载 Skills |
+| `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
+| `/api` | 修改 BASE_URL 与 API_KEY |
+| `/compress` | 压缩 Manager / Coordinator 上下文 |
+| `/status` | Agent 生命周期与 invocation |
+| `/cancel` | 中止 invocation |
+| `/stop` | 中断当前用户回合 |
+| `/load <path>` | 从落盘文件恢复对话 |
+| `/trace` / `/tasks` | 追踪与任务状态 |
+
+## 其他
+
+- **新任务** — 清空上下文（同 `/clear`）
+- **quit / exit** — 退出
+- 输入中可用 `@文件路径` 引用文本文件（Tab 补全）
+- 可包含图片/视频路径作为多媒体附件
+"""
     )
 
 
 def print_agent_models() -> None:
     labels = {"manager": "Manager（任务规划）", "worker": "Worker（子任务执行）", "coordinator": "Coordinator（入口协调）"}
     roles = get_agent_roles()
-    print("\n── 当前模型配置（config.json）──")
+    lines = ["当前模型配置（config.json）", ""]
     for role in roles:
         name, p = get_model_and_params(role)
-        print(f"  • {labels.get(role, role)}")
-        print(f"    模型名: {name}")
+        lines.append(f"• {labels.get(role, role)}")
+        lines.append(f"  模型名: {name}")
         th_s = f"  reasoning→thinking: {p['thinking']}"
-        print(f"    temperature: {p['temperature']}  max_tokens: {p['max_tokens']}{th_s}")
-    print("")
+        lines.append(f"  temperature: {p['temperature']}  max_tokens: {p['max_tokens']}{th_s}")
+        lines.append("")
+    print_panel("\n".join(lines), title="Agent 模型")
 
 
 def interactive_set_api() -> None:
     cur_b = (get_env("BASE_URL", warn=False) or "").strip()
     cur_k = (get_env("API_KEY", warn=False) or "").strip()
-    print(f"\n当前 BASE_URL: {cur_b or '(空；优先 .env 再 config)'}")
-    print(f"当前 API_KEY: {'已填写' if cur_k else '(空；优先 .env 再 config)'}\n")
+    _out(f"\n当前 BASE_URL: {cur_b or '(空；优先 .env 再 config)'}")
+    _out(f"当前 API_KEY: {'已填写' if cur_k else '(空；优先 .env 再 config)'}\n")
     nb = input("请输入 BASE_URL（回车保持当前值）: ").strip()
     nk = input("请输入 API_KEY（回车保持当前值）: ").strip()
     new_base = nb if nb else cur_b
     new_key = nk if nk else cur_k
     set_api(new_base, new_key)
-    print("已更新 API 配置并写入 config.json。\n")
+    _out("已更新 API 配置并写入 config.json。\n")
 
 
 def print_loaded_skills(skills_manager: SkillsManager) -> None:
     """输出与模型系统提示中 Skills 区块相同的内容。"""
     block = get_skills_as_in_system_prompt(skills_manager)
-    print("\n── 当前 Skills（与系统提示注入内容一致）──\n")
-    print(block if block.strip() else "(无：layout 与 summary 均为空)\n")
+    print_markdown_panel(
+        block if block.strip() else "(无：layout 与 summary 均为空)",
+        title="当前 Skills",
+    )
+
+
+def print_config_summary() -> None:
+    base = (get_env("BASE_URL", warn=False) or "").strip()
+    key_set = bool((get_env("API_KEY", warn=False) or "").strip())
+    lines = [
+        f"配置文件: {CONFIG_FILE}",
+        f"BASE_URL: {base or '(空)'}",
+        f"API_KEY: {'已填写' if key_set else '(空)'}",
+        f"工作目录: {Path.cwd()}",
+    ]
+    print_panel("\n".join(lines), title="配置摘要")
 
 
 async def _print_lifecycle_status(system: Any) -> None:
+    lines: list[str] = []
     sk = getattr(system, "session_key", None)
     if not sk:
         agents = await system.registry.list_agents()
         if not agents:
-            print("\n── Agent 生命周期 ──\n（尚未绑定会话，无 Agent 实例）\n")
+            print_panel("（尚未绑定会话，无 Agent 实例）", title="Agent 生命周期")
             return
-        print("\n── Agent 生命周期（全部会话）──")
+        lines.append("全部会话")
         for a in agents:
-            print(f"  [{a.state.value}] {a.agent_id}")
+            lines.append(f"  [{a.state.value}] {a.agent_id}")
         active = await system.registry.list_active_invocations()
         if active:
-            print("\n  活跃 invocation:")
+            lines.append("\n活跃 invocation:")
             now = time.monotonic()
             for inv in active:
                 elapsed = now - inv.started_at
                 parent = (inv.parent_invocation_id or "-")[:8]
-                print(
-                    f"    inv={inv.invocation_id[:8]} agent={inv.role} "
+                lines.append(
+                    f"  inv={inv.invocation_id[:8]} agent={inv.role} "
                     f"parent={parent} turn={inv.turn_id} state={inv.state.value} {elapsed:.1f}s"
                 )
-        print("")
+        print_panel("\n".join(lines), title="Agent 生命周期")
         return
 
     view = await system.registry.get_session_view(sk)
-    print(f"\n── Agent 生命周期 ── Session: {sk}")
+    lines.append(f"Session: {sk}")
     if not view.agents:
-        print("  （无 Agent 实例）")
+        lines.append("  （无 Agent 实例）")
     for a in view.agents:
         suffix = a.agent_id.split(":", 2)[-1] if a.agent_id.count(":") >= 2 else a.role
         label = a.role if suffix == a.role else f"{a.role}:{suffix}"
-        print(f"  [{a.state.value}] {label}  id={a.agent_id}")
+        lines.append(f"  [{a.state.value}] {label}  id={a.agent_id}")
 
     if view.active_invocations:
-        print("\n  活跃 invocation:")
+        lines.append("\n活跃 invocation:")
         now = time.monotonic()
         for inv in view.active_invocations:
             elapsed = now - inv.started_at
             parent = (inv.parent_invocation_id or "-")[:8]
-            print(
-                f"    inv={inv.invocation_id[:8]} agent={inv.agent_id} "
+            lines.append(
+                f"  inv={inv.invocation_id[:8]} agent={inv.agent_id} "
                 f"parent={parent} turn={inv.turn_id} state={inv.state.value} {elapsed:.1f}s"
             )
 
-    completed = [
-        i
-        for i in view.recent_invocations
-        if i.state == AgentInvocationState.COMPLETED
-    ]
+    completed = [i for i in view.recent_invocations if i.state == AgentInvocationState.COMPLETED]
     failed = [
         i
         for i in view.recent_invocations
         if i.state in (AgentInvocationState.FAILED, AgentInvocationState.CANCELLED)
     ]
     if completed or failed:
-        print(
-            f"\n  近期历史: {len(completed)} 已完成, {len(failed)} 失败/取消 "
+        lines.append(
+            f"\n近期历史: {len(completed)} 已完成, {len(failed)} 失败/取消 "
             f"（活跃 {len(view.active_invocations)}）"
         )
         for inv in list(view.recent_invocations)[-5:]:
@@ -139,13 +168,13 @@ async def _print_lifecycle_status(system: Any) -> None:
             state = inv.state.value
             if inv.state in (AgentInvocationState.RUNNING, AgentInvocationState.PENDING):
                 state = f"{state}(已结束)"
-            print(
-                f"    inv={inv.invocation_id[:8]} {inv.role} parent={parent} "
+            lines.append(
+                f"  inv={inv.invocation_id[:8]} {inv.role} parent={parent} "
                 f"turn={inv.turn_id} state={state}"
             )
     elif not view.active_invocations:
-        print("\n  （无活跃 invocation）")
-    print("")
+        lines.append("\n（无活跃 invocation）")
+    print_panel("\n".join(lines), title="Agent 生命周期")
 
 
 async def handle_slash_command(
@@ -169,57 +198,76 @@ async def handle_slash_command(
     if cmd == "/help":
         print_cli_help()
         return True, None
+    if cmd == "/config":
+        print_config_summary()
+        return True, None
+    if cmd == "/pwd":
+        print_success(str(Path.cwd()))
+        return True, None
+    if cmd == "/cd":
+        if len(parts) < 2:
+            print_error("用法：/cd <path>")
+            return True, None
+        target = Path(parts[1].strip()).expanduser()
+        if not target.is_absolute():
+            target = (Path.cwd() / target).resolve()
+        if not target.is_dir():
+            print_error(f"目录不存在: {target}")
+            return True, None
+        os.chdir(target)
+        print_success(f"已切换工作目录: {target}")
+        return True, None
     if cmd == "/status":
         await _print_lifecycle_status(system)
         return True, None
     if cmd == "/trace":
         if len(parts) < 2:
-            print("Usage: /trace <turn_id>\n")
+            print_error("用法: /trace <turn_id>")
             return True, None
-        print(TRACE_STORE.format_turn(parts[1].strip()) + "\n")
+        print_markdown(TRACE_STORE.format_turn(parts[1].strip()))
         return True, None
     if cmd == "/tasks":
-        print(system.structured_task_status() + "\n")
+        print_markdown_panel(system.structured_task_status(), title="任务状态")
         return True, None
     if cmd == "/stop":
         msg = await system.cancel_current_turn()
-        print(f"{msg}\n")
+        _out(msg)
         return True, None
     if cmd == "/cancel":
         if len(parts) < 2:
-            print("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>\n")
+            print_error("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>")
             return True, None
         if parts[1].lower() == "agent":
             if len(parts) < 3:
-                print("用法: /cancel agent <agent_id>\n")
+                print_error("用法: /cancel agent <agent_id>")
                 return True, None
             aid = parts[2].strip()
             n = await system.registry.cancel_agent(aid)
             if n:
-                print(f"已请求取消 agent_id={aid!r} 的当前 invocation。\n")
+                print_success(f"已请求取消 agent_id={aid!r} 的当前 invocation。")
             else:
-                print(f"未找到 agent_id={aid!r} 的活跃 invocation。\n")
+                print_warning(f"未找到 agent_id={aid!r} 的活跃 invocation。")
             return True, None
         iid = parts[1].strip()
         n_match = await system.registry.count_active_invocation_prefix_matches(iid)
         if n_match > 1:
-            print(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。\n")
+            print_warning(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。")
             return True, None
         resolved = await system.registry.resolve_active_invocation_id(iid)
         ok = await system.registry.cancel(iid)
         if ok:
-            print(f"已请求取消 invocation_id={(resolved or iid)!r}。\n")
+            print_success(f"已请求取消 invocation_id={(resolved or iid)!r}。")
             return True, None
         sk = getattr(system, "session_key", None)
         if sk:
             recent = await system.registry.find_recent_invocation_by_prefix(sk, iid)
             if recent is not None:
-                print(
+                print_warning(
                     f"invocation {iid!r} 已在近期历史中结束"
-                    f"（state={recent.state.value}），无法取消。\n"
+                    f"（state={recent.state.value}），无法取消。"
                 )
                 return True, None
-        print(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。\n")
+        print_warning(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。")
         return True, None
     if cmd == "/skills":
         print_loaded_skills(skills_manager)
@@ -229,21 +277,21 @@ async def handle_slash_command(
         role_text = "|".join(roles)
         if len(parts) == 1:
             print_agent_models()
-            print(f"切换模型: /agent <{role_text}> <模型名称>\n")
+            _out(f"切换模型: /agent <{role_text}> <模型名称>")
             return True, None
         if len(parts) < 3:
-            print(f"用法: /agent <{role_text}> <模型名称>\n")
+            print_error(f"用法: /agent <{role_text}> <模型名称>")
             return True, None
         role = parts[1].lower()
         model_name = parts[2].strip()
         try:
             set_model_name(role, model_name)
-            print(f"已设置 [{role}] 模型为: {model_name}（已写入 config.json）\n")
+            print_success(f"已设置 [{role}] 模型为: {model_name}（已写入 config.json）")
             await prewarm_effective_max_contexts_by_role_async(
                 reason=f"切换模型 {role}={model_name!r}"
             )
         except ValueError as e:
-            print(f"错误: {e}\n")
+            print_error(str(e))
         return True, None
     if cmd == "/api":
         interactive_set_api()
@@ -251,7 +299,7 @@ async def handle_slash_command(
     if cmd == "/load":
         tail = raw.strip()[5:].strip()
         if not tail:
-            print("用法: /load <*.model_messages.json 路径>（通常为 logs/conversations/.../*.model_messages.json）\n")
+            print_error("用法: /load <*.model_messages.json 路径>")
             return True, None
         raw_path = tail.strip()
         if (raw_path.startswith('"') and raw_path.endswith('"')) or (
@@ -260,33 +308,37 @@ async def handle_slash_command(
             raw_path = raw_path[1:-1]
         load_path = Path(raw_path).expanduser()
         if not load_path.is_file():
-            print(f"找不到文件: {load_path}\n")
+            print_error(f"找不到文件: {load_path}")
             return True, None
         try:
             messages, meta = read_saved_model_messages_file(load_path)
         except Exception as e:
-            print(f"加载失败: {e}\n")
+            print_error(f"加载失败: {e}")
             return True, None
         agent = (meta.get("agent") or "").strip().lower()
         if agent not in ("coordinator", "manager"):
-            print(
-                f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持从 coordinator 或 manager 落盘文件恢复。\n"
+            print_error(
+                f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持从 coordinator 或 manager 落盘文件恢复。"
             )
             return True, None
         if coordinator_history is None or manager_history is None:
-            print("当前环境未绑定历史对象，无法加载。\n")
+            print_error("当前环境未绑定历史对象，无法加载。")
             return True, None
         await reset_cli_session_for_load()
         if agent == "coordinator":
             coordinator_history.set_messages(messages)
             manager_history.reset()
             bind_loaded_snapshot_for_save("coordinator", load_path, meta)
-            print(f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。\n")
+            print_success(
+                f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。"
+            )
         else:
             manager_history.set_messages(messages)
             coordinator_history.reset()
             bind_loaded_snapshot_for_save("manager", load_path, meta)
-            print(f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。\n")
+            print_success(
+                f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。"
+            )
         return True, True
     if cmd == "/compress":
         role_histories: list[tuple[str, str, list[ChatHistory]]] = [
@@ -294,13 +346,13 @@ async def handle_slash_command(
             ("coordinator", "Coordinator", [coordinator_history] if coordinator_history is not None else []),
         ]
         if not any(histories for _, _, histories in role_histories):
-            print("当前环境未绑定任何 Agent 历史，无法压缩。\n")
+            print_error("当前环境未绑定任何 Agent 历史，无法压缩。")
             return True, None
 
-        print("\n── 压缩结果（按角色）──")
+        lines = ["压缩结果（按角色）"]
         for role, label, histories in role_histories:
             if not histories:
-                print(f"  • {label}: 未绑定历史")
+                lines.append(f"  • {label}: 未绑定历史")
                 continue
 
             try:
@@ -309,10 +361,11 @@ async def handle_slash_command(
                     if not msgs:
                         continue
                     await compress_history_async(h, role=role, force=True)
+                    lines.append(f"  • {label}: 已压缩")
             except Exception as e:
-                print(f"  • {label}: 压缩失败: {e}")
-                continue
+                lines.append(f"  • {label}: 压缩失败: {e}")
+        print_panel("\n".join(lines), title="上下文压缩")
         return True, None
 
-    print(f"未知命令 {cmd}，输入 /help 查看可用命令\n")
+    print_warning(f"未知命令 {cmd}，输入 /help 查看可用命令")
     return True, None
