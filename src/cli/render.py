@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from typing import Any
 
 import logger
@@ -11,7 +12,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from cli.terminal import is_prompt_active, run_above_prompt
+from cli.terminal import run_above_prompt
 
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
@@ -65,13 +66,21 @@ def print_markdown_panel(text: str, *, title: str = "") -> None:
     console.print(Panel(Markdown(body), title=title or None, border_style="cyan"))
 
 
-def show_model_output(text: str, *, title: str = "模型") -> None:
-    """Rich 渲染模型 Markdown 回复；原文仅写入日志文件。"""
+def show_model_output(text: str, *, title: str = "模型", markdown: bool = True) -> None:
+    """Rich 渲染模型输出；原文仅写入日志文件。纯文本汇总请设 markdown=False 以保留换行。"""
     body = (text or "").strip()
     if not body:
         return
-    console.print(Panel(Markdown(body), title=title, border_style="cyan"))
+    content: str | Markdown = Markdown(body) if markdown else body
+    console.print(Panel(content, title=title, border_style="cyan"))
     logger.info_file_only("[模型]\n%s", body)
+
+
+@contextmanager
+def model_generating_indicator():
+    """模型回复生成中的 spinner 提示。"""
+    with console.status("[dim]模型回复生成中…[/dim]", spinner="dots"):
+        yield
 
 
 def print_phase(title: str) -> None:
@@ -98,16 +107,10 @@ async def consume_stream_markdown(
     不使用 Live（避免 Windows 下光标控制序列乱码）。
     """
     chunks: list[str] = []
-    if is_prompt_active():
-        console.print("[dim]模型回复生成中...[/dim]")
+    with model_generating_indicator():
         async for chunk in stream.stream_text(delta=True):
             if chunk:
                 chunks.append(chunk)
-    else:
-        with console.status("[dim]模型回复生成中…[/dim]", spinner="dots"):
-            async for chunk in stream.stream_text(delta=True):
-                if chunk:
-                    chunks.append(chunk)
     final_text = "".join(chunks)
     if final_text.strip():
         show_model_output(final_text, title=title)

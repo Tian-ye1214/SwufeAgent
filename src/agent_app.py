@@ -367,7 +367,7 @@ class AgentSystem:
         final_summary = await self._orchestrator.execute_all_tasks_parallel(
             user_input, attachments=attachments, turn_id=tid
         )
-        show_model_output(final_summary, title="任务汇总")
+        show_model_output(final_summary, title="任务汇总", markdown=False)
 
         print_phase("第三阶段: 生成最终报告")
 
@@ -427,7 +427,7 @@ class AgentSystem:
                 show_model_output(final_result.output, title="最终报告")
                 return final_result.output
             except Exception:
-                show_model_output(final_summary, title="任务汇总")
+                show_model_output(final_summary, title="任务汇总", markdown=False)
                 return final_summary
 
     async def _execute_task_with_worker(
