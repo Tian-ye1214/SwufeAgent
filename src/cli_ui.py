@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sys
 
+from cli.output import emit_text
 from tools.memory import UserMessage
 
 
 def print_startup_logo() -> None:
-    stdout_encoding = (sys.stdout.encoding or "").lower()
+    stdout_encoding = (getattr(sys.stdout, "encoding", None) or "utf-8").lower()
     unicode_safe = "utf" in stdout_encoding
 
     def color_text(r: int, g: int, b: int, text: str) -> str:
@@ -61,7 +62,7 @@ def print_startup_logo() -> None:
             ):
                 canvas[shadow_row][shadow_col] = (shadow_char, shadow_color)
 
-    print()
+    emit_text("")
     for row in canvas:
         line_text = ""
         for ch, color in row:
@@ -69,15 +70,15 @@ def print_startup_logo() -> None:
                 line_text += ch
             else:
                 line_text += color_text(color[0], color[1], color[2], ch)
-        print(line_text)
+        emit_text(line_text)
 
     if unicode_safe:
         tagline = "❦ ────  红莲极意  ·  RedLotus Agent  ──── ❦"
     else:
         tagline = "<>----  RedLotus Agent  ----<>"
     pad = max(0, (max_width + shadow_offset_col - len(tagline)) // 2)
-    print(" " * pad + color_text(255, 165, 90, tagline))
-    print()
+    emit_text(" " * pad + color_text(255, 165, 90, tagline))
+    emit_text("")
 
 
 def format_user_log_text(message: UserMessage) -> str:

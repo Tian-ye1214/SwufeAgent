@@ -14,10 +14,6 @@ except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     from app_config import get_env, settings
 
-_http_state: tuple[httpx.AsyncClient, str] | None = None
-_HTTP_LOCK = asyncio.Lock()
-
-
 def _require_rag_model(role: str) -> str:
     m = settings().get("RAG_models")
     if not isinstance(m, dict):
@@ -28,33 +24,18 @@ def _require_rag_model(role: str) -> str:
     return name
 
 
-async def _get_http_client() -> httpx.AsyncClient:
-    global _http_state
+def _client_kwargs(timeout: float) -> dict[str, Any]:
     base = get_env("SILICONFLOW_BASE", warn=False).strip().rstrip("/")
-    if _http_state is not None and _http_state[1] == base:
-        return _http_state[0]
-    async with _HTTP_LOCK:
-        if _http_state is not None and _http_state[1] == base:
-            return _http_state[0]
-        if _http_state is not None:
-            await _http_state[0].aclose()
-        client = httpx.AsyncClient(
-            base_url=base,
-            http2=True,
-            timeout=httpx.Timeout(60.0),
-        )
-        _http_state = (client, base)
-    return _http_state[0]
+    return {
+        "base_url": base,
+        "http2": True,
+        "timeout": httpx.Timeout(timeout),
+    }
 
 
 async def close_http_client() -> None:
-    """进程退出时关闭全局 embedding/rerank HTTP 客户端。"""
-    global _http_state
-    async with _HTTP_LOCK:
-        if _http_state is None:
-            return
-        await _http_state[0].aclose()
-        _http_state = None
+    """Compatibility hook; embedding/rerank clients are short-lived per request."""
+    return
 
 
 async def embed_texts(
@@ -68,16 +49,16 @@ async def embed_texts(
     logger.debug("RAG embed: batch_size=%d", len(texts))
     model = _require_rag_model("embedding")
     body = {"model": model, "input": texts}
-    client = await _get_http_client()
-    response = await client.post(
-        "/embeddings",
-        headers={
-            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
+    async with httpx.AsyncClient(**_client_kwargs(timeout)) as client:
+        response = await client.post(
+            "/embeddings",
+            headers={
+                "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=timeout,
+        )
     response.raise_for_status()
     data = response.json()
 
@@ -109,16 +90,16 @@ async def rerank_documents(
     if top_n is not None:
         body["top_n"] = top_n
 
-    client = await _get_http_client()
-    response = await client.post(
-        "/rerank",
-        headers={
-            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
+    async with httpx.AsyncClient(**_client_kwargs(timeout)) as client:
+        response = await client.post(
+            "/rerank",
+            headers={
+                "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=timeout,
+        )
     response.raise_for_status()
     data = response.json()
 

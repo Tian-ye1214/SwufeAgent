@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
-import sys
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -14,6 +13,13 @@ from typing import Any, Callable, Iterator
 from runtime_state import AgentRunPolicy, TRACE_STORE, current_turn_id
 
 _stm_ingest_console_quiet: ContextVar[int] = ContextVar("stm_ingest_console_quiet", default=0)
+_LOG_LEVEL_STYLES = {
+    logging.DEBUG: "dim cyan",
+    logging.INFO: "green",
+    logging.WARNING: "yellow",
+    logging.ERROR: "bold red",
+    logging.CRITICAL: "bold white on red",
+}
 
 
 class _StmIngestConsoleQuietFilter(logging.Filter):
@@ -21,6 +27,19 @@ class _StmIngestConsoleQuietFilter(logging.Filter):
         if _stm_ingest_console_quiet.get() <= 0:
             return True
         return record.levelno >= logging.WARNING
+
+
+class _OutputSinkHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from rich.text import Text
+
+            from cli.output import emit_renderable
+
+            style = _LOG_LEVEL_STYLES.get(record.levelno, "")
+            emit_renderable(Text(self.format(record), style=style))
+        except Exception:
+            self.handleError(record)
 
 
 class LoggerManager:
@@ -88,7 +107,7 @@ class LoggerManager:
         return wrapped
 
     def _build_console_handler(self) -> logging.Handler:
-        handler = logging.StreamHandler(stream=sys.stdout)
+        handler = _OutputSinkHandler()
         handler.setLevel(logging.DEBUG)
         handler.addFilter(_StmIngestConsoleQuietFilter())
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%H:%M:%S")

@@ -69,7 +69,7 @@ class ShortTermMemory:
         self._log_root = log_root
         self._lock = _AsyncThreadLock()
         self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
-        self._pending_threads: list[threading.Thread] = []
+        self._pending_tasks: set[asyncio.Task[None]] = set()
         self._reconcile_on_query = bool(self._cfg["reconcile_on_query"])
 
     def _get_rag(self) -> Any:
@@ -236,7 +236,7 @@ class ShortTermMemory:
                 finally:
                     await rag.close()
 
-    def _ingest_thread_main(
+    async def _ingest_background(
         self,
         messages: list,
         log_key: str,
@@ -244,7 +244,7 @@ class ShortTermMemory:
         session_key: str,
     ) -> None:
         try:
-            asyncio.run(self.ingest_after_turn(messages, log_key, agent, session_key))
+            await self.ingest_after_turn(messages, log_key, agent, session_key)
         except Exception as e:
             logger.warning("STM ingest 后台失败: %s", e)
 
@@ -258,22 +258,30 @@ class ShortTermMemory:
         if not log_key or not messages:
             return
         msgs = list(messages)
-        t = threading.Thread(
-            target=self._ingest_thread_main,
-            args=(msgs, log_key, agent, session_key),
-            daemon=True,
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("STM ingest 后台失败: no running event loop")
+            return
+        task = loop.create_task(
+            self._ingest_background(msgs, log_key, agent, session_key),
             name="stm-ingest",
         )
-        self._pending_threads = [x for x in self._pending_threads if x.is_alive()]
-        self._pending_threads.append(t)
-        t.start()
+        self._pending_tasks = {t for t in self._pending_tasks if not t.done()}
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def drain(self, *, timeout: float = 60.0) -> None:
-        threads = [x for x in self._pending_threads if x.is_alive()]
-        for t in threads:
-            await asyncio.to_thread(t.join, timeout)
-            if t.is_alive():
-                logger.warning("STM ingest 线程未在 %.0fs 内结束，继续 shutdown", timeout)
+        tasks = [t for t in self._pending_tasks if not t.done()]
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("STM ingest task 未在 %.0fs 内结束，继续 shutdown", timeout)
 
     async def close(self) -> None:
         if self._rag is not None:

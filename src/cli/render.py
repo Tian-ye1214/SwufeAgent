@@ -7,10 +7,11 @@ from contextlib import contextmanager
 from typing import Any
 
 import logger
-from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+
+from cli.output import emit_renderable, emit_rule, status_message
 
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
@@ -21,37 +22,49 @@ if _IS_WINDOWS:
             except Exception:
                 pass
 
-console = Console(highlight=False, legacy_windows=_IS_WINDOWS)
+class OutputConsoleProxy:
+    def print(self, *objects: Any, **_: Any) -> None:
+        for obj in objects:
+            emit_renderable(obj)
+
+    def rule(self, title: str = "", **_: Any) -> None:
+        emit_rule(title)
+
+    def status(self, message: str, **_: Any):
+        return status_message(message)
+
+
+console = OutputConsoleProxy()
 
 
 def print_error(message: str) -> None:
-    console.print(Text(f"Error: {message}", style="bold red"))
+    emit_renderable(Text(f"Error: {message}", style="bold red"))
 
 
 def print_warning(message: str) -> None:
-    console.print(Text(f"Warning: {message}", style="yellow"))
+    emit_renderable(Text(f"Warning: {message}", style="yellow"))
 
 
 def print_success(message: str) -> None:
-    console.print(Text(message, style="green"))
+    emit_renderable(Text(message, style="green"))
 
 
 def print_markdown(text: str) -> None:
     body = (text or "").strip()
     if not body:
         return
-    console.print(Markdown(body))
+    emit_renderable(Markdown(body))
 
 
 def print_panel(content: str, *, title: str = "") -> None:
-    console.print(Panel(content, title=title or None))
+    emit_renderable(Panel(content, title=title or None))
 
 
 def print_markdown_panel(text: str, *, title: str = "") -> None:
     body = (text or "").strip()
     if not body:
         return
-    console.print(Panel(Markdown(body), title=title or None, border_style="cyan"))
+    emit_renderable(Panel(Markdown(body), title=title or None, border_style="cyan"))
 
 
 def show_model_output(text: str, *, title: str = "模型", markdown: bool = True) -> None:
@@ -60,19 +73,19 @@ def show_model_output(text: str, *, title: str = "模型", markdown: bool = True
     if not body:
         return
     content: str | Markdown = Markdown(body) if markdown else body
-    console.print(Panel(content, title=title, border_style="cyan"))
+    emit_renderable(Panel(content, title=title, border_style="cyan"))
     logger.info_file_only("[模型]\n%s", body)
 
 
 @contextmanager
 def model_generating_indicator():
     """模型回复生成中的 spinner 提示。"""
-    with console.status("[dim]模型回复生成中…[/dim]", spinner="dots"):
+    with status_message("模型回复生成中..."):
         yield
 
 
 def print_phase(title: str) -> None:
-    console.rule(f"[dim]{title}[/dim]")
+    emit_rule(f"[dim]{title}[/dim]")
     logger.info_file_only(title)
 
 

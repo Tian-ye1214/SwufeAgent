@@ -45,6 +45,8 @@ import time
 import asyncio
 import signal
 import uuid
+import os
+from dataclasses import dataclass
 from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
@@ -59,6 +61,12 @@ from lifecycle import (
     run_agent_stream_with_lifecycle,
     run_agent_with_lifecycle,
 )
+
+
+@dataclass
+class CliSessionState:
+    history: ChatHistory
+    is_first_input: bool = True
 
 
 class AgentSystem:
@@ -131,6 +139,9 @@ class AgentSystem:
     @property
     def session_key(self) -> str | None:
         return self._session_key
+
+    def new_cli_session_state(self) -> CliSessionState:
+        return CliSessionState(history=ChatHistory())
 
     async def _agent_id(self, role: str, suffix: str | None = None) -> str:
         sk = self._require_session_key()
@@ -230,6 +241,9 @@ class AgentSystem:
 
     def set_ask_user_handler(self, handler):
         self._toolkit.set_ask_user_handler(handler)
+
+    async def ask_user(self, question: str) -> str:
+        return await self._toolkit.ask_user(question)
 
     def set_task_directory(self, task_name: str):
         self._toolkit.set_task_directory(task_name)
@@ -586,15 +600,147 @@ class AgentSystem:
         await self._after_coordinator_turn(history)
         return history, output
 
-    async def run_interactive(self, *, stop_event: asyncio.Event | None = None):
-        """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
+    async def prepare_cli_session(self) -> None:
         print_startup_logo()
         print_repl_welcome()
         await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
         self._context_prewarmed = True
 
-        is_first_input = True
-        history = ChatHistory()
+    async def process_cli_line(
+        self,
+        raw_input: str,
+        state: CliSessionState,
+        *,
+        wait_for_turn: bool,
+    ) -> str:
+        raw_input = raw_input.strip()
+        if not raw_input:
+            return "continue"
+
+        history = state.history
+        cmd_lower = raw_input.lower()
+        if cmd_lower in ("/exit", "/quit"):
+            if self._current_turn is not None:
+                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再退出。")
+                return "continue"
+            print_success("再见！")
+            return "break"
+
+        if cmd_lower == "/clear" or "新任务" in raw_input:
+            if self._current_turn is not None:
+                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再执行「新任务」或 /clear。")
+                return "continue"
+            await self.reset_cli_interactive_session(history)
+            state.is_first_input = True
+            return "continue"
+
+        has_any_history = bool(history.messages) or bool(self._manager_history.messages)
+        if has_any_history:
+            usage_lines = []
+            roles_and_histories = [
+                ("manager", "Manager", [self._manager_history]),
+                ("coordinator", "Coordinator", [history]),
+            ]
+            for role, label, histories in roles_and_histories:
+                ctx_cfg = get_context_config(role)
+                cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
+                max_tok = await get_effective_max_context_async(role=role)
+                used_tok = 0
+                for h in histories:
+                    if h.messages:
+                        used_tok += await estimate_history_tokens_async(
+                            h.messages, chars_per_token=cpt, role=role
+                        )
+                usage_lines.append(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
+            print_panel("\n".join(usage_lines), title="上下文占用")
+
+        if raw_input.startswith("/"):
+            if self._current_turn is not None:
+                cmd = raw_input.split()[0].lower()
+                busy_ok = {
+                    "/stop", "/status", "/cancel", "/help", "/trace", "/tasks",
+                    "/pwd", "/config", "/skills",
+                }
+                if cmd not in busy_ok:
+                    print_warning("当前有任务正在执行，此命令暂不可用。请先 /stop 或等待完成。")
+                    return "continue"
+            await self._sync_skills_for_user_turn()
+            _consumed, first_override = await handle_slash_command(
+                raw_input,
+                self._skills_manager,
+                coordinator_history=history,
+                manager_history=self._manager_history,
+                reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
+                    history
+                ),
+                bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
+                    agent, path, meta
+                ),
+                system=self,
+            )
+            if first_override is not None:
+                state.is_first_input = first_override
+            return "continue"
+
+        if raw_input.lower() in ["quit", "exit", "退出"]:
+            if self._current_turn is not None:
+                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再退出。")
+                return "continue"
+            print_success("再见！")
+            return "break"
+
+        if self._current_turn is not None:
+            print_warning("当前有任务正在执行。请等待完成，或输入 /stop 中断。")
+            return "continue"
+
+        file_refs = await asyncio.to_thread(load_file_refs, raw_input)
+        for ref in file_refs:
+            if not ref.ok:
+                print_warning(f"@{ref.path}: {ref.error}")
+            elif ref.truncated:
+                print_success(f"📄 @{ref.path}（已截断，超出字符限制）")
+            else:
+                print_success(f"📄 @{ref.path}")
+
+        augmented = augment_text_with_file_refs(raw_input, file_refs)
+        message = await asyncio.to_thread(user_message_from_cli_input, augmented)
+        if message.attachments:
+            logger.info(f"🖼️ 已识别 {len(message.attachments)} 个多媒体附件")
+
+        if state.is_first_input:
+            task_name = message.text[:30].replace(" ", "_")
+            logger.setup_task_logger(task_name)
+            self._toolkit.set_task_directory(task_name)
+            safe_sk = "".join(
+                c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
+            )[:50] or "task"
+            await self.bind_session(safe_sk)
+            state.is_first_input = False
+
+        turn_task = self._start_user_turn(message, history)
+        if turn_task is None:
+            print_warning("无法启动任务（已有运行中的回合）。")
+            return "continue"
+        if wait_for_turn:
+            try:
+                await turn_task
+            except KeyboardInterrupt:
+                msg = await self.cancel_current_turn()
+                print_warning(msg)
+            except asyncio.CancelledError:
+                pass
+        return "continue"
+
+    async def run_interactive(self, *, stop_event: asyncio.Event | None = None):
+        """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
+        if os.environ.get("REDLOTUS_LEGACY_CLI", "").strip() not in ("1", "true", "TRUE", "yes"):
+            from cli.tui import run_textual_tui
+
+            await run_textual_tui(self, stop_event=stop_event)
+            return
+
+        await self.prepare_cli_session()
+        state = self.new_cli_session_state()
 
         async def on_cli_keyboard_interrupt() -> None:
             if self._current_turn is not None:
@@ -605,126 +751,7 @@ class AgentSystem:
         repl = InteractiveRepl(on_interrupt_during_handler=on_cli_keyboard_interrupt)
 
         async def process_one_line(raw_input: str) -> str:
-            nonlocal history, is_first_input
-            raw_input = raw_input.strip()
-            if not raw_input:
-                return "continue"
-
-            cmd_lower = raw_input.lower()
-            if cmd_lower in ("/exit", "/quit"):
-                if self._current_turn is not None:
-                    print_warning("任务执行中，请按 Ctrl+C 中断后再退出。")
-                    return "continue"
-                print_success("再见！")
-                return "break"
-
-            if cmd_lower == "/clear" or "新任务" in raw_input:
-                if self._current_turn is not None:
-                    print_warning("任务执行中，请按 Ctrl+C 中断后再执行「新任务」或 /clear。")
-                    return "continue"
-                await self.reset_cli_interactive_session(history)
-                is_first_input = True
-                return "continue"
-
-            has_any_history = bool(history.messages) or bool(self._manager_history.messages)
-            if has_any_history:
-                usage_lines = []
-                roles_and_histories = [
-                    ("manager", "Manager", [self._manager_history]),
-                    ("coordinator", "Coordinator", [history]),
-                ]
-                for role, label, histories in roles_and_histories:
-                    ctx_cfg = get_context_config(role)
-                    cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
-                    max_tok = await get_effective_max_context_async(role=role)
-                    used_tok = 0
-                    for h in histories:
-                        if h.messages:
-                            used_tok += await estimate_history_tokens_async(
-                                h.messages, chars_per_token=cpt, role=role
-                            )
-                    usage_lines.append(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
-                print_panel("\n".join(usage_lines), title="上下文占用")
-
-            if raw_input.startswith("/"):
-                if self._current_turn is not None:
-                    cmd = raw_input.split()[0].lower()
-                    busy_ok = {
-                        "/stop", "/status", "/cancel", "/help", "/trace", "/tasks",
-                        "/pwd", "/config", "/skills",
-                    }
-                    if cmd not in busy_ok:
-                        print_warning(
-                            "当前有任务正在执行，此命令暂不可用。请先 /stop 或等待完成。"
-                        )
-                        return "continue"
-                await self._sync_skills_for_user_turn()
-                _consumed, first_override = await handle_slash_command(
-                    raw_input,
-                    self._skills_manager,
-                    coordinator_history=history,
-                    manager_history=self._manager_history,
-                    reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
-                        history
-                    ),
-                    bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
-                        agent, path, meta
-                    ),
-                    system=self,
-                )
-                if first_override is not None:
-                    is_first_input = first_override
-                return "continue"
-
-            if raw_input.lower() in ["quit", "exit", "退出"]:
-                if self._current_turn is not None:
-                    print_warning("任务执行中，请按 Ctrl+C 中断后再退出。")
-                    return "continue"
-                print_success("再见！")
-                return "break"
-
-            if self._current_turn is not None:
-                print_warning(
-                    "当前有任务正在执行。请等待完成，或按 Ctrl+C 中断。"
-                )
-                return "continue"
-
-            file_refs = await asyncio.to_thread(load_file_refs, raw_input)
-            for ref in file_refs:
-                if not ref.ok:
-                    print_warning(f"@{ref.path}: {ref.error}")
-                elif ref.truncated:
-                    print_success(f"📄 @{ref.path}（已截断，超出字符限制）")
-                else:
-                    print_success(f"📄 @{ref.path}")
-
-            augmented = augment_text_with_file_refs(raw_input, file_refs)
-            message = await asyncio.to_thread(user_message_from_cli_input, augmented)
-            if message.attachments:
-                logger.info(f"📎 已识别 {len(message.attachments)} 个多媒体附件")
-
-            if is_first_input:
-                task_name = message.text[:30].replace(" ", "_")
-                logger.setup_task_logger(task_name)
-                self._toolkit.set_task_directory(task_name)
-                safe_sk = "".join(
-                    c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
-                )[:50] or "task"
-                await self.bind_session(safe_sk)
-                is_first_input = False
-
-            turn_task = self._start_user_turn(message, history)
-            if turn_task is None:
-                print_warning("无法启动任务（已有运行中的回合）。")
-                return "continue"
-            try:
-                await turn_task
-            except KeyboardInterrupt:
-                msg = await self.cancel_current_turn()
-                print_warning(msg)
-            except asyncio.CancelledError:
-                pass
-            return "continue"
+            return await self.process_cli_line(raw_input, state, wait_for_turn=True)
 
         try:
             await repl.run(process_one_line, stop_event=stop_event)
