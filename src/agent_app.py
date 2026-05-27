@@ -30,6 +30,7 @@ from cli.repl import InteractiveRepl
 from cli.file_ref import augment_text_with_file_refs, load_file_refs
 from cli.render import (
     consume_stream_markdown,
+    model_generating_indicator,
     print_panel,
     print_phase,
     print_repl_welcome,
@@ -181,14 +182,14 @@ class AgentSystem:
         self._current_turn = None
         return "已请求停止当前任务（本回合未完整写入对话历史）。"
 
-    def _start_user_turn(self, message: UserMessage, history: ChatHistory) -> bool:
+    def _start_user_turn(self, message: UserMessage, history: ChatHistory) -> asyncio.Task[None] | None:
         if self._current_turn is not None:
-            return False
+            return None
         turn_id = uuid.uuid4().hex[:8]
         task = asyncio.create_task(self._run_user_turn(turn_id, message, history))
         self._current_turn = {"turn_id": turn_id, "task": task, "text": (message.text or "")[:200]}
         task.add_done_callback(self._on_turn_task_done)
-        return True
+        return task
 
     async def _run_user_turn(self, turn_id: str, message: UserMessage, history: ChatHistory) -> None:
         try:
@@ -340,16 +341,17 @@ class AgentSystem:
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
         manager_aid = await self._agent_id("manager")
-        result = await run_agent_with_lifecycle(
-            agent=manager_agent,
-            prompt=planning_prompt,
-            agent_id=manager_aid,
-            registry=self._registry,
-            hooks=self._hooks,
-            turn_id=tid,
-            message_history=self._manager_history.messages,
-            usage_limits=get_agent_usage_limits(),
-        )
+        with model_generating_indicator():
+            result = await run_agent_with_lifecycle(
+                agent=manager_agent,
+                prompt=planning_prompt,
+                agent_id=manager_aid,
+                registry=self._registry,
+                hooks=self._hooks,
+                turn_id=tid,
+                message_history=self._manager_history.messages,
+                usage_limits=get_agent_usage_limits(),
+            )
         self._manager_history.update(result)
         self._session_logs.for_agent("manager").save(
             self._manager_history.messages,
@@ -554,36 +556,21 @@ class AgentSystem:
 
         start_time = time.time()
         coord_aid = await self._agent_id("coordinator")
-        output = ""
-        try:
-            output = await run_agent_stream_with_lifecycle(
-                agent=agent,
-                prompt=message.to_prompt(),
-                agent_id=coord_aid,
-                registry=self._registry,
-                hooks=self._hooks,
-                turn_id=turn_id,
-                message_history=history.messages,
-                usage_limits=get_agent_usage_limits(),
-                consumer=lambda s: consume_stream_markdown(
-                    s, history, title="Coordinator"
-                ),
-            )
-        except Exception as e:
-            logger.warning("Coordinator 流式输出回退到普通模式: %s", e)
-            result = await run_agent_with_lifecycle(
-                agent=agent,
-                prompt=message.to_prompt(),
-                agent_id=coord_aid,
-                registry=self._registry,
-                hooks=self._hooks,
-                turn_id=turn_id,
-                message_history=history.messages,
-                usage_limits=get_agent_usage_limits(),
-            )
-            output = result.output
-            show_model_output(output, title="Coordinator")
-            history.update(result)
+        # Coordinator 必须走 agent.run()：run_stream/stream_text 在首个文本输出后
+        # 即结束图执行，不会继续调用 execute_task_with_manager 等工具（pydantic-ai 文档说明）。
+        result = await run_agent_with_lifecycle(
+            agent=agent,
+            prompt=message.to_prompt(),
+            agent_id=coord_aid,
+            registry=self._registry,
+            hooks=self._hooks,
+            turn_id=turn_id,
+            message_history=history.messages,
+            usage_limits=get_agent_usage_limits(),
+        )
+        output = result.output
+        show_model_output(output, title="Coordinator")
+        history.update(result)
         elapsed = time.time() - start_time
 
         logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
@@ -608,7 +595,14 @@ class AgentSystem:
 
         is_first_input = True
         history = ChatHistory()
-        repl = InteractiveRepl()
+
+        async def on_cli_keyboard_interrupt() -> None:
+            if self._current_turn is not None:
+                print_warning(await self.cancel_current_turn())
+                return
+            raise KeyboardInterrupt
+
+        repl = InteractiveRepl(on_interrupt_during_handler=on_cli_keyboard_interrupt)
 
         async def process_one_line(raw_input: str) -> str:
             nonlocal history, is_first_input
@@ -619,14 +613,14 @@ class AgentSystem:
             cmd_lower = raw_input.lower()
             if cmd_lower in ("/exit", "/quit"):
                 if self._current_turn is not None:
-                    print_warning("请先输入 /stop 结束当前任务，再退出。")
+                    print_warning("任务执行中，请按 Ctrl+C 中断后再退出。")
                     return "continue"
                 print_success("再见！")
                 return "break"
 
             if cmd_lower == "/clear" or "新任务" in raw_input:
                 if self._current_turn is not None:
-                    print_warning("请先输入 /stop 结束当前任务，再执行「新任务」或 /clear。")
+                    print_warning("任务执行中，请按 Ctrl+C 中断后再执行「新任务」或 /clear。")
                     return "continue"
                 await self.reset_cli_interactive_session(history)
                 is_first_input = True
@@ -684,15 +678,14 @@ class AgentSystem:
 
             if raw_input.lower() in ["quit", "exit", "退出"]:
                 if self._current_turn is not None:
-                    print_warning("请先输入 /stop 结束当前任务，再退出。")
+                    print_warning("任务执行中，请按 Ctrl+C 中断后再退出。")
                     return "continue"
                 print_success("再见！")
                 return "break"
 
             if self._current_turn is not None:
                 print_warning(
-                    "当前有任务正在执行。请输入 /stop 中断，或等待完成后再输入新内容。"
-                    "（斜杠命令如 /status、/cancel 仍可直接使用。）"
+                    "当前有任务正在执行。请等待完成，或按 Ctrl+C 中断。"
                 )
                 return "continue"
 
@@ -720,8 +713,17 @@ class AgentSystem:
                 await self.bind_session(safe_sk)
                 is_first_input = False
 
-            if not self._start_user_turn(message, history):
+            turn_task = self._start_user_turn(message, history)
+            if turn_task is None:
                 print_warning("无法启动任务（已有运行中的回合）。")
+                return "continue"
+            try:
+                await turn_task
+            except KeyboardInterrupt:
+                msg = await self.cancel_current_turn()
+                print_warning(msg)
+            except asyncio.CancelledError:
+                pass
             return "continue"
 
         try:

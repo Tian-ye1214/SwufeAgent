@@ -12,8 +12,6 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from cli.terminal import run_above_prompt
-
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
     for _s in (sys.stdout, sys.stderr):
@@ -23,17 +21,7 @@ if _IS_WINDOWS:
             except Exception:
                 pass
 
-class PromptAwareConsole(Console):
-    """Rich console that prints above an active prompt_toolkit input area."""
-
-    def print(self, *args: Any, **kwargs: Any) -> None:
-        run_above_prompt(lambda: super(PromptAwareConsole, self).print(*args, **kwargs))
-
-    def rule(self, *args: Any, **kwargs: Any) -> None:
-        run_above_prompt(lambda: super(PromptAwareConsole, self).rule(*args, **kwargs))
-
-
-console = PromptAwareConsole(highlight=False, legacy_windows=_IS_WINDOWS)
+console = Console(highlight=False, legacy_windows=_IS_WINDOWS)
 
 
 def print_error(message: str) -> None:
@@ -91,7 +79,8 @@ def print_phase(title: str) -> None:
 def print_repl_welcome() -> None:
     print_panel(
         "输入 /help 查看斜杠命令；@文件路径 引用文本\n"
-        "新任务 或 /clear 清除上下文 · /exit 或 quit 退出 · /stop 中断当前任务",
+        "新任务 或 /clear 清除上下文 · /exit 或 quit 退出\n"
+        "任务执行中按 Ctrl+C 中断",
         title="RedLotus CLI",
     )
 

@@ -11,10 +11,11 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from cli.completer import AgentCompleter
 from cli.render import print_success, print_warning
-from cli.terminal import register_prompt_app
+
 
 def _history_path() -> Path:
     base = Path.home() / ".redlotus"
@@ -46,11 +47,17 @@ def create_prompt_session() -> PromptSession:
 class InteractiveRepl:
     """TTY 交互循环；非 TTY 回退到标准 input。"""
 
-    def __init__(self, *, prompt: str = "\n📝 请输入您的任务: ") -> None:
+    def __init__(
+        self,
+        *,
+        prompt: str = "\n📝 请输入您的任务: ",
+        on_interrupt_during_handler: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.prompt = prompt
         self._session: PromptSession | None = None
         self._interrupt_hits = 0
         self._last_interrupt_at = 0.0
+        self._on_interrupt_during_handler = on_interrupt_during_handler
 
     def _get_session(self) -> PromptSession:
         if self._session is None:
@@ -74,33 +81,30 @@ class InteractiveRepl:
     async def read_line(self, *, stop_event: asyncio.Event | None = None) -> str | None:
         if sys.stdin.isatty() and sys.stdout.isatty():
             session = self._get_session()
-            loop = asyncio.get_running_loop()
             try:
-                register_prompt_app(session.app, loop)
-                read_coro = session.prompt_async(self.prompt)
-                if stop_event is None:
-                    return (await read_coro).strip()
-                read_task = asyncio.create_task(read_coro)
-                stop_task = asyncio.create_task(stop_event.wait())
-                done, pending = await asyncio.wait(
-                    {read_task, stop_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                    try:
-                        await t
-                    except asyncio.CancelledError:
-                        pass
-                if stop_task in done:
-                    return None
-                return read_task.result().strip()
+                with patch_stdout(raw=True):
+                    read_coro = session.prompt_async(self.prompt)
+                    if stop_event is None:
+                        return (await read_coro).strip()
+                    read_task = asyncio.create_task(read_coro)
+                    stop_task = asyncio.create_task(stop_event.wait())
+                    done, pending = await asyncio.wait(
+                        {read_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                    if stop_task in done:
+                        return None
+                    return read_task.result().strip()
             except EOFError:
                 return None
             except asyncio.CancelledError:
                 return None
-            finally:
-                register_prompt_app(None, None)
         try:
             return (await asyncio.to_thread(input, self.prompt)).strip()
         except EOFError:
@@ -135,6 +139,12 @@ class InteractiveRepl:
                 if action == "break":
                     break
             except KeyboardInterrupt:
+                if self._on_interrupt_during_handler is not None:
+                    try:
+                        await self._on_interrupt_during_handler()
+                        continue
+                    except KeyboardInterrupt:
+                        pass
                 if self._on_keyboard_interrupt():
                     print_success("再见！")
                     break
