@@ -13,7 +13,7 @@ from typing import Any, TypeVar
 
 import logger
 from app_config import settings
-from runtime_state import TRACE_STORE, turn_context
+from runtime_state import TRACE_STORE, agent_context, turn_context
 
 T = TypeVar("T")
 
@@ -422,7 +422,7 @@ async def run_coroutine_with_lifecycle(
             parent=parent or "",
         )
         async def _run_in_turn_context() -> T:
-            with turn_context(turn_id):
+            with turn_context(turn_id), agent_context(agent_id):
                 return await factory()
 
         inner = asyncio.create_task(_run_in_turn_context())
@@ -510,12 +510,14 @@ async def run_agent_with_lifecycle(
     message_history: Any,
     usage_limits: Any,
     parent_invocation_id: str | None = None,
+    event_stream_handler: Callable[[Any, Any], Awaitable[Any]] | None = None,
 ) -> Any:
     async def _factory() -> Any:
         return await agent.run(
             prompt,
             message_history=message_history,
             usage_limits=usage_limits,
+            event_stream_handler=event_stream_handler,
         )
 
     return await run_coroutine_with_lifecycle(

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from path_sandbox import is_under_root, runtime_repo_root
+from path_sandbox import runtime_repo_root
 
-_FILE_REF_PATTERN = re.compile(r"@([^\s]+)")
 _BINARY_SUFFIXES = frozenset(
     {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico",
@@ -40,32 +39,112 @@ class FileRefResult:
     resolved: Path | None = None
 
 
+@dataclass(frozen=True)
+class _ParsedFileRef:
+    path: str
+    locked: bool = False
+
+
+def _parse_file_refs(text: str) -> list[_ParsedFileRef]:
+    text = text or ""
+    refs: list[_ParsedFileRef] = []
+    index = 0
+    length = len(text)
+
+    while index < length:
+        at_index = text.find("@", index)
+        if at_index == -1:
+            break
+        start = at_index + 1
+        if start >= length:
+            break
+
+        marker = text[start]
+        if marker.isspace():
+            index = start + 1
+            continue
+
+        if marker == "{":
+            end = text.find("}", start + 1)
+            if end == -1:
+                index = start + 1
+                continue
+            ref = text[start + 1 : end].strip()
+            if ref:
+                refs.append(_ParsedFileRef(ref, locked=True))
+            index = end + 1
+            continue
+
+        if marker in ("\"", "'"):
+            end = text.find(marker, start + 1)
+            if end == -1:
+                index = start + 1
+                continue
+            ref = text[start + 1 : end].strip()
+            if ref:
+                refs.append(_ParsedFileRef(ref, locked=True))
+            index = end + 1
+            continue
+
+        end = start
+        while end < length and not text[end].isspace():
+            end += 1
+        ref = text[start:end]
+        if ref:
+            refs.append(_ParsedFileRef(ref))
+        index = end
+
+    return refs
+
+
 def extract_file_refs(text: str) -> list[str]:
-    return _FILE_REF_PATTERN.findall(text or "")
-
-
-def _allowed_roots() -> tuple[Path, Path]:
-    return Path.cwd().resolve(), runtime_repo_root().resolve()
-
-
-def _assert_allowed_path(path: Path) -> Path:
-    resolved = path.resolve()
-    for root in _allowed_roots():
-        if is_under_root(resolved, root):
-            return resolved
-    raise ValueError("路径不在当前目录或项目根目录下")
+    return [ref.path for ref in _parse_file_refs(text)]
 
 
 def _resolve_ref_path(ref: str) -> Path:
     p = Path(ref).expanduser()
     if p.is_absolute():
-        return _assert_allowed_path(p)
+        return p.resolve()
     cwd = Path.cwd()
     candidate = (cwd / ref).resolve()
     if candidate.exists():
-        return _assert_allowed_path(candidate)
+        return candidate
     repo = runtime_repo_root()
-    return _assert_allowed_path((repo / ref).resolve())
+    repo_candidate = (repo / ref).resolve()
+    if repo_candidate.exists():
+        return repo_candidate
+    return candidate
+
+
+def _looks_like_inline_text_suffix(suffix: str) -> bool:
+    if not suffix:
+        return False
+    first = suffix[0]
+    if first in ".-_/\\":
+        return False
+    codepoint = ord(first)
+    if (
+        0x4E00 <= codepoint <= 0x9FFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+    ):
+        return True
+    return unicodedata.category(first).startswith("P")
+
+
+def _resolve_existing_ref_prefix(ref: str) -> tuple[str, Path] | None:
+    for end in range(len(ref) - 1, 0, -1):
+        suffix = ref[end:]
+        if not _looks_like_inline_text_suffix(suffix):
+            continue
+        prefix = ref[:end]
+        try:
+            path = _resolve_ref_path(prefix)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path.exists():
+            return prefix, path
+    return None
 
 
 def _read_text_safely(path: Path) -> str:
@@ -83,7 +162,7 @@ def load_file_refs(
     max_chars: int = _DEFAULT_MAX_CHARS,
     total_max_chars: int = _DEFAULT_TOTAL_MAX_CHARS,
 ) -> list[FileRefResult]:
-    refs = extract_file_refs(text)
+    refs = _parse_file_refs(text)
     if not refs:
         return []
 
@@ -91,16 +170,21 @@ def load_file_refs(
     total_used = 0
     seen: set[str] = set()
 
-    for ref in refs:
+    for parsed_ref in refs:
+        ref = parsed_ref.path
         if ref in seen:
             continue
         seen.add(ref)
 
         try:
             path = _resolve_ref_path(ref)
-        except ValueError as e:
+        except (OSError, RuntimeError, ValueError) as e:
             results.append(FileRefResult(path=ref, ok=False, error=str(e)))
             continue
+        if not path.exists() and not parsed_ref.locked:
+            recovered = _resolve_existing_ref_prefix(ref)
+            if recovered is not None:
+                ref, path = recovered
         if not path.exists():
             results.append(FileRefResult(path=ref, ok=False, error="文件不存在"))
             continue

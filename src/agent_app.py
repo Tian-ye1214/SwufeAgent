@@ -28,8 +28,12 @@ from app_config import get_agent_usage_limits, get_context_config, get_model_and
 from cli_commands import handle_slash_command
 from cli.repl import InteractiveRepl
 from cli.file_ref import augment_text_with_file_refs, load_file_refs
+from cli.output import supports_model_stream
 from cli.render import (
+    TextEventStreamHandler,
     consume_stream_markdown,
+    clear_model_stream,
+    finish_model_stream,
     model_generating_indicator,
     print_panel,
     print_phase,
@@ -61,6 +65,12 @@ from lifecycle import (
     run_agent_stream_with_lifecycle,
     run_agent_with_lifecycle,
 )
+
+
+def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
+    if not supports_model_stream():
+        return None
+    return TextEventStreamHandler(title="Coordinator")
 
 
 @dataclass
@@ -139,6 +149,10 @@ class AgentSystem:
     @property
     def session_key(self) -> str | None:
         return self._session_key
+
+    @property
+    def has_current_turn(self) -> bool:
+        return self._current_turn is not None
 
     def new_cli_session_state(self) -> CliSessionState:
         return CliSessionState(history=ChatHistory())
@@ -572,18 +586,27 @@ class AgentSystem:
         coord_aid = await self._agent_id("coordinator")
         # Coordinator 必须走 agent.run()：run_stream/stream_text 在首个文本输出后
         # 即结束图执行，不会继续调用 execute_task_with_manager 等工具（pydantic-ai 文档说明）。
-        result = await run_agent_with_lifecycle(
-            agent=agent,
-            prompt=message.to_prompt(),
-            agent_id=coord_aid,
-            registry=self._registry,
-            hooks=self._hooks,
-            turn_id=turn_id,
-            message_history=history.messages,
-            usage_limits=get_agent_usage_limits(),
-        )
+        stream_handler = _make_coordinator_stream_handler()
+        try:
+            result = await run_agent_with_lifecycle(
+                agent=agent,
+                prompt=message.to_prompt(),
+                agent_id=coord_aid,
+                registry=self._registry,
+                hooks=self._hooks,
+                turn_id=turn_id,
+                message_history=history.messages,
+                usage_limits=get_agent_usage_limits(),
+                event_stream_handler=stream_handler,
+            )
+        except BaseException:
+            clear_model_stream()
+            raise
         output = result.output
-        show_model_output(output, title="Coordinator")
+        if stream_handler is not None:
+            finish_model_stream(output, title="Coordinator")
+        else:
+            show_model_output(output, title="Coordinator")
         history.update(result)
         elapsed = time.time() - start_time
 

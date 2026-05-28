@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from runtime_state import AgentRunPolicy, TRACE_STORE, current_turn_id
+from runtime_state import AgentRunPolicy, TRACE_STORE, current_short_agent_id, current_turn_id
 
 _stm_ingest_console_quiet: ContextVar[int] = ContextVar("stm_ingest_console_quiet", default=0)
 _LOG_LEVEL_STYLES = {
@@ -162,6 +162,9 @@ class LoggerManager:
 
     def _emit_tool_notify(self, tool_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         pieces = [f"🔧 {tool_name}"]
+        agent_id = current_short_agent_id()
+        if agent_id:
+            pieces.append(f"[{agent_id}]")
         if kwargs:
             summary = ", ".join(f"{k}={self._safe_repr(v, 80)}" for k, v in list(kwargs.items())[:5])
             pieces.append(summary)
@@ -198,6 +201,7 @@ class LoggerManager:
             current_turn_id(),
             "tool_call",
             tool_name=tool_name,
+            agent_id=current_short_agent_id(),
             success=success,
             elapsed_ms=int((time.monotonic() - started) * 1000),
             output_chars=len(text or ""),

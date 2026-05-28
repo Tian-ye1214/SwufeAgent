@@ -8,6 +8,7 @@ from typing import Any
 
 from textual.binding import Binding
 from rich.ansi import AnsiDecoder
+from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -17,6 +18,12 @@ from textual.widgets import Footer, Input, RichLog, Static
 from cli.completer import COMMANDS, _iter_file_completions
 from cli.output import OutputSink, set_output_sink
 from app_config import get_agent_roles
+
+READY_LABEL = "就绪"
+WORKING_LABEL = "工作中"
+WORKING_FRAMES = ("", ".", "..", "...")
+STREAM_PREVIEW_MAX_LINES = 10
+STREAM_PREVIEW_MAX_CHARS = 6000
 
 
 class AgentInputSuggester(Suggester):
@@ -70,6 +77,10 @@ class TextualOutputSink(OutputSink):
         self._thread_id = threading.get_ident()
         self._ansi_decoder = AnsiDecoder()
 
+    @property
+    def supports_model_stream(self) -> bool:
+        return True
+
     def _run_ui(self, fn) -> None:
         if threading.get_ident() == self._thread_id:
             fn()
@@ -97,7 +108,16 @@ class TextualOutputSink(OutputSink):
         self._run_ui(lambda: self._app.set_status(message))
 
     def clear_status(self) -> None:
-        self._run_ui(self._app.refresh_status)
+        self._run_ui(self._app.clear_status)
+
+    def begin_model_stream(self, title: str) -> None:
+        self._run_ui(lambda: self._app.begin_model_stream(title))
+
+    def append_model_stream_delta(self, text: str) -> None:
+        self._run_ui(lambda: self._app.append_model_stream_delta(text))
+
+    def clear_model_stream(self) -> None:
+        self._run_ui(self._app.clear_model_stream)
 
 
 class RedLotusTui(App[None]):
@@ -109,6 +129,13 @@ class RedLotusTui(App[None]):
     #output {
         height: 1fr;
         border: round $accent;
+    }
+
+    #stream-preview {
+        display: none;
+        height: 12;
+        max-height: 12;
+        padding: 0 1;
     }
 
     #status {
@@ -140,12 +167,17 @@ class RedLotusTui(App[None]):
         self.state = system.new_cli_session_state()
         self._ask_future: asyncio.Future[str] | None = None
         self._ask_question = ""
-        self._status_message = "就绪"
+        self._active_line_handlers = 0
+        self._status_is_working = False
+        self._working_frame = 0
+        self._model_stream_title = ""
+        self._model_stream_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RichLog(id="output", wrap=True, markup=False, highlight=False)
-            yield Static("就绪", id="status")
+            yield Static("", id="stream-preview")
+            yield Static(READY_LABEL, id="status")
             yield AgentInput(
                 placeholder="📝 请输入您的任务:",
                 id="input",
@@ -170,18 +202,120 @@ class RedLotusTui(App[None]):
         self.exit()
 
     def set_status(self, message: str) -> None:
-        self._status_message = message or "就绪"
+        self._status_is_working = bool(message and message != READY_LABEL)
         self.query_one("#status", Static).update(self._status_text())
+
+    def clear_status(self) -> None:
+        self._status_is_working = False
+        self.refresh_status()
 
     def refresh_status(self) -> None:
         self.query_one("#status", Static).update(self._status_text())
 
-    def _status_text(self) -> str:
+    def _is_working(self) -> bool:
         if self._ask_future is not None and not self._ask_future.done():
-            return f"需要用户回复: {self._ask_question}"
-        if self.system.has_current_turn:
-            return self._status_message if self._status_message != "就绪" else "任务运行中... 输入 /status、/tasks 或 /stop"
-        return self._status_message or "就绪"
+            return True
+        return bool(
+            self._active_line_handlers > 0
+            or self._status_is_working
+            or self.system.has_current_turn
+        )
+
+    def _status_text(self) -> str:
+        if not self._is_working():
+            self._working_frame = 0
+            return READY_LABEL
+        suffix = WORKING_FRAMES[self._working_frame % len(WORKING_FRAMES)]
+        self._working_frame += 1
+        return f"{WORKING_LABEL}{suffix}"
+
+    @staticmethod
+    def _user_input_renderable(value: str) -> Panel:
+        return Panel(
+            Text(value, style="bold white"),
+            title="用户",
+            title_align="left",
+            border_style="bright_blue",
+            padding=(0, 1),
+            expand=False,
+        )
+
+    def _write_user_input(self, value: str) -> None:
+        self.query_one("#output", RichLog).write(
+            self._user_input_renderable(value), scroll_end=True
+        )
+
+    @staticmethod
+    def _user_reply_renderable(value: str) -> Panel:
+        return Panel(
+            Text(value, style="bold white"),
+            title="用户回复",
+            title_align="left",
+            border_style="bright_blue",
+            padding=(0, 1),
+            expand=False,
+        )
+
+    def _write_user_reply(self, value: str) -> None:
+        self.query_one("#output", RichLog).write(
+            self._user_reply_renderable(value), scroll_end=True
+        )
+
+    @staticmethod
+    def _model_stream_renderable(title: str, text: str) -> Panel:
+        return Panel(
+            Text(text or " ", style="white"),
+            title=title,
+            title_align="left",
+            border_style="cyan",
+            padding=(0, 1),
+            expand=False,
+        )
+
+    def _stream_preview(self) -> Static:
+        return self.query_one("#stream-preview", Static)
+
+    @staticmethod
+    def _model_stream_visible_text(text: str) -> str:
+        body = text or ""
+        if len(body) > STREAM_PREVIEW_MAX_CHARS:
+            body = body[-STREAM_PREVIEW_MAX_CHARS :].lstrip("\n")
+        lines = body.splitlines()
+        if len(lines) > STREAM_PREVIEW_MAX_LINES:
+            body = "\n".join(lines[-STREAM_PREVIEW_MAX_LINES:])
+        return body
+
+    def _refresh_model_stream(self) -> None:
+        self._stream_preview().update(
+            self._model_stream_renderable(
+                self._model_stream_title,
+                self._model_stream_visible_text(self._model_stream_text),
+            )
+        )
+
+    def begin_model_stream(self, title: str) -> None:
+        self._model_stream_title = title
+        self._model_stream_text = ""
+        preview = self._stream_preview()
+        preview.display = True
+        self._refresh_model_stream()
+
+    def append_model_stream_delta(self, text: str) -> None:
+        if not text:
+            return
+        self._model_stream_text += text
+        if not self._model_stream_title:
+            self._model_stream_title = "模型正在回复"
+        preview = self._stream_preview()
+        preview.display = True
+        self._refresh_model_stream()
+
+    def clear_model_stream(self) -> None:
+        self._model_stream_title = ""
+        self._model_stream_text = ""
+        preview = self._stream_preview()
+        preview.update("")
+        preview.display = False
 
     async def ask_user(self, question: str) -> str:
         if self._ask_future is not None and not self._ask_future.done():
@@ -211,12 +345,25 @@ class RedLotusTui(App[None]):
         if not value:
             return
         if self._ask_future is not None and not self._ask_future.done():
+            self._write_user_reply(value)
             self._ask_future.set_result(value)
             return
+        if self._should_echo_as_user_input(value):
+            self._write_user_input(value)
         asyncio.create_task(self._handle_line(value))
 
+    def _should_echo_as_user_input(self, value: str) -> bool:
+        if self.system.has_current_turn:
+            return False
+        if value.startswith("/"):
+            return False
+        if value.lower() in ("quit", "exit", "退出"):
+            return False
+        return True
+
     async def _handle_line(self, value: str) -> None:
-        self.set_status("处理中...")
+        self._active_line_handlers += 1
+        self.refresh_status()
         try:
             action = await self.system.process_cli_line(
                 value, self.state, wait_for_turn=False
@@ -224,6 +371,7 @@ class RedLotusTui(App[None]):
             if action == "break":
                 self.exit()
         finally:
+            self._active_line_handlers = max(0, self._active_line_handlers - 1)
             self.refresh_status()
 
     async def action_stop_or_quit(self) -> None:

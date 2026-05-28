@@ -8,6 +8,7 @@ from typing import Any, Iterator
 
 
 _CURRENT_TURN_ID: ContextVar[str | None] = ContextVar("agent_turn_id", default=None)
+_CURRENT_AGENT_ID: ContextVar[str | None] = ContextVar("agent_id", default=None)
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,23 @@ def current_turn_id() -> str | None:
     return _CURRENT_TURN_ID.get()
 
 
+def current_agent_id() -> str | None:
+    return _CURRENT_AGENT_ID.get()
+
+
+def short_agent_id(agent_id: str | None) -> str:
+    if not agent_id:
+        return ""
+    parts = agent_id.split(":")
+    if len(parts) >= 2:
+        return ":".join(parts[1:])
+    return agent_id
+
+
+def current_short_agent_id() -> str:
+    return short_agent_id(current_agent_id())
+
+
 @contextmanager
 def turn_context(turn_id: str | None) -> Iterator[None]:
     token = _CURRENT_TURN_ID.set(turn_id)
@@ -58,6 +76,15 @@ def turn_context(turn_id: str | None) -> Iterator[None]:
         yield
     finally:
         _CURRENT_TURN_ID.reset(token)
+
+
+@contextmanager
+def agent_context(agent_id: str | None) -> Iterator[None]:
+    token = _CURRENT_AGENT_ID.set(agent_id)
+    try:
+        yield
+    finally:
+        _CURRENT_AGENT_ID.reset(token)
 
 
 class TurnTraceStore:
@@ -88,8 +115,13 @@ class TurnTraceStore:
             kind = event.get("kind", "event")
             if kind == "tool_call":
                 status = "ok" if event.get("success") else "failed"
+                agent_detail = (
+                    f"agent_id={event.get('agent_id')} "
+                    if event.get("agent_id")
+                    else ""
+                )
                 detail = (
-                    f"tool={event.get('tool_name')} status={status} "
+                    f"{agent_detail}tool={event.get('tool_name')} status={status} "
                     f"elapsed_ms={event.get('elapsed_ms', 0)} "
                     f"output_chars={event.get('output_chars', 0)}"
                 )

@@ -11,7 +11,14 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from cli.output import emit_renderable, emit_rule, status_message
+from cli.output import (
+    append_model_stream_delta,
+    begin_model_stream,
+    clear_model_stream,
+    emit_renderable,
+    emit_rule,
+    status_message,
+)
 
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
@@ -75,6 +82,52 @@ def show_model_output(text: str, *, title: str = "模型", markdown: bool = True
     content: str | Markdown = Markdown(body) if markdown else body
     emit_renderable(Panel(content, title=title, border_style="cyan"))
     logger.info_file_only("[模型]\n%s", body)
+
+
+def finish_model_stream(text: str, *, title: str = "模型", markdown: bool = True) -> None:
+    clear_model_stream()
+    show_model_output(text, title=title, markdown=markdown)
+
+
+def _text_from_stream_event(event: Any) -> str:
+    event_kind = getattr(event, "event_kind", "")
+    if event_kind == "part_start":
+        part = getattr(event, "part", None)
+        if getattr(part, "part_kind", None) == "text":
+            return getattr(part, "content", "") or ""
+    if event_kind == "part_delta":
+        delta = getattr(event, "delta", None)
+        if getattr(delta, "part_delta_kind", None) == "text":
+            return getattr(delta, "content_delta", "") or ""
+    return ""
+
+
+class TextEventStreamHandler:
+    def __init__(self, *, title: str) -> None:
+        self.title = title
+        self._chunks: list[str] = []
+        self._started = False
+
+    @property
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+    async def __call__(self, _run_ctx: Any, event_stream: Any) -> None:
+        try:
+            async for event in event_stream:
+                text = _text_from_stream_event(event)
+                if not text:
+                    continue
+                if not self._started:
+                    begin_model_stream(f"{self.title} 正在回复")
+                    self._started = True
+                self._chunks.append(text)
+                append_model_stream_delta(text)
+        except BaseException:
+            if self._started:
+                clear_model_stream()
+                self._started = False
+            raise
 
 
 @contextmanager
