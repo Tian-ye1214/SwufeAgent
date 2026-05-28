@@ -1,8 +1,7 @@
-"""Textual-based CLI pilot UI."""
-
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
 from typing import Any
 
@@ -30,10 +29,8 @@ class AgentInputSuggester(Suggester):
     async def get_suggestion(self, value: str) -> str | None:
         if not value:
             return None
-
         if value.startswith("/") and " " not in value:
             return next((cmd for cmd in COMMANDS if cmd.startswith(value) and cmd != value), None)
-
         if value.startswith("/agent "):
             parts = value.split()
             prefix = parts[-1] if len(parts) > 1 else ""
@@ -42,12 +39,10 @@ class AgentInputSuggester(Suggester):
                     if role.startswith(prefix) and role != prefix:
                         return value[: -len(prefix)] + role if prefix else value + role
             return None
-
         for command in ("/cd ", "/load "):
             if value.startswith(command):
                 fragment = value[len(command) :]
                 return _complete_path_value(value, fragment)
-
         at_index = value.rfind("@")
         if at_index != -1:
             fragment = value[at_index + 1 :]
@@ -96,7 +91,6 @@ class TextualOutputSink(OutputSink):
             def _write_parts() -> None:
                 for part in parts:
                     self._log.write(part, scroll_end=True)
-
             self._run_ui(_write_parts)
             return
         self._run_ui(lambda: self._log.write(renderable, scroll_end=True))
@@ -122,37 +116,12 @@ class TextualOutputSink(OutputSink):
 
 class RedLotusTui(App[None]):
     CSS = """
-    Screen {
-        layout: vertical;
-    }
-
-    #output {
-        height: 1fr;
-        border: round $accent;
-    }
-
-    #stream-preview {
-        display: none;
-        height: 12;
-        max-height: 12;
-        padding: 0 1;
-    }
-
-    #status {
-        height: 1;
-        padding: 0 1;
-        background: $surface;
-        color: $text-muted;
-    }
-
-    #input {
-        height: 3;
-        border: round $primary;
-    }
-
-    #input.ask {
-        border: thick $warning;
-    }
+    Screen { layout: vertical; }
+    #output { height: 1fr; border: round $accent; }
+    #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
+    #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
+    #input { height: 3; border: round $primary; }
+    #input.ask { border: thick $warning; }
     """
 
     BINDINGS = [
@@ -189,12 +158,51 @@ class RedLotusTui(App[None]):
         log = self.query_one("#output", RichLog)
         status = self.query_one("#status", Static)
         set_output_sink(TextualOutputSink(self, log, status))
-        self.system.set_ask_user_handler(self.ask_user)
+        self.system.set_ask_user_handler(self._make_ask_user_bridge())
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
         await self.system.prepare_cli_session()
         if self.stop_event is not None:
             asyncio.create_task(self._watch_stop_event())
+
+    def _make_ask_user_bridge(self):
+        _ASK_TIMEOUT = 60  # 用户回复超时（秒）
+
+        def ask_user_bridge(question: str) -> str:
+            result_queue: queue.Queue[str | Exception] = queue.Queue()
+
+            def _schedule_ask() -> None:
+                """在 Textual 事件循环线程中执行。"""
+                async def _do_ask() -> None:
+                    try:
+                        answer = await self.ask_user(question)
+                        result_queue.put(answer)
+                    except asyncio.CancelledError:
+                        result_queue.put(
+                            RuntimeError("ask_user cancelled during TUI shutdown")
+                        )
+                    except Exception as e:
+                        result_queue.put(e)
+
+                asyncio.create_task(_do_ask())
+
+            try:
+                self.call_from_thread(_schedule_ask)
+            except RuntimeError:
+                raise RuntimeError("Textual app is no longer running, cannot ask user")
+
+            try:
+                result = result_queue.get(timeout=_ASK_TIMEOUT)
+            except queue.Empty:
+                raise RuntimeError(
+                    f"ask_user timed out after {_ASK_TIMEOUT}s (no reply from TUI)"
+                )
+
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        return ask_user_bridge
 
     async def _watch_stop_event(self) -> None:
         assert self.stop_event is not None
@@ -232,44 +240,35 @@ class RedLotusTui(App[None]):
     @staticmethod
     def _user_input_renderable(value: str) -> Panel:
         return Panel(
-            Text(value, style="bold white"),
-            title="用户",
-            title_align="left",
-            border_style="bright_blue",
-            padding=(0, 1),
-            expand=False,
+            Text(value, style="bold white"), title="用户",
+            title_align="left", border_style="bright_blue",
+            padding=(0, 1), expand=False,
         )
 
     def _write_user_input(self, value: str) -> None:
         self.query_one("#output", RichLog).write(
-            self._user_input_renderable(value), scroll_end=True
+            self._user_input_renderable(value), scroll_end=True,
         )
 
     @staticmethod
     def _user_reply_renderable(value: str) -> Panel:
         return Panel(
-            Text(value, style="bold white"),
-            title="用户回复",
-            title_align="left",
-            border_style="bright_blue",
-            padding=(0, 1),
-            expand=False,
+            Text(value, style="bold white"), title="用户回复",
+            title_align="left", border_style="bright_blue",
+            padding=(0, 1), expand=False,
         )
 
     def _write_user_reply(self, value: str) -> None:
         self.query_one("#output", RichLog).write(
-            self._user_reply_renderable(value), scroll_end=True
+            self._user_reply_renderable(value), scroll_end=True,
         )
 
     @staticmethod
     def _model_stream_renderable(title: str, text: str) -> Panel:
         return Panel(
-            Text(text or " ", style="white"),
-            title=title,
-            title_align="left",
-            border_style="cyan",
-            padding=(0, 1),
-            expand=False,
+            Text(text or " ", style="white"), title=title,
+            title_align="left", border_style="cyan",
+            padding=(0, 1), expand=False,
         )
 
     def _stream_preview(self) -> Static:
@@ -318,6 +317,7 @@ class RedLotusTui(App[None]):
         preview.display = False
 
     async def ask_user(self, question: str) -> str:
+        """在 Textual 事件循环中弹出用户提问界面（内部方法）。"""
         if self._ask_future is not None and not self._ask_future.done():
             return "(已有用户提问等待回复)"
         self._ask_question = question.strip()
@@ -365,9 +365,7 @@ class RedLotusTui(App[None]):
         self._active_line_handlers += 1
         self.refresh_status()
         try:
-            action = await self.system.process_cli_line(
-                value, self.state, wait_for_turn=False
-            )
+            action = await self.system.process_cli_line(value, self.state, wait_for_turn=False)
             if action == "break":
                 self.exit()
         finally:
@@ -378,7 +376,6 @@ class RedLotusTui(App[None]):
         if self.system.has_current_turn:
             msg = await self.system.cancel_current_turn()
             from cli.render import print_warning
-
             print_warning(msg)
         else:
             self.exit()

@@ -8,8 +8,6 @@ import logger
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
 
-
-
 class PlaywrightBrowserSession:
     """持久 Chromium 会话；内部仅在单后台线程上触碰 Playwright 对象。"""
 
@@ -31,6 +29,7 @@ class PlaywrightBrowserSession:
             return self._executor.submit(fn).result(timeout=timeout)
 
     def close(self) -> None:
+        """关闭浏览器（不停止线程池）。"""
         if self._stopped:
             return
         try:
@@ -42,8 +41,8 @@ class PlaywrightBrowserSession:
         """关闭浏览器并停止后台线程池（进程退出时调用）。"""
         if self._stopped:
             return
-        self._stopped = True
         self.close()
+        self._stopped = True
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _close_impl(self) -> None:
@@ -58,13 +57,17 @@ class PlaywrightBrowserSession:
                     closer(obj)
                 except Exception as e:
                     logger.warning(f"[browser] 关闭 {attr} 时: {e}")
-            setattr(self, attr, None)
+
         if self._pw is not None:
             try:
                 self._pw.stop()
             except Exception as e:
                 logger.warning(f"[browser] stop playwright: {e}")
-            self._pw = None
+
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._pw = None
         self._headless = None
 
     def _ensure_started_impl(self, headless: bool) -> str | None:
@@ -88,12 +91,7 @@ class PlaywrightBrowserSession:
             self._close_impl()
             return f"启动浏览器失败: {type(e).__name__}: {e}"
 
-    def navigate(
-        self,
-        url: str,
-        headless: bool,
-        wait_until: str = "domcontentloaded",
-    ) -> str:
+    def navigate(self, url: str, headless: bool, wait_until: str = "domcontentloaded") -> str:
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
@@ -111,7 +109,6 @@ class PlaywrightBrowserSession:
                 return msg
             except Exception as e:
                 return f"导航失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def get_content(self, headless: bool) -> str:
@@ -121,16 +118,13 @@ class PlaywrightBrowserSession:
                 return err
             assert self._page is not None
             try:
-                text = self._page.evaluate(
-                    """() => document.body ? document.body.innerText : ''"""
-                )
+                text = self._page.evaluate("""() => document.body ? document.body.innerText : ''""")
                 if not isinstance(text, str):
                     text = str(text)
                 text = text.strip()
                 return f"URL: {self._page.url}\n---\n{text or '(无文本内容)'}"
             except Exception as e:
                 return f"读取页面文本失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def screenshot(self, headless: bool, filename: str, full_page: bool = False) -> str:
@@ -144,7 +138,6 @@ class PlaywrightBrowserSession:
                 return f"截图已保存: {filename}"
             except Exception as e:
                 return f"截图失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def click(self, headless: bool, selector: str) -> str:
@@ -158,7 +151,6 @@ class PlaywrightBrowserSession:
                 return f"已点击: {selector}"
             except Exception as e:
                 return f"点击失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def fill(self, headless: bool, selector: str, text: str) -> str:
@@ -172,7 +164,6 @@ class PlaywrightBrowserSession:
                 return f"已填入 {selector}"
             except Exception as e:
                 return f"填充失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def press(self, headless: bool, key: str) -> str:
@@ -186,7 +177,6 @@ class PlaywrightBrowserSession:
                 return f"已按键: {key}"
             except Exception as e:
                 return f"按键失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def wait_for_selector(self, headless: bool, selector: str, timeout_ms: int = 30_000) -> str:
@@ -200,7 +190,6 @@ class PlaywrightBrowserSession:
                 return f"已出现元素: {selector}"
             except Exception as e:
                 return f"等待元素超时或失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
 
     def run_javascript(self, headless: bool, expression: str) -> str:
@@ -214,5 +203,4 @@ class PlaywrightBrowserSession:
                 return f"结果: {repr(result)}"
             except Exception as e:
                 return f"执行脚本失败: {type(e).__name__}: {e}"
-
         return self._run(_work)
