@@ -139,6 +139,7 @@ class BotBase:
 
     async def _reset_session(self, session_id: str) -> None:
         self._bump_generation(session_id)
+        t = self._consumer_tasks.pop(session_id, None)
         agent_system = self._agent_systems.get(session_id)
         if agent_system is not None:
             await agent_system.end_session_agents(session_id)
@@ -154,9 +155,10 @@ class BotBase:
         q = self._session_queues.get(session_id)
         if q is not None:
             self._discard_queue(q)
-        t = self._consumer_tasks.pop(session_id, None)
         if t is not None and not t.done():
             t.cancel()
+            if t is not asyncio.current_task():
+                await asyncio.gather(t, return_exceptions=True)
         logger.info(f"[{self.platform_tag}] 会话 {session_id} 已重置")
 
     def _merge_turns(self, batch: list[QueuedTurn]) -> QueuedTurn:
@@ -273,36 +275,37 @@ class BotBase:
     ) -> str:
         agent_system = self._agent_for_session(session_id)
         run_gen = self._current_generation(session_id)
-        self._agent_ctx.set((session_id, run_gen, send_reply, loop))
-        history = self._sessions.setdefault(session_id, ChatHistory())
-        logger.setup_session_logger(session_id)
-        if not self._is_first.get(session_id, False):
-            agent_system.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
-            self._is_first[session_id] = True
-
-        logger.set_user_notify_callback(
-            partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
-        )
-        await agent_system.bind_session(session_id)
-        turn_id = uuid.uuid4().hex[:8]
+        token = self._agent_ctx.set((session_id, run_gen, send_reply, loop))
         try:
-            _, output = await agent_system.run_agent_system(
-                message,
-                history,
-                conversation_log_hint=session_id,
-                conversation_log_extra={
-                    "session_id": session_id,
-                    "platform": self.platform_tag,
-                    "turn_id": turn_id,
-                },
-                turn_id=turn_id,
-            )
-        except Exception as e:
-            logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
-            output = f"抱歉，处理您的请求时出现了错误：{e}"
+            with logger.session_log_context(session_id):
+                history = self._sessions.setdefault(session_id, ChatHistory())
+                if not self._is_first.get(session_id, False):
+                    agent_system.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
+                    self._is_first[session_id] = True
+
+                logger.set_user_notify_callback(
+                    partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
+                )
+                await agent_system.bind_session(session_id)
+                turn_id = uuid.uuid4().hex[:8]
+                try:
+                    _, output = await agent_system.run_agent_system(
+                        message,
+                        history,
+                        conversation_log_hint=session_id,
+                        conversation_log_extra={
+                            "session_id": session_id,
+                            "platform": self.platform_tag,
+                            "turn_id": turn_id,
+                        },
+                        turn_id=turn_id,
+                    )
+                except Exception as e:
+                    logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
+                    output = f"抱歉，处理您的请求时出现了错误：{e}"
         finally:
             logger.set_user_notify_callback(None)
-            self._agent_ctx.set(None)
+            self._agent_ctx.reset(token)
         return output
 
     async def _ask_user(self, question: str, timeout: int | None = None) -> str | None:
@@ -314,6 +317,11 @@ class BotBase:
             ).strip()
         session_id, run_gen, send_func, loop = ctx
         if run_gen != self._current_generation(session_id):
+            return None
+        pending = self._pending_questions.get(session_id)
+        pending_fut = pending.get("future") if pending else None
+        if pending_fut is not None and not pending_fut.done():
+            logger.warning(f"[{self.platform_tag} ask_user] {session_id} already has a pending question")
             return None
         answer_fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_questions[session_id] = {"future": answer_fut}
@@ -401,6 +409,14 @@ class BotBase:
                 pf.cancel()
         for ag in agents:
             await ag.shutdown()
+        consumer_tasks = [
+            t for t in list(self._consumer_tasks.values())
+            if t and not t.done() and t is not asyncio.current_task()
+        ]
+        for t in consumer_tasks:
+            t.cancel()
+        if consumer_tasks:
+            await asyncio.gather(*consumer_tasks, return_exceptions=True)
         for attr in (
             self._pending_questions,
             self._sessions,
@@ -409,9 +425,6 @@ class BotBase:
             self._agent_systems,
         ):
             attr.clear()
-        for t in list(self._consumer_tasks.values()):
-            if t and not t.done():
-                t.cancel()
         self._consumer_tasks.clear()
         self._session_queues.clear()
         self._session_generation.clear()
@@ -421,13 +434,13 @@ class BotBase:
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.release_all_resources_async(), loop
+                raise RuntimeError(
+                    "release_all_resources() cannot run inside an active event loop; "
+                    "use release_all_resources_async()"
                 )
-                fut.result(timeout=180)
-                return
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            if "release_all_resources()" in str(e):
+                raise
         asyncio.run(self.release_all_resources_async())
 
     def clean_text(self, raw: str) -> str:

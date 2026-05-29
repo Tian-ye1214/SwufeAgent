@@ -13,6 +13,8 @@ from app_config import settings
 from persist_utils import atomic_write_json
 import logger
 
+_PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
+
 
 def _safe_segment(s: str, max_len: int = 80) -> str:
     s = (s or "").strip().replace("\n", " ")
@@ -31,6 +33,19 @@ def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any
     meta: dict[str, Any] = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     messages = ModelMessagesTypeAdapter.validate_python(raw)
     return messages, meta
+
+
+async def drain_pending_saves(timeout: float = 10.0) -> None:
+    tasks = [t for t in list(_PENDING_SAVE_TASKS) if not t.done()]
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("conversation_log drain timed out after %.1fs", timeout)
 
 
 class ConversationLog:
@@ -77,7 +92,9 @@ class ConversationLog:
                 logger.error("conversation_log 写入失败: %s", e)
 
         try:
-            asyncio.get_running_loop().create_task(_job())
+            task = asyncio.get_running_loop().create_task(_job())
+            _PENDING_SAVE_TASKS.add(task)
+            task.add_done_callback(_PENDING_SAVE_TASKS.discard)
         except RuntimeError:
             pass
 

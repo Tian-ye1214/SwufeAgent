@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import sys
 from typing import Any, Protocol
 
 from rich.console import Console
 from rich.text import Text
+
+
+@dataclass(frozen=True)
+class ContextUsageItem:
+    role_label: str
+    used_tokens: int
+    max_tokens: int
+    percent: float
 
 
 class OutputSink(Protocol):
@@ -25,6 +34,12 @@ class OutputSink(Protocol):
         ...
 
     def clear_status(self) -> None:
+        ...
+
+    def set_context_usage(self, items: list[ContextUsageItem]) -> None:
+        ...
+
+    def clear_context_usage(self) -> None:
         ...
 
     def begin_model_stream(self, title: str) -> None:
@@ -55,6 +70,12 @@ class LegacyOutputSink:
         self.console.print(Text(message, style="dim"))
 
     def clear_status(self) -> None:
+        return
+
+    def set_context_usage(self, items: list[ContextUsageItem]) -> None:
+        return
+
+    def clear_context_usage(self) -> None:
         return
 
     def begin_model_stream(self, title: str) -> None:
@@ -105,6 +126,14 @@ def set_status(message: str) -> None:
 
 def clear_status() -> None:
     _sink.clear_status()
+
+
+def set_context_usage(items: list[ContextUsageItem]) -> None:
+    _sink.set_context_usage(items)
+
+
+def clear_context_usage() -> None:
+    _sink.clear_context_usage()
 
 
 def begin_model_stream(title: str) -> None:

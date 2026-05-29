@@ -43,6 +43,7 @@ class LongTermMemory:
     _TARGETS = {"soul": "SOUL.md", "user": "USER.md"}
     _MD_H1_SOUL = re.compile(r"^#\s*SOUL\s*$", re.IGNORECASE)
     _MD_H1_USER = re.compile(r"^#\s*USER\s*$", re.IGNORECASE)
+    _GLOBAL_WRITE_LOCK = asyncio.Lock()
 
     def __init__(self):
         self._guidance_text: str = ""
@@ -203,7 +204,7 @@ class LongTermMemory:
     async def _apply_consolidation_parsed(self, parsed: dict[str, str | None]) -> bool:
         """以模型给出的整篇正文**替换**对应 SOUL/USER；无更新则返回 False。"""
         changed = False
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             for key in ("soul", "user"):
                 val = parsed.get(key)
@@ -476,7 +477,7 @@ class LongTermMemory:
         if err:
             return f"安全检查拒绝：{err}"
 
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             body = (self._get_body(target) or "").strip()
             if content in body:
@@ -509,7 +510,7 @@ class LongTermMemory:
         if not content:
             return "错误：要删除的片段不能为空。"
 
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             body = self._get_body(target)
             if content not in body:

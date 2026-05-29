@@ -15,11 +15,10 @@ from tools.memory import (
     user_message_from_text,
 )
 
-from tools.conversation_log import SessionConversationLogs
+from tools.conversation_log import SessionConversationLogs, drain_pending_saves
 from ModelGateway.BasicFunction import create_agent
 from ModelGateway.ModelChecker import (
     estimate_history_tokens_async,
-    format_context_usage_line,
     get_effective_max_context_async,
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
@@ -28,14 +27,18 @@ from app_config import get_agent_usage_limits, get_context_config, get_model_and
 from cli_commands import handle_slash_command
 from cli.repl import InteractiveRepl
 from cli.file_ref import augment_text_with_file_refs, load_file_refs
-from cli.output import supports_model_stream
+from cli.output import (
+    ContextUsageItem,
+    clear_context_usage,
+    set_context_usage,
+    supports_model_stream,
+)
 from cli.render import (
     TextEventStreamHandler,
     consume_stream_markdown,
     clear_model_stream,
     finish_model_stream,
     model_generating_indicator,
-    print_panel,
     print_phase,
     print_repl_welcome,
     print_success,
@@ -77,6 +80,12 @@ def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
 class CliSessionState:
     history: ChatHistory
     is_first_input: bool = True
+
+
+@dataclass
+class QueuedCliInput:
+    raw_input: str
+    state: CliSessionState
 
 
 class AgentSystem:
@@ -121,6 +130,9 @@ class AgentSystem:
         self._context_prewarmed = False
         self._memory_injection_snapshot: str | None = None
         self._current_turn: dict[str, Any] | None = None
+        self._queued_cli_inputs: list[QueuedCliInput] = []
+        self._cli_queue_drain_task: asyncio.Task | None = None
+        self._cli_queue_draining = False
         self._cli_turn_id: str | None = None
         self._session_key: str | None = None
 
@@ -154,8 +166,43 @@ class AgentSystem:
     def has_current_turn(self) -> bool:
         return self._current_turn is not None
 
+    @property
+    def queued_cli_input_count(self) -> int:
+        return len(self._queued_cli_inputs)
+
+    @property
+    def has_queued_cli_input(self) -> bool:
+        return bool(self._queued_cli_inputs)
+
     def new_cli_session_state(self) -> CliSessionState:
         return CliSessionState(history=ChatHistory())
+
+    async def _publish_context_usage(self, history: ChatHistory) -> None:
+        has_any_history = bool(history.messages) or bool(self._manager_history.messages)
+        if not has_any_history:
+            clear_context_usage()
+            return
+
+        items: list[ContextUsageItem] = []
+        roles_and_histories = [
+            ("manager", "Manager", [self._manager_history]),
+            ("coordinator", "Coordinator", [history]),
+        ]
+        for role, label, histories in roles_and_histories:
+            ctx_cfg = get_context_config(role)
+            cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
+            max_tok = int(await get_effective_max_context_async(role=role))
+            used_tok = 0
+            for h in histories:
+                if h.messages:
+                    used_tok += int(
+                        await estimate_history_tokens_async(
+                            h.messages, chars_per_token=cpt, role=role
+                        )
+                    )
+            percent = 0.0 if max_tok <= 0 else min(100.0, used_tok * 100.0 / max_tok)
+            items.append(ContextUsageItem(label, used_tok, max_tok, percent))
+        set_context_usage(items)
 
     async def _agent_id(self, role: str, suffix: str | None = None) -> str:
         sk = self._require_session_key()
@@ -177,6 +224,7 @@ class AgentSystem:
         if pending:
             logger.info("[lifecycle] draining %s background task(s)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
+        await drain_pending_saves()
         await self._short_term_memory.drain()
         await self._short_term_memory.close()
         await close_http_client()
@@ -187,6 +235,51 @@ class AgentSystem:
         ct = self._current_turn
         if ct is not None and ct.get("task") is done_task:
             self._current_turn = None
+        self._schedule_cli_queue_drain()
+
+    def _schedule_cli_queue_drain(self) -> None:
+        if self._current_turn is not None or not self._queued_cli_inputs:
+            return
+        if self._cli_queue_drain_task is not None and not self._cli_queue_drain_task.done():
+            return
+        self._cli_queue_drain_task = asyncio.create_task(self._drain_cli_input_queue())
+
+    def _queue_cli_input(self, raw_input: str, state: CliSessionState) -> None:
+        self._queued_cli_inputs.append(QueuedCliInput(raw_input=raw_input, state=state))
+        print_success(
+            f"已加入输入队列（{len(self._queued_cli_inputs)} 条），当前回复结束后会自动继续。"
+        )
+
+    @staticmethod
+    def _merge_queued_cli_inputs(raw_inputs: list[str]) -> str:
+        if len(raw_inputs) == 1:
+            return raw_inputs[0]
+        lines = [
+            "User sent multiple inputs while the previous response was running. "
+            "Process them in order as one request:",
+            "",
+        ]
+        lines.extend(f"{i}. {text}" for i, text in enumerate(raw_inputs, 1))
+        return "\n".join(lines)
+
+    async def _drain_cli_input_queue(self) -> None:
+        if self._cli_queue_draining or self._current_turn is not None:
+            return
+        if not self._queued_cli_inputs:
+            return
+        self._cli_queue_draining = True
+        try:
+            batch = list(self._queued_cli_inputs)
+            self._queued_cli_inputs.clear()
+            raw_input = self._merge_queued_cli_inputs([item.raw_input for item in batch])
+            print_success(f"正在处理队列中的 {len(batch)} 条输入。")
+            await self._start_cli_user_turn_from_raw_input(
+                raw_input,
+                batch[0].state,
+                wait_for_turn=False,
+            )
+        finally:
+            self._cli_queue_draining = False
 
     async def cancel_current_turn(self) -> str:
         ct = self._current_turn
@@ -278,6 +371,7 @@ class AgentSystem:
         self._session_logs.reset()
         self._memory_injection_snapshot = None
         history.reset()
+        clear_context_usage()
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
         """每轮 Coordinator 结束后：后台长期记忆合并与短期记忆向量入库。"""
@@ -629,6 +723,58 @@ class AgentSystem:
         await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
         self._context_prewarmed = True
 
+    async def _start_cli_user_turn_from_raw_input(
+        self,
+        raw_input: str,
+        state: CliSessionState,
+        *,
+        wait_for_turn: bool,
+    ) -> str:
+        history = state.history
+        await self._publish_context_usage(history)
+
+        if self._current_turn is not None:
+            self._queue_cli_input(raw_input, state)
+            return "continue"
+
+        file_refs = await asyncio.to_thread(load_file_refs, raw_input)
+        for ref in file_refs:
+            if not ref.ok:
+                print_warning(f"@{ref.path}: {ref.error}")
+            elif ref.truncated:
+                print_success(f"@{ref.path} (truncated)")
+            else:
+                print_success(f"@{ref.path}")
+
+        augmented = augment_text_with_file_refs(raw_input, file_refs)
+        message = await asyncio.to_thread(user_message_from_cli_input, augmented)
+        if message.attachments:
+            logger.info("Detected %s media attachment(s)", len(message.attachments))
+
+        if state.is_first_input:
+            task_name = message.text[:30].replace(" ", "_")
+            logger.setup_task_logger(task_name)
+            self._toolkit.set_task_directory(task_name)
+            safe_sk = "".join(
+                c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
+            )[:50] or "task"
+            await self.bind_session(safe_sk)
+            state.is_first_input = False
+
+        turn_task = self._start_user_turn(message, history)
+        if turn_task is None:
+            self._queue_cli_input(raw_input, state)
+            return "continue"
+        if wait_for_turn:
+            try:
+                await turn_task
+            except KeyboardInterrupt:
+                msg = await self.cancel_current_turn()
+                print_warning(msg)
+            except asyncio.CancelledError:
+                pass
+        return "continue"
+
     async def process_cli_line(
         self,
         raw_input: str,
@@ -656,26 +802,6 @@ class AgentSystem:
             await self.reset_cli_interactive_session(history)
             state.is_first_input = True
             return "continue"
-
-        has_any_history = bool(history.messages) or bool(self._manager_history.messages)
-        if has_any_history:
-            usage_lines = []
-            roles_and_histories = [
-                ("manager", "Manager", [self._manager_history]),
-                ("coordinator", "Coordinator", [history]),
-            ]
-            for role, label, histories in roles_and_histories:
-                ctx_cfg = get_context_config(role)
-                cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
-                max_tok = await get_effective_max_context_async(role=role)
-                used_tok = 0
-                for h in histories:
-                    if h.messages:
-                        used_tok += await estimate_history_tokens_async(
-                            h.messages, chars_per_token=cpt, role=role
-                        )
-                usage_lines.append(f"{label}: {format_context_usage_line(used_tok, max_tok)}")
-            print_panel("\n".join(usage_lines), title="上下文占用")
 
         if raw_input.startswith("/"):
             if self._current_turn is not None:
@@ -712,9 +838,11 @@ class AgentSystem:
             print_success("再见！")
             return "break"
 
-        if self._current_turn is not None:
-            print_warning("当前有任务正在执行。请等待完成，或输入 /stop 中断。")
+        if self._current_turn is not None or self._cli_queue_draining:
+            self._queue_cli_input(raw_input, state)
             return "continue"
+
+        await self._publish_context_usage(history)
 
         file_refs = await asyncio.to_thread(load_file_refs, raw_input)
         for ref in file_refs:

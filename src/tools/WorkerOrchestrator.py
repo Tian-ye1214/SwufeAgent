@@ -451,7 +451,7 @@ class WorkerOrchestrator:
 
         except asyncio.CancelledError:
             await board.post(worker_id, task.description, "已取消（Agent 运行被中止）", "failed")
-            return False, "已取消（Agent 运行被中止）"
+            raise
 
         except Exception as e:
             error_msg = f"Worker执行异常: {str(e)}"

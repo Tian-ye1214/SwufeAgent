@@ -180,6 +180,8 @@ class PlaywrightBrowserSession:
         return self._run(_work)
 
     def wait_for_selector(self, headless: bool, selector: str, timeout_ms: int = 30_000) -> str:
+        timeout_ms = max(1, min(int(timeout_ms), 110))
+
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:

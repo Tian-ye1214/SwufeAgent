@@ -273,7 +273,7 @@ class TaskManager:
     
     def is_all_completed(self) -> bool:
         """Check if all tasks are completed"""
-        return all(
+        return bool(self.tasks) and all(
             task.status == TaskStatus.COMPLETED 
             for task in self.tasks.values()
         )
@@ -288,6 +288,8 @@ class TaskManager:
     def get_final_summary(self) -> str:
         """Generate the final task execution summary report."""
         logger.debug("(get_final_summary)")
+        if not self.tasks:
+            return "Manager did not create executable tasks."
         lines = [
             "=" * 50,
             "📊 Task Execution Summary Report",

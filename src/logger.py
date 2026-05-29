@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -42,6 +43,29 @@ class _OutputSinkHandler(logging.Handler):
             self.handleError(record)
 
 
+class _SessionFileHandler(logging.Handler):
+    def __init__(self, manager: "LoggerManager") -> None:
+        super().__init__(logging.DEBUG)
+        self._manager = manager
+
+    def emit(self, record: logging.LogRecord) -> None:
+        session_name = self._manager._session_log_name.get()
+        if not session_name:
+            return
+        try:
+            path = self._manager._session_files.setdefault(
+                session_name,
+                self._manager._log_dir / f"{session_name}.log",
+            )
+            line = self.format(record)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self._manager._session_write_lock:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception:
+            self.handleError(record)
+
+
 class LoggerManager:
     """进程内单例：控制台 + 可选文件；业务侧用模块级 `logger.info` 等。"""
 
@@ -52,6 +76,10 @@ class LoggerManager:
         self._logger: logging.Logger | None = None
         self._current_log_file: Path | None = None
         self._session_files: dict[str, Path] = {}
+        self._session_log_name: ContextVar[str | None] = ContextVar(
+            f"{logger_name}_session_log_name", default=None
+        )
+        self._session_write_lock = threading.Lock()
         self._notify_callback: ContextVar[Callable[[str], None] | None] = ContextVar(
             "user_notify_callback", default=None
         )
@@ -73,6 +101,7 @@ class LoggerManager:
             logger.propagate = False
             self._release_handlers(logger)
             logger.addHandler(self._build_console_handler())
+            logger.addHandler(self._build_session_file_handler())
             self._logger = logger
         return self._logger
 
@@ -86,6 +115,15 @@ class LoggerManager:
         safe_name = self._sanitize_name(session_name)
         log_file = self._session_files.setdefault(safe_name, self._log_dir / f"{safe_name}.log")
         return self._switch_to_file(log_file, announce=False)
+
+    @contextmanager
+    def session_log_context(self, session_name: str) -> Iterator[None]:
+        self.get_logger()
+        token = self._session_log_name.set(self._sanitize_name(session_name))
+        try:
+            yield
+        finally:
+            self._session_log_name.reset(token)
 
     def set_user_notify_callback(self, fn: Callable[[str], None] | None) -> None:
         self._notify_callback.set(fn)
@@ -131,6 +169,14 @@ class LoggerManager:
         )
         return handler
 
+    def _build_session_file_handler(self) -> logging.Handler:
+        handler = _SessionFileHandler(self)
+        handler.addFilter(_StmIngestConsoleQuietFilter())
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
+        return handler
+
     def _sanitize_name(self, name: str) -> str:
         cleaned = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name)
         return cleaned[:50] or "task"
@@ -141,6 +187,7 @@ class LoggerManager:
             return logger
         self._release_handlers(logger)
         logger.addHandler(self._build_console_handler())
+        logger.addHandler(self._build_session_file_handler())
         logger.addHandler(self._build_file_handler(log_file))
         self._current_log_file = log_file
         if announce:
@@ -264,6 +311,7 @@ error = _root_logger.error
 
 setup_task_logger = _MANAGER.setup_task_logger
 setup_session_logger = _MANAGER.setup_session_logger
+session_log_context = _MANAGER.session_log_context
 set_user_notify_callback = _MANAGER.set_user_notify_callback
 wrap_tools_for_user_notify = _MANAGER.wrap_tools_for_user_notify
 info_file_only = _MANAGER.info_file_only
@@ -278,6 +326,7 @@ __all__ = [
     "error",
     "setup_task_logger",
     "setup_session_logger",
+    "session_log_context",
     "set_user_notify_callback",
     "wrap_tools_for_user_notify",
     "stm_ingest_console_quiet",

@@ -95,7 +95,7 @@ class WeChatAgentBot(BotBase):
         try:
             await bot.start()
         finally:
-            self.release_all_resources()
+            await self.release_all_resources_async()
             try:
                 bot.stop()
             except Exception:

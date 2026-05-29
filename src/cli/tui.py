@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import queue
 import threading
 from typing import Any
 
 from textual.binding import Binding
 from rich.ansi import AnsiDecoder
+from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -15,7 +17,7 @@ from textual.suggester import Suggester
 from textual.widgets import Footer, Input, RichLog, Static
 
 from cli.completer import COMMANDS, _iter_file_completions
-from cli.output import OutputSink, set_output_sink
+from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from app_config import get_agent_roles
 
 READY_LABEL = "就绪"
@@ -104,6 +106,12 @@ class TextualOutputSink(OutputSink):
     def clear_status(self) -> None:
         self._run_ui(self._app.clear_status)
 
+    def set_context_usage(self, items: list[ContextUsageItem]) -> None:
+        self._run_ui(lambda: self._app.set_context_usage(items))
+
+    def clear_context_usage(self) -> None:
+        self._run_ui(self._app.clear_context_usage)
+
     def begin_model_stream(self, title: str) -> None:
         self._run_ui(lambda: self._app.begin_model_stream(title))
 
@@ -118,6 +126,7 @@ class RedLotusTui(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #output { height: 1fr; border: round $accent; }
+    #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
     #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
     #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
     #input { height: 3; border: round $primary; }
@@ -126,7 +135,7 @@ class RedLotusTui(App[None]):
 
     BINDINGS = [
         ("ctrl+c", "stop_or_quit", "Stop"),
-        ("ctrl+q", "quit", "Quit"),
+        ("ctrl+q", "stop_or_quit", "Quit"),
     ]
 
     def __init__(self, system: Any, stop_event: asyncio.Event | None = None) -> None:
@@ -145,6 +154,7 @@ class RedLotusTui(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RichLog(id="output", wrap=True, markup=False, highlight=False)
+            yield Static("", id="context-usage")
             yield Static("", id="stream-preview")
             yield Static(READY_LABEL, id="status")
             yield AgentInput(
@@ -216,6 +226,34 @@ class RedLotusTui(App[None]):
     def clear_status(self) -> None:
         self._status_is_working = False
         self.refresh_status()
+
+    @staticmethod
+    def _context_usage_bar(percent: float, width: int = 8) -> str:
+        clamped = max(0.0, min(100.0, float(percent)))
+        filled = 0 if clamped <= 0 else math.ceil(width * clamped / 100.0)
+        filled = max(0, min(width, filled))
+        return "[" + "=" * filled + "." * (width - filled) + "]"
+
+    @classmethod
+    def _context_usage_renderable(cls, items: list[ContextUsageItem]) -> Align:
+        parts = [
+            f"{item.role_label} {cls._context_usage_bar(item.percent)} {item.percent:.0f}%"
+            for item in items
+        ]
+        return Align.right(Text("  ".join(parts), style="dim"))
+
+    def set_context_usage(self, items: list[ContextUsageItem]) -> None:
+        if not items:
+            self.clear_context_usage()
+            return
+        widget = self.query_one("#context-usage", Static)
+        widget.update(self._context_usage_renderable(items))
+        widget.display = True
+
+    def clear_context_usage(self) -> None:
+        widget = self.query_one("#context-usage", Static)
+        widget.update("")
+        widget.display = False
 
     def refresh_status(self) -> None:
         self.query_one("#status", Static).update(self._status_text())
@@ -316,6 +354,13 @@ class RedLotusTui(App[None]):
         preview.update("")
         preview.display = False
 
+    def _cancel_pending_ask(self) -> bool:
+        fut = self._ask_future
+        if fut is not None and not fut.done():
+            fut.cancel()
+            return True
+        return False
+
     async def ask_user(self, question: str) -> str:
         """在 Textual 事件循环中弹出用户提问界面（内部方法）。"""
         if self._ask_future is not None and not self._ask_future.done():
@@ -348,13 +393,21 @@ class RedLotusTui(App[None]):
             self._write_user_reply(value)
             self._ask_future.set_result(value)
             return
+        if value.lower() == "/api":
+            from cli.render import print_warning
+            print_warning("TUI does not support interactive /api changes; use the legacy CLI or config file.")
+            return
+        if self._active_line_handlers > 0 and self._should_echo_as_user_input(value):
+            from cli.render import print_warning
+            print_warning("A previous input is still being scheduled; please wait.")
+            return
         if self._should_echo_as_user_input(value):
             self._write_user_input(value)
+        self._active_line_handlers += 1
+        self.refresh_status()
         asyncio.create_task(self._handle_line(value))
 
     def _should_echo_as_user_input(self, value: str) -> bool:
-        if self.system.has_current_turn:
-            return False
         if value.startswith("/"):
             return False
         if value.lower() in ("quit", "exit", "退出"):
@@ -362,8 +415,6 @@ class RedLotusTui(App[None]):
         return True
 
     async def _handle_line(self, value: str) -> None:
-        self._active_line_handlers += 1
-        self.refresh_status()
         try:
             action = await self.system.process_cli_line(value, self.state, wait_for_turn=False)
             if action == "break":
@@ -373,11 +424,12 @@ class RedLotusTui(App[None]):
             self.refresh_status()
 
     async def action_stop_or_quit(self) -> None:
+        ask_cancelled = self._cancel_pending_ask()
         if self.system.has_current_turn:
             msg = await self.system.cancel_current_turn()
             from cli.render import print_warning
             print_warning(msg)
-        else:
+        elif not ask_cancelled:
             self.exit()
 
 
@@ -386,6 +438,7 @@ async def run_textual_tui(system: Any, *, stop_event: asyncio.Event | None = Non
     try:
         await app.run_async()
     finally:
+        app._cancel_pending_ask()
         set_output_sink(None)
         system.set_ask_user_handler(None)
         await system.shutdown()
