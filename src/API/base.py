@@ -17,8 +17,9 @@ for _p in (_SRC, _API_DIR):
 os.chdir(_REPO_ROOT)
 
 from app_config import get_env, settings
-from agent_app import AgentSystem
-from tools.memory import ChatHistory, UserMessage
+from agent_core.input_messages import UserMessage
+from agent_core.system import AgentSystem
+from tools.memory import ChatHistory
 import logger
 
 

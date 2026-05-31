@@ -3,7 +3,9 @@ from __future__ import annotations
 import mimetypes
 import re
 from dataclasses import dataclass, field
+
 from pydantic_ai import BinaryContent
+
 from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
 
 _WORK_DATABASE_ROOT = work_database_root()
@@ -11,10 +13,10 @@ _WORK_DATABASE_ROOT = work_database_root()
 
 @dataclass
 class UserMessage:
-    """用户消息：文本 + 可选的多模态附件（图片/视频）。"""
+    """User prompt text plus optional pydantic-AI multimodal content."""
 
     _MEDIA_EXT_PATTERN = re.compile(
-        r'[a-zA-Z0-9_\-./\\:]+\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|avi|mov|mkv|webm)',
+        r"[a-zA-Z0-9_\-./\\:]+\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|avi|mov|mkv|webm)",
         re.IGNORECASE,
     )
 
@@ -22,13 +24,12 @@ class UserMessage:
     attachments: list = field(default_factory=list)
 
     def to_prompt(self):
-        """转换为 pydantic-ai agent.run() 可接受的 prompt 格式。"""
+        """Return the shape accepted by ``Agent.run``."""
         if not self.attachments:
             return self.text
         return [self.text, *self.attachments]
 
     def _read_file_to_binary(self, path: str) -> BinaryContent | None:
-        """读取本地文件，返回 BinaryContent（pydantic-ai 会自动 base64 编码）。"""
         try:
             resolved = resolve_readable_path(
                 path, work_base=_WORK_DATABASE_ROOT, repo_root=runtime_repo_root()
@@ -40,18 +41,16 @@ class UserMessage:
         mime, _ = mimetypes.guess_type(str(resolved))
         if mime is None:
             mime = "image/png"
-        data = resolved.read_bytes()
-        return BinaryContent(data=data, media_type=mime)
+        return BinaryContent(data=resolved.read_bytes(), media_type=mime)
 
 
-def user_message_from_text(message: str) -> UserMessage:
+def user_message_from_text(message: str | UserMessage) -> UserMessage:
     if isinstance(message, UserMessage):
         return message
     return UserMessage(text=str(message))
 
 
 def user_message_from_cli_input(raw_input: str) -> UserMessage:
-    """解析命令行输入：用正则提取图片/视频文件路径，读取字节作为附件。"""
     attachments: list = []
     text = raw_input
     um = UserMessage(text="", attachments=[])

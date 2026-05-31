@@ -2,37 +2,22 @@ import app_config
 
 app_config.load_config()
 
-from prompt import get_manager_system_prompt, get_coordinator_system_prompt, load_prompt
+from prompt import load_prompt
 from tools.BasicTools import BasicToolkit
 from tools.ManagementTools import TaskManager
 from tools.WorkerOrchestrator import WorkerOrchestrator
 from tools.memory import (
     ChatHistory,
-    LongTermMemory,
-    ShortTermMemory,
-    UserMessage,
-    user_message_from_cli_input,
-    user_message_from_text,
 )
+from agent_core.input_messages import UserMessage, user_message_from_text
 
-from tools.conversation_log import SessionConversationLogs, drain_pending_saves
-from ModelGateway.BasicFunction import create_agent
+from tools.conversation_log import SessionConversationLogs
 from ModelGateway.ModelChecker import (
-    estimate_history_tokens_async,
-    get_effective_max_context_async,
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
-from app_config import get_agent_usage_limits, get_context_config, get_model_and_params, settings
-from cli_commands import handle_slash_command
-from cli.repl import InteractiveRepl
-from cli.file_ref import augment_text_with_file_refs, load_file_refs
-from cli.output import (
-    ContextUsageItem,
-    clear_context_usage,
-    set_context_usage,
-    supports_model_stream,
-)
+from app_config import get_agent_usage_limits
+from cli.output import supports_model_stream
 from cli.render import (
     TextEventStreamHandler,
     consume_stream_markdown,
@@ -40,20 +25,15 @@ from cli.render import (
     finish_model_stream,
     model_generating_indicator,
     print_phase,
-    print_repl_welcome,
-    print_success,
     print_warning,
     show_model_output,
 )
-from cli_ui import format_user_log_text, print_startup_logo
+from cli_ui import format_user_log_text
 import logger
 import traceback
 import time
 import asyncio
-import signal
 import uuid
-import os
-from dataclasses import dataclass
 from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
@@ -68,24 +48,15 @@ from lifecycle import (
     run_agent_stream_with_lifecycle,
     run_agent_with_lifecycle,
 )
+from agent_core.cli_controller import AgentCliController, CliSessionState
+from agent_core.memory_runtime import MemoryRuntime
+from agent_core.roles import create_coordinator_agent, create_manager_agent
 
 
 def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
     if not supports_model_stream():
         return None
     return TextEventStreamHandler(title="Coordinator")
-
-
-@dataclass
-class CliSessionState:
-    history: ChatHistory
-    is_first_input: bool = True
-
-
-@dataclass
-class QueuedCliInput:
-    raw_input: str
-    state: CliSessionState
 
 
 class AgentSystem:
@@ -99,20 +70,12 @@ class AgentSystem:
         self._skills_manager = SkillsManager()
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
-        self._long_term_memory = LongTermMemory()
-        self._long_term_memory.refresh_from_disk_sync()
-        self._short_term_memory = ShortTermMemory(
-            settings()["short_term_memory"],
-            log_root=logger.LOG_DIR,
-        )
+        self._memory = MemoryRuntime()
+        self._long_term_memory = self._memory.long_term
+        self._short_term_memory = self._memory.short_term
         self._toolkit = BasicToolkit(
             self._skills_manager,
-            extra_worker_tools=[
-                self._short_term_memory.query_short_term_memory,
-                self._long_term_memory.add,
-                self._long_term_memory.remove,
-                self._long_term_memory.list_memory,
-            ],
+            extra_worker_tools=self._memory.worker_tools,
         )
         self._task_manager = TaskManager()
         self._orchestrator = WorkerOrchestrator(
@@ -128,13 +91,10 @@ class AgentSystem:
             on_reset=self._orchestrator.clear_conversation_session,
         )
         self._context_prewarmed = False
-        self._memory_injection_snapshot: str | None = None
         self._current_turn: dict[str, Any] | None = None
-        self._queued_cli_inputs: list[QueuedCliInput] = []
-        self._cli_queue_drain_task: asyncio.Task | None = None
-        self._cli_queue_draining = False
         self._cli_turn_id: str | None = None
         self._session_key: str | None = None
+        self._cli_controller = AgentCliController(self)
 
     async def bind_session(self, session_key: str) -> None:
         self._session_key = session_key
@@ -168,41 +128,14 @@ class AgentSystem:
 
     @property
     def queued_cli_input_count(self) -> int:
-        return len(self._queued_cli_inputs)
+        return self._cli_controller.queued_input_count
 
     @property
     def has_queued_cli_input(self) -> bool:
-        return bool(self._queued_cli_inputs)
+        return self._cli_controller.has_queued_input
 
     def new_cli_session_state(self) -> CliSessionState:
-        return CliSessionState(history=ChatHistory())
-
-    async def _publish_context_usage(self, history: ChatHistory) -> None:
-        has_any_history = bool(history.messages) or bool(self._manager_history.messages)
-        if not has_any_history:
-            clear_context_usage()
-            return
-
-        items: list[ContextUsageItem] = []
-        roles_and_histories = [
-            ("manager", "Manager", [self._manager_history]),
-            ("coordinator", "Coordinator", [history]),
-        ]
-        for role, label, histories in roles_and_histories:
-            ctx_cfg = get_context_config(role)
-            cpt = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
-            max_tok = int(await get_effective_max_context_async(role=role))
-            used_tok = 0
-            for h in histories:
-                if h.messages:
-                    used_tok += int(
-                        await estimate_history_tokens_async(
-                            h.messages, chars_per_token=cpt, role=role
-                        )
-                    )
-            percent = 0.0 if max_tok <= 0 else min(100.0, used_tok * 100.0 / max_tok)
-            items.append(ContextUsageItem(label, used_tok, max_tok, percent))
-        set_context_usage(items)
+        return self._cli_controller.new_session_state()
 
     async def _agent_id(self, role: str, suffix: str | None = None) -> str:
         sk = self._require_session_key()
@@ -224,9 +157,7 @@ class AgentSystem:
         if pending:
             logger.info("[lifecycle] draining %s background task(s)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
-        await drain_pending_saves()
-        await self._short_term_memory.drain()
-        await self._short_term_memory.close()
+        await self._memory.close()
         await close_http_client()
         self._toolkit.close()
         logger.info("[lifecycle] shutdown complete")
@@ -235,51 +166,7 @@ class AgentSystem:
         ct = self._current_turn
         if ct is not None and ct.get("task") is done_task:
             self._current_turn = None
-        self._schedule_cli_queue_drain()
-
-    def _schedule_cli_queue_drain(self) -> None:
-        if self._current_turn is not None or not self._queued_cli_inputs:
-            return
-        if self._cli_queue_drain_task is not None and not self._cli_queue_drain_task.done():
-            return
-        self._cli_queue_drain_task = asyncio.create_task(self._drain_cli_input_queue())
-
-    def _queue_cli_input(self, raw_input: str, state: CliSessionState) -> None:
-        self._queued_cli_inputs.append(QueuedCliInput(raw_input=raw_input, state=state))
-        print_success(
-            f"已加入输入队列（{len(self._queued_cli_inputs)} 条），当前回复结束后会自动继续。"
-        )
-
-    @staticmethod
-    def _merge_queued_cli_inputs(raw_inputs: list[str]) -> str:
-        if len(raw_inputs) == 1:
-            return raw_inputs[0]
-        lines = [
-            "User sent multiple inputs while the previous response was running. "
-            "Process them in order as one request:",
-            "",
-        ]
-        lines.extend(f"{i}. {text}" for i, text in enumerate(raw_inputs, 1))
-        return "\n".join(lines)
-
-    async def _drain_cli_input_queue(self) -> None:
-        if self._cli_queue_draining or self._current_turn is not None:
-            return
-        if not self._queued_cli_inputs:
-            return
-        self._cli_queue_draining = True
-        try:
-            batch = list(self._queued_cli_inputs)
-            self._queued_cli_inputs.clear()
-            raw_input = self._merge_queued_cli_inputs([item.raw_input for item in batch])
-            print_success(f"正在处理队列中的 {len(batch)} 条输入。")
-            await self._start_cli_user_turn_from_raw_input(
-                raw_input,
-                batch[0].state,
-                wait_for_turn=False,
-            )
-        finally:
-            self._cli_queue_draining = False
+        self._cli_controller.schedule_queue_drain()
 
     async def cancel_current_turn(self) -> str:
         ct = self._current_turn
@@ -338,9 +225,7 @@ class AgentSystem:
             self._task_manager.reset()
 
     def _injection_for_session(self) -> str:
-        if self._memory_injection_snapshot is None:
-            self._memory_injection_snapshot = self._long_term_memory.get_injection()
-        return self._memory_injection_snapshot
+        return self._memory.injection_for_session()
 
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
@@ -362,36 +247,14 @@ class AgentSystem:
         return self._task_manager.structured_status()
 
     async def reset_cli_interactive_session(self, history: ChatHistory) -> None:
-        """与输入「新任务」相同：清空任务、工作目录绑定、双方历史与会话落盘状态。"""
-        if self._session_key:
-            await self.end_session_agents(self._session_key)
-        self._task_manager.reset()
-        self._toolkit.reset_task_directory()
-        self.reset_manager_history()
-        self._session_logs.reset()
-        self._memory_injection_snapshot = None
-        history.reset()
-        clear_context_usage()
+        """Reset the current interactive CLI session."""
+        await self._cli_controller.reset_session(history)
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
-        """每轮 Coordinator 结束后：后台长期记忆合并与短期记忆向量入库。"""
-        msgs = list(history.messages)
-        self._spawn_background(self._long_term_memory.consolidate_from_messages(msgs, silent=True))
-        self._spawn_background(
-            self._long_term_memory.consolidate_from_logs(logger.LOG_DIR, silent=True)
+        """Schedule memory consolidation after a Coordinator turn."""
+        self._memory.schedule_after_coordinator_turn(
+            history, self._session_logs, self._spawn_background
         )
-        coord_log = self._session_logs.for_agent("coordinator")
-        mp = coord_log.model_messages_path()
-        sk = self._session_logs.session_key()
-        if mp is not None and sk is not None:
-            root = logger.LOG_DIR.resolve()
-            try:
-                log_key = mp.resolve().relative_to(root).as_posix()
-            except ValueError:
-                log_key = mp.resolve().as_posix()
-            self._short_term_memory.schedule_ingest_after_turn(
-                msgs, log_key, "coordinator", sk
-            )
 
     async def execute_task_with_manager(
         self, user_input: str, continue_from_previous: bool = False
@@ -440,12 +303,12 @@ class AgentSystem:
             self._task_manager.get_todo_list,
             self._toolkit.ask_user,
         ]
-        m_name, m_params = get_model_and_params("manager")
         mem_inj = self._injection_for_session()
-        mgr_prompt = await asyncio.to_thread(
-            get_manager_system_prompt, self._skills_manager, mem_inj
+        manager_agent = await create_manager_agent(
+            self._skills_manager,
+            mem_inj,
+            manager_tools,
         )
-        manager_agent = create_agent(m_name, m_params, manager_tools, mgr_prompt)
         attachments = self._current_attachments
 
         if not continue_from_previous:
@@ -655,21 +518,16 @@ class AgentSystem:
         self._session_logs.ensure(conversation_log_hint or message.text or "")
         logger.info_file_only("[用户]\n%s", format_user_log_text(message))
 
-        c_name, c_params = get_model_and_params("coordinator")
-        coordinator_tools = [
+        routing_tools = [
             self.execute_task_with_manager,
             self._execute_task_with_worker,
-            *self._toolkit.workers_tools,
         ]
         mem_inj = self._injection_for_session()
-        coord_prompt = await asyncio.to_thread(
-            get_coordinator_system_prompt, self._skills_manager, mem_inj
-        )
-        agent = create_agent(
-            c_name,
-            c_params,
-            coordinator_tools,
-            coord_prompt,
+        agent = await create_coordinator_agent(
+            self._skills_manager,
+            mem_inj,
+            routing_tools,
+            self._toolkit.workers_tools,
         )
 
         if self._session_key is None:
@@ -678,8 +536,6 @@ class AgentSystem:
 
         start_time = time.time()
         coord_aid = await self._agent_id("coordinator")
-        # Coordinator 必须走 agent.run()：run_stream/stream_text 在首个文本输出后
-        # 即结束图执行，不会继续调用 execute_task_with_manager 等工具（pydantic-ai 文档说明）。
         stream_handler = _make_coordinator_stream_handler()
         try:
             result = await run_agent_with_lifecycle(
@@ -718,62 +574,7 @@ class AgentSystem:
         return history, output
 
     async def prepare_cli_session(self) -> None:
-        print_startup_logo()
-        print_repl_welcome()
-        await prewarm_effective_max_contexts_by_role_async(reason="程序启动")
-        self._context_prewarmed = True
-
-    async def _start_cli_user_turn_from_raw_input(
-        self,
-        raw_input: str,
-        state: CliSessionState,
-        *,
-        wait_for_turn: bool,
-    ) -> str:
-        history = state.history
-        await self._publish_context_usage(history)
-
-        if self._current_turn is not None:
-            self._queue_cli_input(raw_input, state)
-            return "continue"
-
-        file_refs = await asyncio.to_thread(load_file_refs, raw_input)
-        for ref in file_refs:
-            if not ref.ok:
-                print_warning(f"@{ref.path}: {ref.error}")
-            elif ref.truncated:
-                print_success(f"@{ref.path} (truncated)")
-            else:
-                print_success(f"@{ref.path}")
-
-        augmented = augment_text_with_file_refs(raw_input, file_refs)
-        message = await asyncio.to_thread(user_message_from_cli_input, augmented)
-        if message.attachments:
-            logger.info("Detected %s media attachment(s)", len(message.attachments))
-
-        if state.is_first_input:
-            task_name = message.text[:30].replace(" ", "_")
-            logger.setup_task_logger(task_name)
-            self._toolkit.set_task_directory(task_name)
-            safe_sk = "".join(
-                c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
-            )[:50] or "task"
-            await self.bind_session(safe_sk)
-            state.is_first_input = False
-
-        turn_task = self._start_user_turn(message, history)
-        if turn_task is None:
-            self._queue_cli_input(raw_input, state)
-            return "continue"
-        if wait_for_turn:
-            try:
-                await turn_task
-            except KeyboardInterrupt:
-                msg = await self.cancel_current_turn()
-                print_warning(msg)
-            except asyncio.CancelledError:
-                pass
-        return "continue"
+        await self._cli_controller.prepare_session()
 
     async def process_cli_line(
         self,
@@ -782,155 +583,10 @@ class AgentSystem:
         *,
         wait_for_turn: bool,
     ) -> str:
-        raw_input = raw_input.strip()
-        if not raw_input:
-            return "continue"
+        return await self._cli_controller.process_line(
+            raw_input, state, wait_for_turn=wait_for_turn
+        )
 
-        history = state.history
-        cmd_lower = raw_input.lower()
-        if cmd_lower in ("/exit", "/quit"):
-            if self._current_turn is not None:
-                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再退出。")
-                return "continue"
-            print_success("再见！")
-            return "break"
-
-        if cmd_lower == "/clear" or "新任务" in raw_input:
-            if self._current_turn is not None:
-                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再执行「新任务」或 /clear。")
-                return "continue"
-            await self.reset_cli_interactive_session(history)
-            state.is_first_input = True
-            return "continue"
-
-        if raw_input.startswith("/"):
-            if self._current_turn is not None:
-                cmd = raw_input.split()[0].lower()
-                busy_ok = {
-                    "/stop", "/status", "/cancel", "/help", "/trace", "/tasks",
-                    "/pwd", "/config", "/skills",
-                }
-                if cmd not in busy_ok:
-                    print_warning("当前有任务正在执行，此命令暂不可用。请先 /stop 或等待完成。")
-                    return "continue"
-            await self._sync_skills_for_user_turn()
-            _consumed, first_override = await handle_slash_command(
-                raw_input,
-                self._skills_manager,
-                coordinator_history=history,
-                manager_history=self._manager_history,
-                reset_cli_session_for_load=lambda: self.reset_cli_interactive_session(
-                    history
-                ),
-                bind_loaded_snapshot_for_save=lambda agent, path, meta: self._session_logs.bind_loaded_snapshot(
-                    agent, path, meta
-                ),
-                system=self,
-            )
-            if first_override is not None:
-                state.is_first_input = first_override
-            return "continue"
-
-        if raw_input.lower() in ["quit", "exit", "退出"]:
-            if self._current_turn is not None:
-                print_warning("任务执行中，请先 /stop 或 Ctrl+C 中断后再退出。")
-                return "continue"
-            print_success("再见！")
-            return "break"
-
-        if self._current_turn is not None or self._cli_queue_draining:
-            self._queue_cli_input(raw_input, state)
-            return "continue"
-
-        await self._publish_context_usage(history)
-
-        file_refs = await asyncio.to_thread(load_file_refs, raw_input)
-        for ref in file_refs:
-            if not ref.ok:
-                print_warning(f"@{ref.path}: {ref.error}")
-            elif ref.truncated:
-                print_success(f"📄 @{ref.path}（已截断，超出字符限制）")
-            else:
-                print_success(f"📄 @{ref.path}")
-
-        augmented = augment_text_with_file_refs(raw_input, file_refs)
-        message = await asyncio.to_thread(user_message_from_cli_input, augmented)
-        if message.attachments:
-            logger.info(f"🖼️ 已识别 {len(message.attachments)} 个多媒体附件")
-
-        if state.is_first_input:
-            task_name = message.text[:30].replace(" ", "_")
-            logger.setup_task_logger(task_name)
-            self._toolkit.set_task_directory(task_name)
-            safe_sk = "".join(
-                c if c.isalnum() or c in ("_", "-") else "_" for c in task_name
-            )[:50] or "task"
-            await self.bind_session(safe_sk)
-            state.is_first_input = False
-
-        turn_task = self._start_user_turn(message, history)
-        if turn_task is None:
-            print_warning("无法启动任务（已有运行中的回合）。")
-            return "continue"
-        if wait_for_turn:
-            try:
-                await turn_task
-            except KeyboardInterrupt:
-                msg = await self.cancel_current_turn()
-                print_warning(msg)
-            except asyncio.CancelledError:
-                pass
-        return "continue"
-
-    async def run_interactive(self, *, stop_event: asyncio.Event | None = None):
-        """交互式命令行运行入口。支持在输入中包含图片/视频文件路径以发送多模态内容。"""
-        if os.environ.get("REDLOTUS_LEGACY_CLI", "").strip() not in ("1", "true", "TRUE", "yes"):
-            from cli.tui import run_textual_tui
-
-            await run_textual_tui(self, stop_event=stop_event)
-            return
-
-        await self.prepare_cli_session()
-        state = self.new_cli_session_state()
-
-        async def on_cli_keyboard_interrupt() -> None:
-            if self._current_turn is not None:
-                print_warning(await self.cancel_current_turn())
-                return
-            raise KeyboardInterrupt
-
-        repl = InteractiveRepl(on_interrupt_during_handler=on_cli_keyboard_interrupt)
-
-        async def process_one_line(raw_input: str) -> str:
-            return await self.process_cli_line(raw_input, state, wait_for_turn=True)
-
-        try:
-            await repl.run(process_one_line, stop_event=stop_event)
-        finally:
-            await self.shutdown()
-
-
-def main() -> None:
-    """CLI 入口：实例化 Agent 并进入交互循环（供仓库根 `main.py` 或 `python -m agent_app` 调用）。"""
-    system = AgentSystem()
-
-    async def _run() -> None:
-        loop = asyncio.get_running_loop()
-        stop_event = asyncio.Event()
-
-        def _request_stop() -> None:
-            stop_event.set()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, _request_stop)
-            except (NotImplementedError, ValueError):
-                signal.signal(sig, lambda *_a, _sig=sig: _request_stop())
-
-        await system.run_interactive(stop_event=stop_event)
-
-    asyncio.run(_run())
-
-
-if __name__ == "__main__":
-    main()
+    async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:
+        """Run the interactive CLI/TUI."""
+        await self._cli_controller.run_interactive(stop_event=stop_event)

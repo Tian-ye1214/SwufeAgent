@@ -13,17 +13,11 @@ from tools.memory.message_text import (
     turn_texts_from_messages,
 )
 from tools.memory.stm import ShortTermMemory
-from tools.memory.user_message import (
-    UserMessage,
-    user_message_from_cli_input,
-    user_message_from_text,
-)
 
 __all__ = [
     "ChatHistory",
     "LongTermMemory",
     "ShortTermMemory",
-    "UserMessage",
     "long_term_memory_consolidation_params",
     "merge_looks_like_unrelated_rewrite",
     "message_has_user_prompt",
@@ -32,6 +26,4 @@ __all__ = [
     "split_messages_into_turns",
     "turn_has_agent_content",
     "turn_texts_from_messages",
-    "user_message_from_cli_input",
-    "user_message_from_text",
 ]

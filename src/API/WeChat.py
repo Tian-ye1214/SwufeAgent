@@ -7,9 +7,9 @@ from pydantic_ai import BinaryContent, ImageUrl
 from wechatbot import WeChatBot
 
 import logger
+from agent_core.input_messages import UserMessage
 from base import BotBase
 from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
-from tools.memory import UserMessage
 
 _MIME_MAP = {
     "image": "image/jpeg",

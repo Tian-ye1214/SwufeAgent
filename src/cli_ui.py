@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sys
 
+from agent_core.input_messages import UserMessage
 from cli.output import emit_text
-from tools.memory import UserMessage
 
 
 def print_startup_logo() -> None:

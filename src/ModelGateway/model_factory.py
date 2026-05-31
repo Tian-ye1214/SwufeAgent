@@ -7,7 +7,7 @@ from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer, OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai import Agent, ModelSettings, ModelProfile
+from pydantic_ai import ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters
@@ -15,7 +15,7 @@ from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 import logger
-from app_config import get_agent_run_policy, get_env, http_chat_completions_thinking_extras
+from app_config import get_env, http_chat_completions_thinking_extras
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
@@ -193,26 +193,3 @@ def create_model(model_name: str, parameter: dict):
             provider=provider,
             settings=ModelSettings(**settings_kw)
         )
-
-
-def create_agent(model_name: str, parameter: dict, tools: list, system_prompt: str):
-    if parameter is None:
-        parameter = {
-            "temperature": 1.0,
-            "max_tokens": 32768,
-            "reasoning_effort": False,
-            "thinking": "disabled",
-        }
-
-    model = create_model(model_name, parameter)
-    wrapped_tools = (
-        logger.wrap_tools_for_user_notify(list(tools), policy=get_agent_run_policy())
-        if tools
-        else tools
-    )
-    agent = Agent(
-        model,
-        tools=wrapped_tools,
-        system_prompt=system_prompt,
-    )
-    return agent

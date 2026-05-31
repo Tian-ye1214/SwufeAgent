@@ -7,7 +7,7 @@ import traceback
 
 import logger
 from prompt import get_worker_system_prompt, load_prompt
-from ModelGateway.BasicFunction import create_agent
+from ModelGateway.agent_factory import create_agent
 from ModelGateway.ModelChecker import maybe_auto_compress_async
 from app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
 from lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
