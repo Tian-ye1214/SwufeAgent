@@ -88,8 +88,9 @@ def agent_context(agent_id: str | None) -> Iterator[None]:
 
 
 class TurnTraceStore:
-    def __init__(self) -> None:
+    def __init__(self, max_turns: int = 200) -> None:
         self._events: dict[str, list[dict[str, Any]]] = {}
+        self._max_turns = max_turns
 
     def clear(self) -> None:
         self._events.clear()
@@ -102,6 +103,11 @@ class TurnTraceStore:
             **fields,
         }
         self._events.setdefault(key, []).append(event)
+        while len(self._events) > self._max_turns:
+            oldest = next(iter(self._events))
+            if oldest == key:
+                break
+            del self._events[oldest]
 
     def events_for_turn(self, turn_id: str) -> list[dict[str, Any]]:
         return list(self._events.get(turn_id, []))

@@ -19,7 +19,7 @@ from tools.memory.consolidation import (
     long_term_memory_consolidation_params,
     merge_looks_like_unrelated_rewrite,
 )
-from tools.memory.message_text import pydantic_messages_to_text
+from tools.memory.message_text import user_prompts_to_text
 
 
 class LongTermMemory:
@@ -443,14 +443,14 @@ class LongTermMemory:
             if not template.strip():
                 return
 
-            transcript = await asyncio.to_thread(pydantic_messages_to_text, messages)
+            transcript = await asyncio.to_thread(user_prompts_to_text, messages)
             transcript = transcript.strip()
             if not transcript:
                 return
 
             parsed = await self._consolidation_chat_and_parse(template, transcript)
             if await self._apply_consolidation_parsed(parsed):
-                logger.info("长期记忆已根据本轮对话更新（SOUL/USER 整篇）。")
+                logger.warning("📝 长期记忆已根据你的输入更新（SOUL/USER）。")
 
         except Exception as e:
             if not silent:

@@ -35,6 +35,20 @@ def pydantic_messages_to_text(messages: list) -> str:
     return "\n\n".join(lines)
 
 
+def user_prompts_to_text(messages: list) -> str:
+    out: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, ModelRequest):
+            continue
+        for part in msg.parts:
+            if not isinstance(part, UserPromptPart):
+                continue
+            c = part.content
+            items = [c] if isinstance(c, str) else c if isinstance(c, (list, tuple)) else []
+            out += [s.strip() for s in items if isinstance(s, str) and s.strip()]
+    return "\n\n".join(out)
+
+
 def message_has_user_prompt(msg: Any) -> bool:
     return isinstance(msg, ModelRequest) and any(
         isinstance(p, UserPromptPart) for p in msg.parts

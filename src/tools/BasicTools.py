@@ -3,6 +3,7 @@ import asyncio
 import inspect
 import os
 import re
+import signal
 import subprocess
 import mimetypes
 from ddgs import DDGS
@@ -18,6 +19,67 @@ from path_sandbox import resolve_readable_path, runtime_repo_root, work_database
 from tools.browser_session import PlaywrightBrowserSession
 
 _REPO_ROOT = runtime_repo_root()
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
+    if proc.returncode is not None:
+        return
+    try:
+        if _platform.system() == "Windows":
+            # /T 杀整棵树：shell 会经 cmd.exe 再起真正的子进程。
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=5)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        pass
+
+
+async def run_subprocess(
+    args, *, shell: bool, cwd: str, env: dict | None = None, timeout: float
+) -> tuple[str, str, int | None]:
+    """跑子进程并返回 (stdout, stderr, returncode)；取消或超时都会杀掉整棵进程树。
+
+    取代 asyncio.to_thread(subprocess.run, ...)——后者在任务被取消时既不中断阻塞线程、
+    也不杀子进程，会留下孤儿进程与卡死的线程池槽位。
+    """
+    kwargs: dict = dict(
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=cwd, env=env
+    )
+    if _platform.system() == "Windows":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True  # 独立进程组，便于 killpg
+
+    if shell:
+        proc = await asyncio.create_subprocess_shell(args, **kwargs)
+    else:
+        proc = await asyncio.create_subprocess_exec(*args, **kwargs)
+
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        await _terminate_process_tree(proc)
+        raise subprocess.TimeoutExpired(args, timeout)
+    except asyncio.CancelledError:
+        await _terminate_process_tree(proc)
+        raise
+    return (
+        out.decode("utf-8", errors="replace"),
+        err.decode("utf-8", errors="replace"),
+        proc.returncode,
+    )
 
 
 class BasicToolkit:
@@ -501,18 +563,10 @@ class BasicToolkit:
             if args:
                 cmd.extend(args.split())
 
-            result = await self._run_blocking(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                cwd=str(self._base_dir),
+            stdout, stderr, return_code = await run_subprocess(
+                cmd, shell=False, cwd=str(self._base_dir), timeout=60
             )
-            output = result.stdout + result.stderr
-            return_code = result.returncode
+            output = stdout + stderr
             return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
         except subprocess.TimeoutExpired:
             return "Error: Execution timed out (60 seconds)"
@@ -539,29 +593,18 @@ class BasicToolkit:
             if use_shell and re.search(r"\b(start|nohup|setsid)\b|&\s*$", command, re.I):
                 return "Security error: background shell processes are not allowed"
             cwd = str(self._base_dir.resolve())
-            sub_kw: dict = {}
+            env = None
             if re.search(r"\bclawhub\b", command, re.I):
                 cwd = str(_REPO_ROOT)
                 if "--workdir" not in command:
-                    sub_kw["env"] = os.environ | {"CLAWHUB_WORKDIR": cwd}
-            sub_kw.update(
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                cwd=cwd,
+                    env = os.environ | {"CLAWHUB_WORKDIR": cwd}
+
+            shell = use_shell or _platform.system() == "Windows"
+            args = command if shell else shlex.split(command)
+            stdout, stderr, return_code = await run_subprocess(
+                args, shell=shell, cwd=cwd, env=env, timeout=timeout
             )
-
-            if use_shell:
-                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
-            elif _platform.system() == "Windows":
-                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
-            else:
-                result = await self._run_blocking(subprocess.run, shlex.split(command), **sub_kw)
-
-            output = result.stdout + result.stderr
-            return_code = result.returncode
+            output = stdout + stderr
             return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({timeout} seconds)"
@@ -637,9 +680,21 @@ class BasicToolkit:
             ]
         )
 
-    @property
-    def workers_tools(self) -> list:
-        """List of tool callables exposed to the Worker Agent."""
+    def _worker_tools(self, *, include_browser: bool) -> list:
+        """Worker 工具集。``include_browser=False`` 用于并行 Worker——它们共用一个浏览器
+        页面会互相串台，故并行时不发浏览器工具（仍可用 search_web）。"""
+        browser = [
+            # Browser automation (Playwright / Chromium)
+            self.browser_navigate,
+            self.browser_get_content,
+            self.browser_screenshot,
+            self.browser_click,
+            self.browser_fill,
+            self.browser_press_key,
+            self.browser_wait_for_selector,
+            self.browser_evaluate,
+            self.browser_close,
+        ] if include_browser else []
         return [
             # Read / list
             self.list_files,
@@ -653,16 +708,7 @@ class BasicToolkit:
             # Search
             self.search_in_files,
             self.search_web,
-            # Browser automation (Playwright / Chromium)
-            self.browser_navigate,
-            self.browser_get_content,
-            self.browser_screenshot,
-            self.browser_click,
-            self.browser_fill,
-            self.browser_press_key,
-            self.browser_wait_for_selector,
-            self.browser_evaluate,
-            self.browser_close,
+            *browser,
             # Execute
             self.run_command,
             self.execute_file,
@@ -673,3 +719,12 @@ class BasicToolkit:
             # Agent Skills tools
             *self._skills_toolkit.tools,
         ]
+
+    @property
+    def workers_tools(self) -> list:
+        """List of tool callables exposed to the Worker Agent."""
+        return self._worker_tools(include_browser=True)
+
+    @property
+    def workers_tools_no_browser(self) -> list:
+        return self._worker_tools(include_browser=False)

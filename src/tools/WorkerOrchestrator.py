@@ -356,7 +356,7 @@ class WorkerOrchestrator:
         tm = self._task_manager
 
         board_tools = self._create_board_tools(board, worker_id, task.description)
-        all_tools = self._toolkit.workers_tools + board_tools
+        all_tools = self._toolkit.workers_tools_no_browser + board_tools
 
         def _parallel_worker_prompt():
             mem = self._memory_injection_getter()

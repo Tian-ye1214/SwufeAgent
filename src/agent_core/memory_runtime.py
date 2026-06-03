@@ -45,8 +45,9 @@ class MemoryRuntime:
         spawn_background: Callable[[Coroutine[Any, Any, Any]], None],
     ) -> None:
         msgs = list(history.messages)
+        # 偏好只从用户亲手输入学习（consolidate_from_messages 内部已收口到 UserPromptPart）。
+        # 不再每轮挖掘整目录日志：那会把工具/网页内容沉淀进偏好并注入每条 prompt（间接 prompt 注入）。
         spawn_background(self.long_term.consolidate_from_messages(msgs, silent=True))
-        spawn_background(self.long_term.consolidate_from_logs(logger.LOG_DIR, silent=True))
 
         coord_log = session_logs.for_agent("coordinator")
         messages_path = coord_log.model_messages_path()

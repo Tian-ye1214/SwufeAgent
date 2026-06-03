@@ -11,7 +11,7 @@ from tools.memory import (
 )
 from agent_core.input_messages import UserMessage, user_message_from_text
 
-from tools.conversation_log import SessionConversationLogs
+from tools.conversation_log import SessionConversationLogs, drain_pending_saves
 from ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
@@ -156,7 +156,16 @@ class AgentSystem:
         pending = list(self._background_tasks)
         if pending:
             logger.info("[lifecycle] draining %s background task(s)", len(pending))
-            await asyncio.gather(*pending, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[lifecycle] 后台任务超时未结束，取消之")
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        await drain_pending_saves()
         await self._memory.close()
         await close_http_client()
         self._toolkit.close()
@@ -181,8 +190,13 @@ class AgentSystem:
         if not t.done():
             t.cancel()
         try:
-            await asyncio.wait_for(t, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(t), timeout=5.0)
+        except asyncio.TimeoutError:
+            if not t.done():
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
+                logger.warning("[lifecycle] 任务取消超时，转交 shutdown 收口")
+        except asyncio.CancelledError:
             pass
         self._current_turn = None
         return "已请求停止当前任务（本回合未完整写入对话历史）。"
