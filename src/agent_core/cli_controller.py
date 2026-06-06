@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import logger
+from persist_utils import safe_name
 from ModelGateway.ModelChecker import (
     estimate_history_tokens_async,
     get_effective_max_context_async,
@@ -225,10 +226,7 @@ class AgentCliController:
             task_name = (message.text or "task")[:30].replace(" ", "_")
             logger.setup_task_logger(task_name)
             system._toolkit.set_task_directory(task_name)
-            safe_session_key = "".join(
-                char if char.isalnum() or char in ("_", "-") else "_"
-                for char in task_name
-            )[:50] or "task"
+            safe_session_key = safe_name(task_name, max_len=50, fallback="task")
             await system.bind_session(safe_session_key)
             state.is_first_input = False
 

@@ -21,6 +21,7 @@ from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
 import logger
+import tool_telemetry
 
 
 @dataclass(frozen=True)
@@ -284,7 +285,7 @@ class BotBase:
                     agent_system.set_task_directory(f"{self.platform_tag}_{session_id[:20]}")
                     self._is_first[session_id] = True
 
-                logger.set_user_notify_callback(
+                tool_telemetry.set_user_notify_callback(
                     partial(self._notify_user, session_id=session_id, run_gen=run_gen, send_reply=send_reply, loop=loop)
                 )
                 await agent_system.bind_session(session_id)
@@ -305,7 +306,7 @@ class BotBase:
                     logger.error(f"[{self.platform_tag}] Agent 调用异常: {e}")
                     output = f"抱歉，处理您的请求时出现了错误：{e}"
         finally:
-            logger.set_user_notify_callback(None)
+            tool_telemetry.set_user_notify_callback(None)
             self._agent_ctx.reset(token)
         return output
 

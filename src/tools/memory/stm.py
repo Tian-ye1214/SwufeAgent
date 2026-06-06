@@ -10,7 +10,7 @@ from typing import Any
 
 import logger
 from app_config import get_env
-from persist_utils import atomic_write_json, file_lock
+from persist_utils import load_json_state, rel_key, save_locked_json
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
 from tools.memory.message_text import turn_texts_from_messages
@@ -98,31 +98,13 @@ class ShortTermMemory:
         return self._db_dir() / "conversation_stm_failures.jsonl"
 
     def _rel_log_key(self, path: Path, root: Path) -> str:
-        try:
-            return path.resolve().relative_to(root).as_posix()
-        except ValueError:
-            return path.resolve().as_posix()
+        return rel_key(path, root)
 
     def _load_stm_state_sync(self) -> dict[str, Any]:
-        p = self._stm_state_path()
-        if not p.is_file():
-            return {"version": 2, "sources": {}}
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return {"version": 2, "sources": {}}
-            src = data.get("sources")
-            if not isinstance(src, dict):
-                data["sources"] = {}
-            return data
-        except Exception:
-            return {"version": 2, "sources": {}}
+        return load_json_state(self._stm_state_path(), 2)
 
     def _save_stm_state_sync(self, state: dict[str, Any]) -> None:
-        p = self._stm_state_path()
-        with file_lock(p):
-            atomic_write_json(p, state)
+        save_locked_json(self._stm_state_path(), state)
 
     def _turns_done_for_key(self, sources: dict[str, Any], log_key: str) -> int:
         ent = sources.get(log_key)

@@ -152,44 +152,26 @@ def create_model(model_name: str, parameter: dict):
     api_key = get_env("API_KEY", warn=False) or None
     api_base = get_env("BASE_URL", warn=False) or None
     param = dict(parameter)
+
     if 'gemini' in model_name:
         del param["thinking"]
-        provider = GoogleProvider(
-            base_url='https://api.zhizengzeng.com/google',
-            api_key=api_key,
-        )
+        provider = GoogleProvider(base_url='https://api.zhizengzeng.com/google', api_key=api_key)
         return GoogleModel(model_name, provider=provider, settings=ModelSettings(**param))
-    elif 'claude' in model_name:
+
+    if 'claude' in model_name:
         del param["thinking"]
-        provider = AnthropicProvider(
-            base_url='https://api.zhizengzeng.com/anthropic',
-            api_key=api_key,
-        )
+        provider = AnthropicProvider(base_url='https://api.zhizengzeng.com/anthropic', api_key=api_key)
         return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**param))
+
+    if any(m in model_name.lower() for m in ('deepseek', 'kimi')):
+        eb = param.get('extra_body')
+        extra = dict(eb) if isinstance(eb, dict) else {}
+        extra.update(http_chat_completions_thinking_extras(param))
+        del param["thinking"]
+        if extra:
+            param['extra_body'] = extra
+        provider = ThinkingProvider(base_url=api_base, api_key=api_key)
     else:
-        thinking_models = ['deepseek', 'kimi']
-        use_thinking_provider = any(m in model_name.lower() for m in thinking_models)
-        
-        if use_thinking_provider:
-            provider = ThinkingProvider(base_url=api_base, api_key=api_key)
-            extra: dict = {}
-            eb = param.get('extra_body')
-            if isinstance(eb, dict):
-                extra = dict(eb)
-            extra.update(http_chat_completions_thinking_extras(param))
-            del param["thinking"]
-            if extra:
-                param['extra_body'] = extra
-            settings_kw = param
-        else:
-            del param["thinking"]
-            provider = OpenAIProvider(
-                base_url=api_base,
-                api_key=api_key,
-            )
-            settings_kw = param
-        return JsonRepairOpenAIChatModel(
-            model_name,
-            provider=provider,
-            settings=ModelSettings(**settings_kw)
-        )
+        del param["thinking"]
+        provider = OpenAIProvider(base_url=api_base, api_key=api_key)
+    return JsonRepairOpenAIChatModel(model_name, provider=provider, settings=ModelSettings(**param))

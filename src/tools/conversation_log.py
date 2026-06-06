@@ -10,7 +10,7 @@ from typing import Any
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from app_config import settings
-from persist_utils import atomic_write_json
+from persist_utils import atomic_write_json, safe_name
 import logger
 
 _PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
@@ -18,7 +18,7 @@ _PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
 
 def _safe_segment(s: str, max_len: int = 80) -> str:
     s = (s or "").strip().replace("\n", " ")
-    return ("".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in s)[:max_len]) or "default"
+    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:

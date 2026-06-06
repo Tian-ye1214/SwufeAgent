@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic_ai import Agent, FunctionToolset
 
-import logger
+import tool_telemetry
 from app_config import get_agent_run_policy
 from ModelGateway.model_factory import create_model
 
@@ -15,7 +15,7 @@ def create_function_toolset(
     toolset_id: str = "default",
     instructions: str | None = None,
 ) -> FunctionToolset:
-    wrapped_tools = logger.wrap_tools_for_user_notify(
+    wrapped_tools = tool_telemetry.wrap_tools_for_user_notify(
         list(tools), policy=get_agent_run_policy()
     )
     return FunctionToolset(

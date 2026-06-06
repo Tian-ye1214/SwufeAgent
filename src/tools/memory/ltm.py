@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -9,7 +8,7 @@ from typing import Any
 import httpx
 import json_repair
 import logger
-from persist_utils import atomic_write_json, atomic_write_text, file_lock
+from persist_utils import atomic_write_text, file_lock, load_json_state, rel_key, save_locked_json
 from app_config import (
     chat_completion_inference_request_fields,
     get_env,
@@ -231,30 +230,14 @@ class LongTermMemory:
 
     def _load_log_state_sync(self) -> dict[str, Any]:
         self._ensure_log_state_file_sync()
-        p = self._log_state_path()
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return {"version": 1, "sources": {}}
-            src = data.get("sources")
-            if not isinstance(src, dict):
-                data["sources"] = {}
-            return data
-        except Exception:
-            return {"version": 1, "sources": {}}
+        return load_json_state(self._log_state_path(), 1)
 
     def _save_log_state_sync(self, state: dict[str, Any]) -> None:
         self._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        p = self._log_state_path()
-        with file_lock(p):
-            atomic_write_json(p, state)
+        save_locked_json(self._log_state_path(), state)
 
     def _rel_log_key(self, path: Path, root: Path) -> str:
-        try:
-            return path.resolve().relative_to(root).as_posix()
-        except ValueError:
-            return path.resolve().as_posix()
+        return rel_key(path, root)
 
     def _merge_log_state_updates_sync(self, updates: dict[str, int]) -> None:
         """合并已处理到的字节偏移（仅更新传入的键）。"""
