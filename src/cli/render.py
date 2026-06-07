@@ -19,6 +19,7 @@ from cli.output import (
     emit_rule,
     status_message,
 )
+from cli.diff_view import compute_line_diff, diff_stats, format_diff_text, render_diff
 
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
@@ -72,6 +73,17 @@ def print_markdown_panel(text: str, *, title: str = "") -> None:
     if not body:
         return
     emit_renderable(Panel(Markdown(body), title=title or None, border_style="cyan"))
+
+
+def show_file_diff(old: str, new: str, *, path: str) -> tuple[int, int, int]:
+    """在 CLI 打印 old→new 的彩色 diff（增绿/删红/改蓝）；无变化则不输出。返回 (增, 删, 改)。"""
+    lines = compute_line_diff(old, new)
+    stats = diff_stats(lines)
+    if stats == (0, 0, 0):
+        return stats
+    emit_renderable(render_diff(lines, path=path, stats=stats))
+    logger.info_file_only("[diff] %s\n%s", path, format_diff_text(lines, path=path, stats=stats))
+    return stats
 
 
 def show_model_output(text: str, *, title: str = "模型", markdown: bool = True) -> None:

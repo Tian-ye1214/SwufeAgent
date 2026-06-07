@@ -17,6 +17,7 @@ from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
 from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
 from tools.browser_session import PlaywrightBrowserSession
+from cli.render import show_file_diff
 
 _REPO_ROOT = runtime_repo_root()
 
@@ -421,11 +422,14 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
+            try:
+                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            except Exception:
+                old_content = ""
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-
-            result = f"File '{name}' written successfully ({content_len} characters)"
-            return result
+            show_file_diff(old_content, content, path=name)
+            return f"File '{name}' written successfully ({content_len} characters)"
         except ValueError as e:
             return f"Security error: {e}"
         except PermissionError as e:
@@ -452,9 +456,13 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
+            try:
+                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            except Exception:
+                old_content = ""
             with open(file_path, "a", encoding="utf-8") as f:
                 f.write(content)
-
+            show_file_diff(old_content, old_content + content, path=name)
             total_size = file_path.stat().st_size
             return f"Content appended to '{name}' successfully ({content_len} chars added, total file size: {total_size} bytes)"
         except ValueError as e:
@@ -463,6 +471,43 @@ class BasicToolkit:
             return f"Permission error: Cannot append to '{name}' - {e}"
         except Exception as e:
             return f"Append error: {type(e).__name__} - {e}"
+
+
+    def edit_file(self, name: str, old_string: str, new_string: str) -> str:
+        """
+        Edit an existing file by replacing an EXACT, UNIQUE snippet (string replace).
+        Prefer this over write_file when modifying an existing file: it makes a precise,
+        local change and shows a colored diff instead of rewriting the whole file.
+
+        Parameters:
+            name: File path (relative to WorkDatabase directory).
+            old_string: Exact text to replace. Must occur EXACTLY ONCE in the file —
+                include enough surrounding context (indentation, neighboring lines) to be unique.
+            new_string: Replacement text.
+        """
+        try:
+            file_path = self._safe_path(name)
+            if not file_path.exists():
+                return f"Edit error: file '{name}' does not exist (use write_file to create it)"
+            old_content = file_path.read_text(encoding="utf-8")
+            count = old_content.count(old_string)
+            if count == 0:
+                return f"Edit error: old_string not found in '{name}'"
+            if count > 1:
+                return f"Edit error: old_string is not unique in '{name}' (found {count}×); add more surrounding context"
+            new_content = old_content.replace(old_string, new_string, 1)
+            if new_content == old_content:
+                return "Edit error: new_string is identical to old_string; nothing to change"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            added, deleted, modified = show_file_diff(old_content, new_content, path=name)
+            return f"Edited '{name}' successfully (+{added} -{deleted} ~{modified})"
+        except ValueError as e:
+            return f"Security error: {e}"
+        except PermissionError as e:
+            return f"Permission error: Cannot edit '{name}' - {e}"
+        except Exception as e:
+            return f"Edit error: {type(e).__name__} - {e}"
 
     def create_directory(self, name: str) -> str:
         """
@@ -703,6 +748,7 @@ class BasicToolkit:
             # Write
             self.write_file,
             self.append_to_file,
+            self.edit_file,
             # Directories
             self.create_directory,
             # Search
