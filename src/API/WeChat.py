@@ -11,17 +11,15 @@ from agent_core.input_messages import UserMessage
 from base import BotBase
 from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
 
-_MIME_MAP = {
-    "image": "image/jpeg",
-    "voice": "audio/mpeg",
-    "video": "video/mp4",
-    "file": "application/octet-stream",
-}
-
-
 class WeChatAgentBot(BotBase):
     _ENV_AGENT_TIMEOUT = "WECHAT_AGENT_TIMEOUT_S"
     _ENV_SEND_TIMEOUT = "WECHAT_SEND_REPLY_TIMEOUT_S"
+    _MIME_MAP = {
+        "image": "image/jpeg",
+        "voice": "audio/mpeg",
+        "video": "video/mp4",
+        "file": "application/octet-stream",
+    }
 
     @property
     def platform_tag(self) -> str:
@@ -36,7 +34,7 @@ class WeChatAgentBot(BotBase):
             mime, _ = mimetypes.guess_type(media.file_name)
             if mime:
                 return mime
-        return _MIME_MAP.get((media.type or "").lower(), "application/octet-stream")
+        return self._MIME_MAP.get((media.type or "").lower(), "application/octet-stream")
 
     async def _build_user_message(self, bot: WeChatBot, msg) -> UserMessage:
         """Build a UserMessage from text plus downloaded media bytes."""

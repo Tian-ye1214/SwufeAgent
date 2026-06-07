@@ -35,6 +35,12 @@ def settings() -> dict[str, Any]:
     return _CONFIG  # type: ignore[return-value]
 
 
+def reset_config(cfg: dict[str, Any] | None = None) -> None:
+    """重置进程内配置缓存：传 cfg 直接注入（测试隔离用）；不传则下次 settings() 重新加载。"""
+    global _CONFIG
+    _CONFIG = cfg
+
+
 def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
     env: dict[str, str] = {}
     if DOTENV_FILE.is_file():

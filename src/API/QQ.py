@@ -13,21 +13,17 @@ from base import BotBase
 from qq_media_helpers import extract_media
 from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
 
-_u = get_env("QQBOT_ID", warn=False)
-config.set_bot_uin(_u if _u else None)
-
-_FILE_ALLOW_EXT = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm",
-     ".pdf", ".txt", ".md", ".docx", ".xlsx", ".csv", ".json"}
-)
-
-
 class QQBot(BotBase):
     _ENV_AGENT_TIMEOUT = "QQ_AGENT_TIMEOUT_S"
     _ENV_SEND_TIMEOUT = "QQ_SEND_REPLY_TIMEOUT_S"
+    _FILE_ALLOW_EXT = frozenset({
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm",
+        ".pdf", ".txt", ".md", ".docx", ".xlsx", ".csv", ".json",
+    })
 
     def __init__(self):
         super().__init__()
+        config.set_bot_uin(get_env("QQBOT_ID", warn=False) or None)
         self._bot_client = BotClient()
         self._bot_client.add_shutdown_handler(self._on_shutdown)
 
@@ -62,7 +58,7 @@ class QQBot(BotBase):
         )
 
     async def _extract_attachments(self, event: BaseMessageEvent) -> list:
-        return await extract_media(self._bot_client.api, event, _FILE_ALLOW_EXT)
+        return await extract_media(self._bot_client.api, event, self._FILE_ALLOW_EXT)
 
     async def _inline_pdf_attachments(self, user_text: str, attachments: list) -> tuple[str, list]:
         """Parse PDF BinaryContent into text and keep other attachments unchanged."""

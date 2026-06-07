@@ -9,8 +9,6 @@ import pandas as pd
 from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
 
 _WORK_DATABASE_ROOT = work_database_root()
-PDF_PARSE_FAILURE_HINT = "（PDF 附件无法解析为文本，请尝试发送截图或纯文本。）"
-
 
 class _HTMLTextExtractor(HTMLParser):
     _BLOCK_TAGS = {
@@ -124,7 +122,7 @@ def is_pdf_content(data: bytes, *, media_type: str = "", filename: str = "") -> 
 def pdf_attachment_text_block(data: bytes, *, filename: str | None = None) -> str:
     extracted = extract_text_from_pdf_bytes(data)
     if not extracted:
-        return PDF_PARSE_FAILURE_HINT
+        return "PDF 附件无法解析为文本，请尝试发送截图或纯文本。"
     label = f"【PDF 附件：{filename}】" if filename else "【PDF 附件】"
     return f"{label}\n\n{extracted}"
 

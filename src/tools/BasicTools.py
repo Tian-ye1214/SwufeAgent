@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import mimetypes
 from ddgs import DDGS
 import logger
@@ -422,12 +423,13 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
-            try:
-                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-            except Exception:
-                old_content = ""
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            with threading.Lock():
+                try:
+                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                except Exception:
+                    old_content = ""
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
             show_file_diff(old_content, content, path=name)
             return f"File '{name}' written successfully ({content_len} characters)"
         except ValueError as e:
@@ -456,14 +458,15 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
-            try:
-                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-            except Exception:
-                old_content = ""
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(content)
+            with threading.Lock():
+                try:
+                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                except Exception:
+                    old_content = ""
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(content)
+                total_size = file_path.stat().st_size
             show_file_diff(old_content, old_content + content, path=name)
-            total_size = file_path.stat().st_size
             return f"Content appended to '{name}' successfully ({content_len} chars added, total file size: {total_size} bytes)"
         except ValueError as e:
             return f"Security error: {e}"
@@ -489,17 +492,18 @@ class BasicToolkit:
             file_path = self._safe_path(name)
             if not file_path.exists():
                 return f"Edit error: file '{name}' does not exist (use write_file to create it)"
-            old_content = file_path.read_text(encoding="utf-8")
-            count = old_content.count(old_string)
-            if count == 0:
-                return f"Edit error: old_string not found in '{name}'"
-            if count > 1:
-                return f"Edit error: old_string is not unique in '{name}' (found {count}×); add more surrounding context"
-            new_content = old_content.replace(old_string, new_string, 1)
-            if new_content == old_content:
-                return "Edit error: new_string is identical to old_string; nothing to change"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
+            with threading.Lock():
+                old_content = file_path.read_text(encoding="utf-8")
+                count = old_content.count(old_string)
+                if count == 0:
+                    return f"Edit error: old_string not found in '{name}'"
+                if count > 1:
+                    return f"Edit error: old_string is not unique in '{name}' (found {count}×); add more surrounding context"
+                new_content = old_content.replace(old_string, new_string, 1)
+                if new_content == old_content:
+                    return "Edit error: new_string is identical to old_string; nothing to change"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
             added, deleted, modified = show_file_diff(old_content, new_content, path=name)
             return f"Edited '{name}' successfully (+{added} -{deleted} ~{modified})"
         except ValueError as e:

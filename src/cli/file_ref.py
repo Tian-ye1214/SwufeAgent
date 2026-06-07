@@ -25,8 +25,6 @@ _TEXT_SUFFIXES = frozenset(
         ".xml", ".csv", ".ini", ".cfg", ".env", ".log",
     }
 )
-_DEFAULT_MAX_CHARS = 20_000
-_DEFAULT_TOTAL_MAX_CHARS = 50_000
 
 
 @dataclass(frozen=True)
@@ -159,8 +157,8 @@ def _read_text_safely(path: Path) -> str:
 def load_file_refs(
     text: str,
     *,
-    max_chars: int = _DEFAULT_MAX_CHARS,
-    total_max_chars: int = _DEFAULT_TOTAL_MAX_CHARS,
+    max_chars: int = 20_000,
+    total_max_chars: int = 50_000,
 ) -> list[FileRefResult]:
     refs = _parse_file_refs(text)
     if not refs:

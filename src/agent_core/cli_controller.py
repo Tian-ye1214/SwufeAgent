@@ -26,21 +26,6 @@ if TYPE_CHECKING:
     from agent_core.system import AgentSystem
 
 
-EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
-RESET_COMMANDS = {"/clear", "新任务"}
-BUSY_SAFE_COMMANDS = {
-    "/stop",
-    "/status",
-    "/cancel",
-    "/help",
-    "/trace",
-    "/tasks",
-    "/pwd",
-    "/config",
-    "/skills",
-}
-
-
 @dataclass
 class CliSessionState:
     history: ChatHistory
@@ -55,6 +40,10 @@ class QueuedCliInput:
 
 class AgentCliController:
     """CLI/TUI orchestration for AgentSystem."""
+
+    EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
+    RESET_COMMANDS = {"/clear", "新任务"}  # 备用：当前未在本类内引用
+    BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/skills"}
 
     def __init__(self, system: "AgentSystem") -> None:
         self.system = system
@@ -171,7 +160,7 @@ class AgentCliController:
         system = self.system
         if system._current_turn is not None:
             command = raw_input.split()[0].lower()
-            if command not in BUSY_SAFE_COMMANDS:
+            if command not in self.BUSY_SAFE_COMMANDS:
                 print_warning(
                     "A turn is currently running. Use /stop first or wait for it to finish."
                 )
@@ -256,7 +245,7 @@ class AgentCliController:
             return "continue"
 
         command = raw_input.lower()
-        if command in EXIT_COMMANDS:
+        if command in self.EXIT_COMMANDS:
             if self.system._current_turn is not None:
                 print_warning("A turn is running. Use /stop before exiting.")
                 return "continue"
