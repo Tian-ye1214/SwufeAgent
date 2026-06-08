@@ -27,7 +27,6 @@ import matplotlib.dates as mdates
 import akshare as ak
 import warnings
 import os
-import sys
 
 warnings.filterwarnings('ignore')
 
@@ -353,7 +352,7 @@ plt.tight_layout()
 try:
     plt.savefig(CHART_PATH, dpi=150, bbox_inches='tight')
     print(f"    图表已保存: {CHART_PATH}")
-except Exception as e:
+except Exception:
     # 备用：保存到当前工作目录
     fallback_path = os.path.join(os.getcwd(), '双均线策略回测图表.png')
     plt.savefig(fallback_path, dpi=150, bbox_inches='tight')
