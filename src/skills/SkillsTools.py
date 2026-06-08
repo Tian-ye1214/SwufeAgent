@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import logger
-
 if TYPE_CHECKING:
     from skills.SkillsManager import SkillsManager
 
@@ -124,22 +121,28 @@ class SkillsToolkit:
         metadata_list = self._manager.get_all_metadata()
         return f"Skills 已刷新。当前共有 {len(metadata_list)} 个 Skills 可用。"
 
-    async def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
+    async def execute_skill_script(
+        self, skill_name: str, script_name: str, args: str = "", timeout: float = 300
+    ) -> str:
         """
         执行 Skill 中的脚本文件。
 
         某些 Skill 包含可执行的脚本，用于完成特定操作。
         脚本的执行输出会被返回，而脚本代码本身不会进入上下文。
+        .py 脚本使用项目自身的 Python 解释器运行（能直接 import 项目依赖）。
 
         Parameters:
             skill_name: Skill 名称
-            script_name: 脚本文件名 (如 "scripts/process.py")
+            script_name: 脚本文件名 (如 "scripts/process.py")，仅限技能目录内
             args: 传递给脚本的参数
+            timeout: 最长执行秒数，默认 300；长回测/数据抓取可调大
 
         Returns:
             脚本执行的输出结果
         """
-        return await self._manager.execute_skill_script(skill_name, script_name, args)
+        return await self._manager.execute_skill_script(
+            skill_name, script_name, args, timeout
+        )
 
     @property
     def tools(self) -> list:

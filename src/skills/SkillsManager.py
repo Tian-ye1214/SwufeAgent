@@ -153,9 +153,9 @@ class SkillsManager:
         if resource_name in skill.resources:
             return skill.resources[resource_name]
 
-        resource_path = skill.path / resource_name
-        if not resource_path.exists():
-            logger.warning(f"Skill {skill_name} 的资源 {resource_name} 不存在")
+        resource_path = self._resolve_within(skill.path, resource_name)
+        if resource_path is None or not resource_path.exists():
+            logger.warning(f"Skill {skill_name} 的资源 {resource_name} 不存在或越界")
             return None
 
         try:
@@ -180,7 +180,20 @@ class SkillsManager:
                 resources.append(str(rel_path))
         return resources
 
-    async def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
+    @staticmethod
+    def _resolve_within(skill_dir: Path, relative: str) -> Optional[Path]:
+        """把 relative 解析到 skill_dir 内；绝对路径或 .. 逃逸出目录则返回 None。"""
+        base = skill_dir.resolve()
+        try:
+            target = (base / relative).resolve()
+        except Exception:
+            return None
+        return target if target.is_relative_to(base) else None
+
+    async def execute_skill_script(
+        self, skill_name: str, script_name: str, args: str = "", timeout: float = 300
+    ) -> str:
+        import sys
         import subprocess
         from subprocess_runner import run_subprocess
 
@@ -188,13 +201,16 @@ class SkillsManager:
         if not skill:
             return f"错误: Skill '{skill_name}' 不存在"
 
-        script_path = skill.path / script_name
+        script_path = self._resolve_within(skill.path, script_name)
+        if script_path is None:
+            return f"错误: 脚本路径越界: '{script_name}'"
         if not script_path.exists():
             return f"错误: 脚本 '{script_name}' 不存在"
 
         ext = script_path.suffix.lower()
+        py_exec = "python" if getattr(sys, "frozen", False) else sys.executable
         executors = {
-            ".py": ["python"],
+            ".py": [py_exec],
             ".sh": ["bash"],
             ".bat": ["cmd", "/c"],
             ".ps1": ["powershell", "-File"],
@@ -209,7 +225,7 @@ class SkillsManager:
 
         try:
             stdout, stderr, return_code = await run_subprocess(
-                cmd, shell=False, cwd=str(skill.path), timeout=60
+                cmd, shell=False, cwd=str(skill.path), timeout=timeout
             )
             output = stdout + stderr
             return (
@@ -218,6 +234,6 @@ class SkillsManager:
                 else f"执行完成，返回码: {return_code}"
             )
         except subprocess.TimeoutExpired:
-            return "错误: 脚本执行超时 (60秒)"
+            return f"错误: 脚本执行超时 ({timeout}秒)"
         except Exception as e:
             return f"执行错误: {e}"
