@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,7 @@ from lifecycle import AgentInvocationState
 from runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
     compress_history_async,
+    context_usage_breakdown,
     prewarm_effective_max_contexts_by_role_async,
 )
 from prompt import get_skills_as_in_system_prompt
@@ -39,6 +41,7 @@ def print_cli_help() -> None:
 | `/pwd` | 查看当前工作目录 |
 | `/cd <path>` | 切换工作目录 |
 | `/config` | 查看配置摘要 |
+| `/context` | 查看上下文 token 用量分解 |
 | `/skills` | 查看已加载 Skills |
 | `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
 | `/api` | 修改 BASE_URL 与 API_KEY |
@@ -105,6 +108,44 @@ def print_config_summary() -> None:
         f"工作目录: {Path.cwd()}",
     ]
     print_panel("\n".join(lines), title="配置摘要")
+
+
+def _k_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+async def _print_context_usage(
+    system: Any,
+    coordinator_history: ChatHistory | None,
+    manager_history: ChatHistory | None,
+) -> None:
+    skills_manager = system._skills_manager
+    memory_injection = system._injection_for_session()
+    roles = [
+        ("coordinator", "Coordinator", coordinator_history),
+        ("manager", "Manager", manager_history),
+    ]
+    lines: list[str] = []
+    for role, label, history in roles:
+        messages = list(history.messages) if history is not None else []
+        bd = await asyncio.to_thread(
+            context_usage_breakdown,
+            role,
+            messages,
+            skills_manager=skills_manager,
+            memory_injection=memory_injection,
+        )
+        lines.append(
+            f"{label}: {bd['percent']:.0f}%  "
+            f"({_k_tokens(bd['total'])}/{_k_tokens(bd['max'])} tok)"
+        )
+        lines.append(
+            f"   系统提示 {_k_tokens(bd['system'])}"
+            f"（含记忆注入 {_k_tokens(bd['memory'])}） · 历史 {_k_tokens(bd['history'])}"
+        )
+        lines.append(f"   自动压缩阈值 {_k_tokens(bd['threshold'])} tok")
+        lines.append("")
+    print_panel("\n".join(lines).rstrip(), title="上下文用量")
 
 
 async def _print_lifecycle_status(system: Any) -> None:
@@ -200,6 +241,9 @@ async def handle_slash_command(
         return True, None
     if cmd == "/config":
         print_config_summary()
+        return True, None
+    if cmd == "/context":
+        await _print_context_usage(system, coordinator_history, manager_history)
         return True, None
     if cmd == "/pwd":
         print_success(str(Path.cwd()))

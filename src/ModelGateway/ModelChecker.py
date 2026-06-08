@@ -21,7 +21,14 @@ from app_config import (
     get_model_and_params,
     settings,
 )
-from prompt import format_prompt_current_time, load_prompt
+from prompt import (
+    format_long_term_memory_for_prompt,
+    format_prompt_current_time,
+    get_coordinator_system_prompt,
+    get_manager_system_prompt,
+    get_worker_system_prompt,
+    load_prompt,
+)
 from tools.memory import ChatHistory, pydantic_messages_to_text
 
 import tiktoken
@@ -42,6 +49,8 @@ from pydantic_ai.messages import (
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
 _COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
+# 多模态（图像/二进制）part 的粗略 token 估算——base64 不进窗口，按每张固定估值计入。
+_MULTIMODAL_PART_TOKEN_ESTIMATE = 1000
 
 
 def _count_text_tokens(text: str, chars_per_token: float) -> int:
@@ -57,12 +66,23 @@ def estimate_message_tokens(msg: Any, chars_per_token: float) -> int:
     """单条 pydantic-ai 消息的 token 估算。"""
     if isinstance(msg, ModelRequest):
         parts: list[str] = []
+        image_tokens = 0
         for p in msg.parts:
             if isinstance(p, UserPromptPart):
-                parts.append(str(p.content))
+                content = p.content
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, (list, tuple)):
+                    for item in content:
+                        if isinstance(item, str):
+                            parts.append(item)
+                        else:  # 多模态 part（图像/二进制/URL）
+                            image_tokens += _MULTIMODAL_PART_TOKEN_ESTIMATE
+                else:
+                    parts.append(str(content))
             elif isinstance(p, BaseToolReturnPart):
                 parts.append(f"{p.tool_name}:{p.tool_call_id}:{p.model_response_str()}")
-        return _count_text_tokens("\n".join(parts), chars_per_token)
+        return _count_text_tokens("\n".join(parts), chars_per_token) + image_tokens
     if isinstance(msg, ModelResponse):
         parts: list[str] = []
         for p in msg.parts:
@@ -86,6 +106,54 @@ def estimate_history_tokens(
     ctx = get_context_config(role)
     cpt = float(chars_per_token if chars_per_token is not None else ctx["token_estimate_fallback_chars_per_token"])
     return sum(estimate_message_tokens(m, cpt) for m in messages)
+
+
+def count_text_tokens(text: str, chars_per_token: float = 4.0) -> int:
+    """独立文本的 token 计数，供 system prompt / 记忆注入等固定开销计量。"""
+    return _count_text_tokens(text or "", chars_per_token)
+
+
+_ROLE_SYSTEM_PROMPT_BUILDERS = {
+    "coordinator": get_coordinator_system_prompt,
+    "manager": get_manager_system_prompt,
+    "worker": get_worker_system_prompt,
+}
+
+
+def estimate_system_prompt_tokens(role: str, skills_manager: Any, memory_injection: str) -> int:
+    """构建并计量某角色 system prompt 的 token（含 skills 摘要、记忆注入、行为约束等固定开销）。"""
+    builder = _ROLE_SYSTEM_PROMPT_BUILDERS.get(role)
+    if builder is None:
+        return 0
+    return count_text_tokens(builder(skills_manager, memory_injection))
+
+
+def context_usage_breakdown(
+    role: str,
+    history_messages: list,
+    *,
+    skills_manager: Any,
+    memory_injection: str,
+) -> dict[str, Any]:
+    """某角色当前上下文用量分解：system prompt（含记忆注入子项）、历史、合计、上限、压缩阈值、占比。"""
+    ctx = get_context_config(role)
+    cpt = float(ctx["token_estimate_fallback_chars_per_token"])
+    system_tokens = estimate_system_prompt_tokens(role, skills_manager, memory_injection)
+    memory_tokens = count_text_tokens(format_long_term_memory_for_prompt(memory_injection))
+    history_tokens = estimate_history_tokens(history_messages, chars_per_token=cpt, role=role)
+    max_tokens = get_effective_max_context(role=role)
+    total = system_tokens + history_tokens
+    threshold = int(max_tokens * float(ctx["auto_compress_ratio"]))
+    percent = 0.0 if max_tokens <= 0 else min(100.0, total * 100.0 / max_tokens)
+    return {
+        "system": system_tokens,
+        "memory": memory_tokens,
+        "history": history_tokens,
+        "total": total,
+        "max": max_tokens,
+        "threshold": threshold,
+        "percent": percent,
+    }
 
 
 def _normalize_model_name(name: str) -> str:

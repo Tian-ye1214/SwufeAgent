@@ -180,8 +180,9 @@ class SkillsManager:
                 resources.append(str(rel_path))
         return resources
 
-    def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
+    async def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
         import subprocess
+        from subprocess_runner import run_subprocess
 
         skill = self.skills.get(skill_name)
         if not skill:
@@ -207,37 +208,16 @@ class SkillsManager:
             cmd.extend(args.split())
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                cwd=str(skill.path),
+            stdout, stderr, return_code = await run_subprocess(
+                cmd, shell=False, cwd=str(skill.path), timeout=60
             )
-            output = result.stdout + result.stderr
+            output = stdout + stderr
             return (
-                f"返回码: {result.returncode}\n输出:\n{output}"
+                f"返回码: {return_code}\n输出:\n{output}"
                 if output
-                else f"执行完成，返回码: {result.returncode}"
+                else f"执行完成，返回码: {return_code}"
             )
         except subprocess.TimeoutExpired:
             return "错误: 脚本执行超时 (60秒)"
         except Exception as e:
             return f"执行错误: {e}"
-
-    def match_skill(self, query: str) -> Optional[Skill]:
-        query_lower = query.lower()
-
-        for skill in self.skills.values():
-            if skill.name in query_lower:
-                return skill
-
-            desc_words = skill.description.lower().split()
-            query_words = query_lower.split()
-            matches = sum(1 for w in query_words if any(w in dw for dw in desc_words))
-            if matches >= 2:
-                return skill
-
-        return None

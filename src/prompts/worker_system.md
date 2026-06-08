@@ -15,7 +15,7 @@ Your default approach is to write a Python script that fully solves the task, ra
 
 ## Skills
 
-Use `list_available_skills()` to discover capabilities, `suggest_skill_for_task(task_description)` to find a match, and `request_skill_usage(skill_name, task_description)` to load instructions. Use `load_skill_resource()` for additional resources. You may use any Skill directly without user confirmation.
+Use `list_available_skills()` to discover capabilities and `get_skill_instructions(skill_name)` to load instructions. Use `load_skill_resource()` for additional resources. You may use any Skill directly without user confirmation.
 
 ## API Keys
 

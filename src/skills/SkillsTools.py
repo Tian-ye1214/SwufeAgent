@@ -110,70 +110,6 @@ class SkillsToolkit:
 
         return f"# 资源: {skill_name}/{resource_name}\n\n{content}"
 
-    def request_skill_usage(self, skill_name: str, task_description: str) -> str:
-        """
-        使用某个 Skill 来完成任务，直接加载并返回 Skill 指令。
-
-        Parameters:
-            skill_name: 要使用的 Skill 名称
-            task_description: 任务描述，说明为什么需要使用此 Skill
-
-        Returns:
-            Skill 指令内容
-        """
-        skill = self._manager.get_skill(skill_name)
-        if skill is None:
-            available = [m.name for m in self._manager.get_all_metadata()]
-            return (
-                f"错误: Skill '{skill_name}' 不存在。\n"
-                f"可用的 Skills: {', '.join(available) if available else '无'}"
-            )
-
-        logger.info(f"🔧 使用 Skill [{skill_name}] 执行任务: {task_description}")
-        instructions = self._manager.load_skill_instructions(skill_name)
-        return "\n".join([
-            f"# Skill: {skill_name}",
-            f"任务: {task_description}",
-            "=" * 50,
-            "",
-            instructions,
-            "",
-            "=" * 50,
-            "请按照上述指令完成任务。",
-        ])
-
-    def suggest_skill_for_task(self, task_description: str) -> str:
-        """
-        根据任务描述推荐合适的 Skill。
-
-        分析任务描述，自动匹配最相关的 Skill。这有助于快速找到
-        完成任务所需的能力扩展。
-
-        Parameters:
-            task_description: 任务描述
-
-        Returns:
-            推荐的 Skill 信息，如果没有匹配则返回提示
-        """
-        matched_skill = self._manager.match_skill(task_description)
-
-        if matched_skill:
-            return (
-                f"推荐使用 Skill: {matched_skill.name}\n"
-                f"描述: {matched_skill.description}\n\n"
-                f"使用 get_skill_instructions('{matched_skill.name}') 获取详细指令，\n"
-                f"或使用 request_skill_usage('{matched_skill.name}', '任务描述') 直接使用此 Skill。"
-            )
-
-        available = [m.name for m in self._manager.get_all_metadata()]
-        if available:
-            return (
-                f"未找到与任务直接匹配的 Skill。\n"
-                f"可用的 Skills: {', '.join(available)}\n"
-                f"可以使用 list_available_skills() 查看详细信息。"
-            )
-        return "当前没有可用的 Skills。请手动完成任务。"
-
     def refresh_skills(self) -> str:
         """
         刷新 Skills 列表。
@@ -188,7 +124,7 @@ class SkillsToolkit:
         metadata_list = self._manager.get_all_metadata()
         return f"Skills 已刷新。当前共有 {len(metadata_list)} 个 Skills 可用。"
 
-    def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
+    async def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
         """
         执行 Skill 中的脚本文件。
 
@@ -203,7 +139,7 @@ class SkillsToolkit:
         Returns:
             脚本执行的输出结果
         """
-        return self._manager.execute_skill_script(skill_name, script_name, args)
+        return await self._manager.execute_skill_script(skill_name, script_name, args)
 
     @property
     def tools(self) -> list:
@@ -212,8 +148,6 @@ class SkillsToolkit:
             self.list_available_skills,
             self.get_skill_instructions,
             self.load_skill_resource,
-            self.request_skill_usage,
-            self.suggest_skill_for_task,
             self.refresh_skills,
             self.execute_skill_script,
         ]

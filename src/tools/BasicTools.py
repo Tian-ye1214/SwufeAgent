@@ -3,7 +3,6 @@ import asyncio
 import inspect
 import os
 import re
-import signal
 import subprocess
 import threading
 import mimetypes
@@ -17,71 +16,11 @@ from app_config import get_agent_run_policy, get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
 from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
+from subprocess_runner import run_subprocess
 from tools.browser_session import PlaywrightBrowserSession
 from cli.render import show_file_diff
 
 _REPO_ROOT = runtime_repo_root()
-
-
-async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
-    """杀掉子进程及其后代（无 psutil 依赖），并收尸。"""
-    if proc.returncode is not None:
-        return
-    try:
-        if _platform.system() == "Windows":
-            # /T 杀整棵树：shell 会经 cmd.exe 再起真正的子进程。
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/F", "/T", "/PID", str(proc.pid),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(killer.wait(), timeout=5)
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=5)
-    except Exception:
-        pass
-
-
-async def run_subprocess(
-    args, *, shell: bool, cwd: str, env: dict | None = None, timeout: float
-) -> tuple[str, str, int | None]:
-    """跑子进程并返回 (stdout, stderr, returncode)；取消或超时都会杀掉整棵进程树。
-
-    取代 asyncio.to_thread(subprocess.run, ...)——后者在任务被取消时既不中断阻塞线程、
-    也不杀子进程，会留下孤儿进程与卡死的线程池槽位。
-    """
-    kwargs: dict = dict(
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=cwd, env=env
-    )
-    if _platform.system() == "Windows":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True  # 独立进程组，便于 killpg
-
-    if shell:
-        proc = await asyncio.create_subprocess_shell(args, **kwargs)
-    else:
-        proc = await asyncio.create_subprocess_exec(*args, **kwargs)
-
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        await _terminate_process_tree(proc)
-        raise subprocess.TimeoutExpired(args, timeout)
-    except asyncio.CancelledError:
-        await _terminate_process_tree(proc)
-        raise
-    return (
-        out.decode("utf-8", errors="replace"),
-        err.decode("utf-8", errors="replace"),
-        proc.returncode,
-    )
 
 
 class BasicToolkit:
@@ -94,6 +33,7 @@ class BasicToolkit:
         extra_worker_tools: list | None = None,
     ):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
+        self._file_lock = threading.Lock()
         self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
         self._skills_manager = skills_manager
@@ -423,7 +363,7 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
-            with threading.Lock():
+            with self._file_lock:
                 try:
                     old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
                 except Exception:
@@ -458,7 +398,7 @@ class BasicToolkit:
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
-            with threading.Lock():
+            with self._file_lock:
                 try:
                     old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
                 except Exception:
@@ -492,7 +432,7 @@ class BasicToolkit:
             file_path = self._safe_path(name)
             if not file_path.exists():
                 return f"Edit error: file '{name}' does not exist (use write_file to create it)"
-            with threading.Lock():
+            with self._file_lock:
                 old_content = file_path.read_text(encoding="utf-8")
                 count = old_content.count(old_string)
                 if count == 0:
