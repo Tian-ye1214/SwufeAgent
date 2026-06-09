@@ -12,12 +12,13 @@ from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.suggester import Suggester
 from textual.widgets import Footer, Input, RichLog, Static
 
 from cli.completer import COMMANDS, _iter_file_completions
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
+from cli.pending_review import compute_hunks
 from app_config import get_agent_roles
 
 READY_LABEL = "就绪"
@@ -126,6 +127,9 @@ class RedLotusTui(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #output { height: 1fr; border: round $accent; }
+    #review-view { display: none; height: 1fr; border: round $warning; padding: 0 1; }
+    .hunk-view { height: auto; padding: 0 0 1 0; }
+    .hunk-view.-current { background: $boost; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
     #stream-preview { display: none; height: 12; max-height: 12; padding: 0 1; }
     #status { height: 1; padding: 0 1; background: $surface; color: $text-muted; }
@@ -136,6 +140,12 @@ class RedLotusTui(App[None]):
     BINDINGS = [
         ("ctrl+c", "stop_or_quit", "Stop"),
         ("ctrl+q", "stop_or_quit", "Quit"),
+        ("ctrl+r", "review", "审查更改"),
+        Binding("y", "review_keep", "保留", show=False),
+        Binding("n", "review_undo", "撤销", show=False),
+        Binding("up", "review_prev", "上一处", show=False),
+        Binding("down", "review_next", "下一处", show=False),
+        Binding("escape", "review_exit", "退出审查", show=False),
     ]
 
     def __init__(self, system: Any, stop_event: asyncio.Event | None = None) -> None:
@@ -150,10 +160,20 @@ class RedLotusTui(App[None]):
         self._working_frame = 0
         self._model_stream_title = ""
         self._model_stream_text = ""
+        self._ui_thread_id = 0
+        self._review_mode = False
+        self._review_items: list = []  # [(key, name, hunk), ...] 当前未决定的改动
+        self._review_idx = 0
+        self._review_widgets: list = []
+        self._pending_count = 0
+        self._rv_snapshots: dict[str, str] = {}
+        self._rv_decided: dict[str, set[int]] = {}
+        self._rv_rejected: dict[str, set[int]] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RichLog(id="output", wrap=True, markup=False, highlight=False)
+            yield VerticalScroll(id="review-view")
             yield Static("", id="context-usage")
             yield Static("", id="stream-preview")
             yield Static(READY_LABEL, id="status")
@@ -169,6 +189,8 @@ class RedLotusTui(App[None]):
         status = self.query_one("#status", Static)
         set_output_sink(TextualOutputSink(self, log, status))
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
+        self._ui_thread_id = threading.get_ident()
+        self.system.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
         await self.system.prepare_cli_session()
@@ -219,6 +241,173 @@ class RedLotusTui(App[None]):
         await self.stop_event.wait()
         self.exit()
 
+    def _on_reviews_changed(self) -> None:
+        """store 回调（可能来自 worker 线程）：更新待审查计数。"""
+        if threading.get_ident() == self._ui_thread_id:
+            self._update_pending()
+        else:
+            try:
+                self.call_from_thread(self._update_pending)
+            except RuntimeError:
+                pass
+
+    def _pending_hunks(self) -> list:
+        items: list = []
+        entries = self.system.review_store.entries()
+        valid = {str(e.path) for e in entries}
+        for key in [k for k in self._rv_decided if k not in valid]:
+            self._rv_decided.pop(key, None)
+            self._rv_rejected.pop(key, None)
+            self._rv_snapshots.pop(key, None)
+        for entry in entries:
+            key = str(entry.path)
+            if self._rv_snapshots.get(key) != entry.snapshot:  # 新文件或 agent 又改了
+                self._rv_snapshots[key] = entry.snapshot
+                self._rv_decided[key] = set()
+                self._rv_rejected[key] = set()
+            decided = self._rv_decided.get(key, set())
+            for hunk in compute_hunks(entry.baseline, entry.snapshot):
+                if hunk.index not in decided:
+                    items.append((key, entry.name, hunk))
+        return items
+
+    def _update_pending(self) -> None:
+        self._pending_count = len(self._pending_hunks())
+        self.refresh_status()
+
+    def action_review(self) -> None:
+        """Ctrl+R：审查模式临时占用输出区，全量展示所有待审查改动；y/n 决定，完成后还原输出区。"""
+        self._review_items = self._pending_hunks()
+        if not self._review_items:
+            return
+        self._review_mode = True
+        self._review_idx = 0
+        view = self.query_one("#review-view", VerticalScroll)
+        view.remove_children()
+        self._review_widgets = [
+            Static(self._render_hunk(name, hunk), classes="hunk-view")
+            for _key, name, hunk in self._review_items
+        ]
+        view.mount(*self._review_widgets)
+        view.border_title = "审查改动 · y 保留 · n 撤销 · ↑↓ 切换 · Esc 退出"
+        self.query_one("#output", RichLog).display = False
+        view.display = True
+        self.set_focus(None)
+        self._highlight_current()
+        self.refresh_status()
+
+    def _render_hunk(self, name: str, hunk, status: str | None = None) -> Text:
+        """一处改动的完整展示：位置 + 全部 +/- 内容（不截断）+ 决定状态。"""
+        t = Text()
+        t.append(f"{name}  {hunk.location}\n", style="bold")
+        for ln in hunk.old_lines:
+            t.append(f"  - {ln.rstrip()}\n", style="red")
+        for ln in hunk.new_lines:
+            t.append(f"  + {ln.rstrip()}\n", style="green")
+        if status == "keep":
+            t.append("  → ✓ 已保留", style="bold green")
+        elif status == "undo":
+            t.append("  → ✗ 已撤销", style="bold red")
+        else:
+            t.append("  …待决定（y 保留 / n 撤销）", style="dim")
+        return t
+
+    def _highlight_current(self) -> None:
+        for i, widget in enumerate(self._review_widgets):
+            widget.set_class(i == self._review_idx, "-current")
+        if 0 <= self._review_idx < len(self._review_widgets):
+            self._review_widgets[self._review_idx].scroll_visible()
+
+    def _decide_current(self, reject: bool) -> None:
+        if not self._review_mode or not self._review_items:
+            return
+        if not (0 <= self._review_idx < len(self._review_items)):
+            return
+        key, name, hunk = self._review_items[self._review_idx]
+        self._rv_decided.setdefault(key, set()).add(hunk.index)
+        rejected = self._rv_rejected.setdefault(key, set())
+        if reject:
+            rejected.add(hunk.index)
+        else:
+            rejected.discard(hunk.index)  # 改判为保留：撤销之前的"撤销"
+        self.system.review_store.apply(key, set(rejected))
+        self._review_widgets[self._review_idx].update(
+            self._render_hunk(name, hunk, "undo" if reject else "keep")
+        )
+        was_last = self._review_idx == len(self._review_items) - 1
+        if was_last and self._all_decided():
+            self._finish_review_session()  # 顺序决定到最后一条且全部决定完 → 完成
+            return
+        self._review_idx = min(self._review_idx + 1, len(self._review_items) - 1)
+        self._highlight_current()
+        self.refresh_status()
+
+    def _all_decided(self) -> bool:
+        return all(
+            hunk.index in self._rv_decided.get(key, set())
+            for key, _name, hunk in self._review_items
+        )
+
+    def _finish_review_session(self) -> None:
+        self._exit_review()
+
+    def _finish_if_done(self, key: str) -> None:
+        entry = self.system.review_store.get(key)
+        if entry is None:
+            return
+        decided = self._rv_decided.get(key, set())
+        if all(h.index in decided for h in compute_hunks(entry.baseline, entry.snapshot)):
+            self.system.review_store.finish(key)
+
+    def _exit_review(self) -> None:
+        for key in list(self._rv_decided.keys()):  # 退出时：全部块都决定完的文件 → 清出暂存区
+            self._finish_if_done(key)
+        self._review_mode = False
+        self._review_items = []
+        self._review_idx = 0
+        self._review_widgets = []
+        try:
+            view = self.query_one("#review-view", VerticalScroll)
+            view.remove_children()
+            view.display = False
+        except Exception:
+            pass
+        try:
+            self.query_one("#output", RichLog).display = True  # 还原输出区（内容原样保留）
+        except Exception:
+            pass
+        self._pending_count = len(self._pending_hunks())
+        try:
+            self.query_one("#input", AgentInput).focus()
+        except Exception:
+            pass
+        self.refresh_status()
+
+    def action_review_keep(self) -> None:
+        if self._review_mode:
+            self._decide_current(False)
+
+    def action_review_undo(self) -> None:
+        if self._review_mode:
+            self._decide_current(True)
+
+    def action_review_prev(self) -> None:
+        """↑：回退到上一处，可重新选择 y/n。"""
+        if self._review_mode and self._review_items:
+            self._review_idx = max(0, self._review_idx - 1)
+            self._highlight_current()
+            self.refresh_status()
+
+    def action_review_next(self) -> None:
+        if self._review_mode and self._review_items:
+            self._review_idx = min(len(self._review_items) - 1, self._review_idx + 1)
+            self._highlight_current()
+            self.refresh_status()
+
+    def action_review_exit(self) -> None:
+        if self._review_mode:
+            self._exit_review()
+
     def set_status(self, message: str) -> None:
         self._status_is_working = bool(message and message != READY_LABEL)
         self.query_one("#status", Static).update(self._status_text())
@@ -267,9 +456,17 @@ class RedLotusTui(App[None]):
             or self.system.has_current_turn
         )
 
-    def _status_text(self) -> str:
+    def _status_text(self) -> Any:
+        if self._review_mode:
+            return Text("审查改动中    ·    y 保留    ·    n 撤销    ·    ↑↓ 切换    ·    Esc 退出", style="bold")
         if not self._is_working():
             self._working_frame = 0
+            if self._pending_count > 0:
+                t = Text()
+                t.append(READY_LABEL, style="dim")
+                t.append("       ")
+                t.append(f" ⚑ 待审查 {self._pending_count} 处 · 按 Ctrl+R 审查 ", style="bold black on yellow")
+                return t
             return READY_LABEL
         suffix = WORKING_FRAMES[self._working_frame % len(WORKING_FRAMES)]
         self._working_frame += 1
@@ -441,4 +638,8 @@ async def run_textual_tui(system: Any, *, stop_event: asyncio.Event | None = Non
         app._cancel_pending_ask()
         set_output_sink(None)
         system.set_ask_user_handler(None)
+        try:
+            system.review_store.deactivate()
+        except Exception:
+            pass
         await system.shutdown()

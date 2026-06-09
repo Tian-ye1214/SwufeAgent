@@ -251,6 +251,10 @@ class AgentSystem:
     async def ask_user(self, question: str) -> str:
         return await self._toolkit.ask_user(question)
 
+    @property
+    def review_store(self):
+        return self._toolkit.review_store
+
     def set_task_directory(self, task_name: str):
         self._toolkit.set_task_directory(task_name)
 

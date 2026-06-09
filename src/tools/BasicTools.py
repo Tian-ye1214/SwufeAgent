@@ -19,6 +19,7 @@ from path_sandbox import resolve_readable_path, runtime_repo_root, work_database
 from subprocess_runner import run_subprocess
 from tools.browser_session import PlaywrightBrowserSession
 from cli.render import show_file_diff
+from cli.pending_review import PendingReviewStore
 
 _REPO_ROOT = runtime_repo_root()
 
@@ -34,6 +35,7 @@ class BasicToolkit:
     ):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
         self._file_lock = threading.Lock()
+        self._review_store = PendingReviewStore(self._file_lock)
         self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
         self._skills_manager = skills_manager
@@ -62,6 +64,10 @@ class BasicToolkit:
     @property
     def base_dir(self) -> Path:
         return self._base_dir
+
+    @property
+    def review_store(self) -> PendingReviewStore:
+        return self._review_store
 
     def close(self) -> None:
         """进程退出时关闭 Playwright 等资源。"""
@@ -371,6 +377,7 @@ class BasicToolkit:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
             show_file_diff(old_content, content, path=name)
+            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=content)
             return f"File '{name}' written successfully ({content_len} characters)"
         except ValueError as e:
             return f"Security error: {e}"
@@ -407,6 +414,7 @@ class BasicToolkit:
                     f.write(content)
                 total_size = file_path.stat().st_size
             show_file_diff(old_content, old_content + content, path=name)
+            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=old_content + content)
             return f"Content appended to '{name}' successfully ({content_len} chars added, total file size: {total_size} bytes)"
         except ValueError as e:
             return f"Security error: {e}"
@@ -445,6 +453,7 @@ class BasicToolkit:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(new_content)
             added, deleted, modified = show_file_diff(old_content, new_content, path=name)
+            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=new_content)
             return f"Edited '{name}' successfully (+{added} -{deleted} ~{modified})"
         except ValueError as e:
             return f"Security error: {e}"
