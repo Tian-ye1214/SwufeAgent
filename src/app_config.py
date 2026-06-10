@@ -80,7 +80,7 @@ def get_agent_run_policy() -> AgentRunPolicy:
 
 
 def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
-    from ModelGateway.ModelChecker import merge_litellm_into_model_params
+    from ModelGateway.ModelChecker import merge_openrouter_into_model_params
 
     raw: dict[str, Any] = dict(settings()["models"][role])
     name = str(raw.pop("name")).strip()
@@ -94,7 +94,7 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
         raw["reasoning_effort"] = "medium"
     raw["thinking"] = str(raw.pop("thinking")).strip().lower()
 
-    out = merge_litellm_into_model_params(name, raw)
+    out = merge_openrouter_into_model_params(name, raw)
     out.update(kwargs)
     return name, out
 

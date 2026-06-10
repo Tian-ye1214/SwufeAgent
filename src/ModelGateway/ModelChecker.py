@@ -186,126 +186,96 @@ def _lookup_genai_prices(name: str) -> int | None:
     return None
 
 
-_LITELLM_LOCK = threading.Lock()
-_LITELLM_CONTEXT_MAP: dict[str, int] | None = None   # max_input_tokens（降级 max_tokens）
-_LITELLM_OUTPUT_MAP: dict[str, int] | None = None    # max_output_tokens
-_LITELLM_FAILED = False
-_LITELLM_URL_USED: str | None = None
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
+_OPENROUTER_LOCK = threading.Lock()
+_OPENROUTER_CONTEXT_MAP: dict[str, int] | None = None
+_OPENROUTER_OUTPUT_MAP: dict[str, int] | None = None
+_OPENROUTER_FAILED = False
 
-
-def _litellm_model_prices_json_url() -> str | None:
-    for role in get_agent_roles():
-        raw = get_context_config(role).get("litellm_model_prices_json_url")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-    return None
-
-
-def _litellm_cache_file_path(url: str) -> Path:
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+def _openrouter_cache_path() -> Path:
     d = logger.LOG_DIR / "cache"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"litellm_model_prices_{digest}.json"
+    return d / "openrouter_models.json"
 
 
-def _read_litellm_cache(url: str) -> dict[str, Any] | None:
-    path = _litellm_cache_file_path(url)
-    if not path.is_file():
-        return None
-    with open(path, encoding="utf-8") as f:
-        env = json.load(f)
-    if env.get("url") != url:
-        return None
-    return env["body"]
-
-
-def _write_litellm_cache(url: str, raw: dict[str, Any]) -> None:
-    path = _litellm_cache_file_path(url)
-    envelope = {"url": url, "body": raw}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(envelope, f, ensure_ascii=False)
-
-
-def _litellm_raw_to_maps(raw: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+def _openrouter_raw_to_maps(data: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
     ctx_map: dict[str, int] = {}
     out_map: dict[str, int] = {}
-    for key, info in raw.items():
-        if not isinstance(info, dict):
+    for m in data.get("data", []):
+        if not isinstance(m, dict):
             continue
-        low = key.lower()
-        bare = key.rsplit("/", 1)[-1].lower() if "/" in key else None
+        mid = m.get("id", "").lower()
+        if not mid:
+            continue
+        bare = mid.rsplit("/", 1)[-1] if "/" in mid else None
 
-        ctx = info.get("max_input_tokens") or info.get("max_tokens")
+        ctx = m.get("context_length")
         if isinstance(ctx, int) and ctx >= 4096:
-            ctx_map[low] = ctx
+            ctx_map[mid] = ctx
             if bare and bare not in ctx_map:
                 ctx_map[bare] = ctx
 
-        out = info.get("max_output_tokens")
-        if isinstance(out, int) and out >= 1:
-            out_map[low] = out
-            if bare and bare not in out_map:
-                out_map[bare] = out
+        tp = m.get("top_provider")
+        if isinstance(tp, dict):
+            out = tp.get("max_completion_tokens")
+            if isinstance(out, int) and out >= 1:
+                out_map[mid] = out
+                if bare and bare not in out_map:
+                    out_map[bare] = out
 
     return ctx_map, out_map
 
 
-def _ensure_litellm_maps() -> None:
-    """拉取 litellm JSON 并填充 _LITELLM_CONTEXT_MAP 与 _LITELLM_OUTPUT_MAP，只拉一次；有缓存则直接读盘。"""
-    global _LITELLM_CONTEXT_MAP, _LITELLM_OUTPUT_MAP, _LITELLM_FAILED, _LITELLM_URL_USED
-    url = _litellm_model_prices_json_url()
-    cache_key = url or "__no_url__"
-    with _LITELLM_LOCK:
-        if _LITELLM_CONTEXT_MAP is not None and _LITELLM_URL_USED == cache_key:
+def _ensure_openrouter_maps() -> None:
+    global _OPENROUTER_CONTEXT_MAP, _OPENROUTER_OUTPUT_MAP, _OPENROUTER_FAILED
+    with _OPENROUTER_LOCK:
+        if _OPENROUTER_CONTEXT_MAP is not None:
             return
-        if _LITELLM_FAILED and _LITELLM_URL_USED == cache_key:
+        if _OPENROUTER_FAILED:
             return
-    if not url:
-        logger.warning(
-            "未配置 litellm_model_prices_json_url（可在 context.defaults 或任一 context.coordinator|manager|worker 下设置），"
-            "跳过 litellm 模型元数据拉取"
-        )
-        with _LITELLM_LOCK:
-            _LITELLM_CONTEXT_MAP = {}
-            _LITELLM_OUTPUT_MAP = {}
-            _LITELLM_URL_USED = cache_key
-            _LITELLM_FAILED = False
-        return
 
-    cached = _read_litellm_cache(url)
-    if cached is not None:
-        ctx_map, out_map = _litellm_raw_to_maps(cached)
-        with _LITELLM_LOCK:
-            _LITELLM_CONTEXT_MAP = ctx_map
-            _LITELLM_OUTPUT_MAP = out_map
-            _LITELLM_URL_USED = cache_key
-            _LITELLM_FAILED = False
-        logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
-        return
+    cache_path = _openrouter_cache_path()
+    if cache_path.is_file():
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                cached = json.load(f)
+            ctx_map, out_map = _openrouter_raw_to_maps(cached)
+            with _OPENROUTER_LOCK:
+                _OPENROUTER_CONTEXT_MAP = ctx_map
+                _OPENROUTER_OUTPUT_MAP = out_map
+                _OPENROUTER_FAILED = False
+            logger.info("OpenRouter 模型元数据已从缓存加载，context=%d 条 output=%d 条", len(ctx_map), len(out_map))
+            return
+        except Exception as e:
+            logger.warning("OpenRouter 缓存读取失败: %s，将重新拉取", e)
 
     try:
         with httpx.Client(timeout=15.0) as client:
-            r = client.get(url)
+            r = client.get(_OPENROUTER_URL)
             r.raise_for_status()
             raw = r.json()
     except Exception as e:
-        logger.warning("拉取 litellm 模型元数据失败 (%s): %s", url, e)
-        with _LITELLM_LOCK:
-            _LITELLM_FAILED = True
-            _LITELLM_URL_USED = cache_key
+        logger.warning("拉取 OpenRouter 模型元数据失败 (%s): %s", _OPENROUTER_URL, e)
+        with _OPENROUTER_LOCK:
+            _OPENROUTER_FAILED = True
         return
 
-    _write_litellm_cache(url, raw)
-    ctx_map, out_map = _litellm_raw_to_maps(raw)
-    with _LITELLM_LOCK:
-        _LITELLM_CONTEXT_MAP = ctx_map
-        _LITELLM_OUTPUT_MAP = out_map
-        _LITELLM_URL_USED = cache_key
-        _LITELLM_FAILED = False
-    logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning("OpenRouter 缓存写入失败: %s", e)
+
+    ctx_map, out_map = _openrouter_raw_to_maps(raw)
+    with _OPENROUTER_LOCK:
+        _OPENROUTER_CONTEXT_MAP = ctx_map
+        _OPENROUTER_OUTPUT_MAP = out_map
+        _OPENROUTER_FAILED = False
+    logger.info("OpenRouter 模型元数据已加载（%s），context=%d 条 output=%d 条", _OPENROUTER_URL, len(ctx_map), len(out_map))
 
 
-def _litellm_lookup(name: str, m: dict[str, int] | None) -> int | None:
+def _openrouter_lookup(name: str, m: dict[str, int] | None) -> int | None:
     if not m:
         return None
     low = name.lower()
@@ -317,14 +287,14 @@ def _litellm_lookup(name: str, m: dict[str, int] | None) -> int | None:
     return None
 
 
-def _lookup_litellm(name: str) -> int | None:
-    _ensure_litellm_maps()
-    return _litellm_lookup(name, _LITELLM_CONTEXT_MAP)
+def _lookup_openrouter(name: str) -> int | None:
+    _ensure_openrouter_maps()
+    return _openrouter_lookup(name, _OPENROUTER_CONTEXT_MAP)
 
 
-def _lookup_litellm_output(name: str) -> int | None:
-    _ensure_litellm_maps()
-    return _litellm_lookup(name, _LITELLM_OUTPUT_MAP)
+def _lookup_openrouter_output(name: str) -> int | None:
+    _ensure_openrouter_maps()
+    return _openrouter_lookup(name, _OPENROUTER_OUTPUT_MAP)
 
 
 def _multi_source_lookup(name: str, fns: tuple) -> int | None:
@@ -343,18 +313,18 @@ def _multi_source_lookup(name: str, fns: tuple) -> int | None:
 
 
 def lookup_model_context(model_name: str) -> int | None:
-    """多源查找上下文窗口：内置字典 > genai-prices > litellm(max_input_tokens/max_tokens)。"""
-    return _multi_source_lookup(model_name, (_lookup_genai_prices, _lookup_litellm))
+    """多源查找上下文窗口：OpenRouter > genai-prices 兜底。"""
+    return _multi_source_lookup(model_name, (_lookup_openrouter, _lookup_genai_prices))
 
 
 def lookup_model_max_output_tokens(model_name: str) -> int | None:
-    """多源查找最大输出 tokens：内置字典 > litellm(max_output_tokens)。"""
-    return _multi_source_lookup(model_name, (_lookup_litellm_output,))
+    """多源查找最大输出 tokens：OpenRouter API。"""
+    return _multi_source_lookup(model_name, (_lookup_openrouter_output,))
 
 
-def merge_litellm_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+def merge_openrouter_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """
-    根据 litellm 元数据覆盖模型参数：
+    根据 OpenRouter 元数据覆盖模型参数：
     - max_output_tokens 覆盖 params['max_tokens']
     """
     out = dict(params)
