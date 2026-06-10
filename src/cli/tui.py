@@ -140,6 +140,7 @@ class RedLotusTui(App[None]):
     BINDINGS = [
         ("ctrl+c", "stop_or_quit", "Stop"),
         ("ctrl+q", "stop_or_quit", "Quit"),
+        Binding("shift+tab", "toggle_mode", "切换模式", priority=True),
         ("ctrl+r", "review", "审查更改"),
         Binding("y", "review_keep", "保留", show=False),
         Binding("n", "review_undo", "撤销", show=False),
@@ -161,6 +162,7 @@ class RedLotusTui(App[None]):
         self._model_stream_title = ""
         self._model_stream_text = ""
         self._ui_thread_id = 0
+        self._review_enabled = True  # 全局模式：True=审查模式，False=放行模式（写入直接落盘）
         self._review_mode = False
         self._review_items: list = []  # [(key, name, hunk), ...] 当前未决定的改动
         self._review_idx = 0
@@ -190,7 +192,8 @@ class RedLotusTui(App[None]):
         set_output_sink(TextualOutputSink(self, log, status))
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
         self._ui_thread_id = threading.get_ident()
-        self.system.review_store.activate(self._on_reviews_changed)
+        if self._review_enabled:
+            self.system.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
         await self.system.prepare_cli_session()
@@ -408,6 +411,17 @@ class RedLotusTui(App[None]):
         if self._review_mode:
             self._exit_review()
 
+    def action_toggle_mode(self) -> None:
+        """Shift+Tab：审查模式 ⇄ 放行模式。放行=后续写入直接落盘、不进暂存区。"""
+        if self._review_mode:
+            return  # 审查浮层中不切换全局模式
+        self._review_enabled = not self._review_enabled
+        if self._review_enabled:
+            self.system.review_store.activate(self._on_reviews_changed)
+        else:
+            self.system.review_store.deactivate()  # 清空待审查；后续写入直接放行
+        self._update_pending()
+
     def set_status(self, message: str) -> None:
         self._status_is_working = bool(message and message != READY_LABEL)
         self.query_one("#status", Static).update(self._status_text())
@@ -456,21 +470,31 @@ class RedLotusTui(App[None]):
             or self.system.has_current_turn
         )
 
+    def _mode_chip(self) -> Text:
+        if self._review_enabled:
+            return Text(" ⏵ 审查模式 ", style="bold black on cyan")
+        return Text(" ⏵⏵ 放行模式 ", style="bold black on green")
+
     def _status_text(self) -> Any:
         if self._review_mode:
             return Text("审查改动中    ·    y 保留    ·    n 撤销    ·    ↑↓ 切换    ·    Esc 退出", style="bold")
         if not self._is_working():
             self._working_frame = 0
-            if self._pending_count > 0:
-                t = Text()
-                t.append(READY_LABEL, style="dim")
+            t = Text()
+            t.append(self._mode_chip())
+            t.append("  ")
+            t.append(READY_LABEL, style="dim")
+            if self._review_enabled and self._pending_count > 0:
                 t.append("       ")
                 t.append(f" ⚑ 待审查 {self._pending_count} 处 · 按 Ctrl+R 审查 ", style="bold black on yellow")
-                return t
-            return READY_LABEL
+            return t
         suffix = WORKING_FRAMES[self._working_frame % len(WORKING_FRAMES)]
         self._working_frame += 1
-        return f"{WORKING_LABEL}{suffix}"
+        t = Text()
+        t.append(self._mode_chip())
+        t.append("  ")
+        t.append(f"{WORKING_LABEL}{suffix}")
+        return t
 
     @staticmethod
     def _user_input_renderable(value: str) -> Panel:
