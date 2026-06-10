@@ -258,6 +258,42 @@ class AgentSystem:
     def set_task_directory(self, task_name: str):
         self._toolkit.set_task_directory(task_name)
 
+    def _fallback_task_name(self, user_text: str) -> str:
+        """LLM 标题生成失败时的降级方案：截断用户输入。"""
+        task_name = (user_text or "task")[:30].replace(" ", "_")
+        return task_name.strip("_") or "task"
+
+    async def generate_task_title(self, user_text: str) -> str:
+        """用 LLM（worker 模型，thinking=disabled）生成简洁的任务目录标题。"""
+        try:
+            from app_config import get_model_and_params, get_agent_usage_limits
+            from ModelGateway.agent_factory import create_agent
+
+            name, params = get_model_and_params("worker")
+            params = dict(params)
+            params["thinking"] = "disabled"
+            params["reasoning_effort"] = False
+            params["max_tokens"] = 64
+
+            agent = create_agent(name, params, instructions="用一小段话总结以下任务的标题，直接输出标题不要加任何前缀、标点符号或解释")
+            result = await agent.run(user_text, usage_limits=get_agent_usage_limits())
+
+            title = (result.output or "").strip()
+            if not title:
+                return self._fallback_task_name(user_text)
+
+            title = (
+                title.replace("\n", " ")
+                .replace("/", "_")
+                .replace("\\", "_")
+                .replace("\r", "")
+            )
+            title = title.strip("。，. ,\"'\"\"' '''《》「」【】[]()（）")
+            return title or self._fallback_task_name(user_text)
+        except Exception as e:
+            logger.warning("LLM 标题生成失败，使用 fallback: %s", e)
+            return self._fallback_task_name(user_text)
+
     def reset_manager_history(self):
         self._manager_history.reset()
 

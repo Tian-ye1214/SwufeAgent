@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Callable
 
 import logger
@@ -26,7 +26,12 @@ class PlaywrightBrowserSession:
         if self._stopped:
             raise RuntimeError("Playwright session has been shut down")
         with self._run_lock:
-            return self._executor.submit(fn).result(timeout=timeout)
+            future = self._executor.submit(fn)
+            try:
+                return future.result(timeout=timeout)
+            except FutureTimeoutError:
+                future.cancel()
+                raise
 
     def close(self) -> None:
         """关闭浏览器（不停止线程池）。"""

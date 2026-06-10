@@ -242,7 +242,7 @@ class BasicToolkit:
 
     async def browser_close(self) -> str:
         """Close the Playwright browser process and release resources; the next action will start a new browser."""
-        await self._run_blocking(self._browser_session.shutdown)
+        await self._run_blocking(self._browser_session.close)
         return "Browser closed"
 
     def _resolve_path_candidate(self, name: str) -> Path:

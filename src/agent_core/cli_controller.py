@@ -212,7 +212,7 @@ class AgentCliController:
             logger.info("Detected %s media attachment(s)", len(message.attachments))
 
         if state.is_first_input:
-            task_name = (message.text or "task")[:30].replace(" ", "_")
+            task_name = await system.generate_task_title(raw_input)
             logger.setup_task_logger(task_name)
             system._toolkit.set_task_directory(task_name)
             safe_session_key = safe_name(task_name, max_len=50, fallback="task")
