@@ -87,28 +87,3 @@ def split_messages_into_turns(messages: list) -> list[list]:
 
 def turn_texts_from_messages(messages: list) -> list[str]:
     return [pydantic_messages_to_text(t) for t in split_messages_into_turns(messages)]
-
-
-def pack_messages_to_chunk_texts(
-    messages: list[Any],
-    chunk_max_tokens: int,
-    chars_per_token: float,
-) -> list[str]:
-    from ModelGateway.ModelChecker import estimate_message_tokens
-
-    if not messages:
-        return []
-    out: list[str] = []
-    buf: list[Any] = []
-    buf_tokens = 0
-    for m in messages:
-        t = estimate_message_tokens(m, chars_per_token)
-        if buf and buf_tokens + t > chunk_max_tokens:
-            out.append(pydantic_messages_to_text(buf))
-            buf = []
-            buf_tokens = 0
-        buf.append(m)
-        buf_tokens += t
-    if buf:
-        out.append(pydantic_messages_to_text(buf))
-    return out

@@ -107,17 +107,68 @@ def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[
     return {"thinking": {"type": "disabled"}}
 
 
+def _openrouter_reasoning_extras(model_params: dict[str, Any], supported: set[str]) -> dict[str, Any]:
+    reasoning_effort = model_params.get("reasoning_effort")
+    thinking_type = str(model_params.get("thinking", "")).strip().lower()
+    if thinking_type != "enabled":
+        return {}
+    if reasoning_effort not in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        return {}
+
+    effort = "xhigh" if reasoning_effort == "max" else reasoning_effort
+    if "reasoning" in supported:
+        return {"reasoning": {"effort": effort}}
+    if "include_reasoning" in supported:
+        return {"include_reasoning": True}
+    if "reasoning_effort" in supported:
+        return {"reasoning_effort": effort}
+    return {}
+
+
+def _filter_openrouter_supported_request_fields(
+    model_name: str | None,
+    fields: dict[str, Any],
+) -> dict[str, Any]:
+    if not model_name:
+        return fields
+    from ModelGateway.ModelChecker import _lookup_openrouter_meta
+
+    meta = _lookup_openrouter_meta(model_name)
+    if not meta:
+        return fields
+    supported = meta.get("supported_parameters")
+    if not isinstance(supported, list):
+        return fields
+    allowed = {str(p) for p in supported}
+    return {k: v for k, v in fields.items() if k in allowed}
+
+
 def chat_completion_inference_request_fields(
     model_params: dict[str, Any],
+    *,
+    model_name: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """OpenAI 兼容 chat/completions 请求体中除 model、messages 外的推理相关字段；config 与运行时 kwargs 均可扩展。"""
     mp = dict(model_params)
-    tex = http_chat_completions_thinking_extras(mp)
-    mp.pop("thinking")
+    meta_supported: set[str] | None = None
+    if model_name:
+        from ModelGateway.ModelChecker import _lookup_openrouter_meta
+
+        meta = _lookup_openrouter_meta(model_name)
+        supported = meta.get("supported_parameters") if meta else None
+        if isinstance(supported, list):
+            meta_supported = {str(p) for p in supported}
+
+    if meta_supported is None:
+        tex = http_chat_completions_thinking_extras(mp)
+    else:
+        tex = _openrouter_reasoning_extras(mp, meta_supported)
+        mp.pop("reasoning_effort", None)
+    mp.pop("thinking", None)
     mp.update(tex)
     mp.update(kwargs)
-    return mp
+    return _filter_openrouter_supported_request_fields(model_name, mp)
 
 
 def set_model_name(role: str, model_name: str) -> None:

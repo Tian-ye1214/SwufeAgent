@@ -42,13 +42,8 @@
     }
   },
   "context": {
-    "defaults": {
-      "token_estimate_fallback_chars_per_token": 4,
-      "litellm_model_prices_json_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-    },
+    "defaults": {},
     "compression": {
-      "weak_streak_max": 2,
-      "min_saved_ratio": 0.1,
       "middle_tool_args_max_chars": 1200
     },
     "coordinator": {
@@ -56,27 +51,21 @@
       "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     },
     "manager": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     },
     "worker": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
       "auto_compress_ratio": 0.5,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     }
   },
   "bot": {

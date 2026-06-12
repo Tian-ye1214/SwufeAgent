@@ -45,7 +45,7 @@ class SkillsToolkit:
         这是使用 Skill 前的必要步骤，通过阅读指令了解如何正确使用该 Skill。
 
         Parameters:
-            skill_name: Skill 名称 (如 "pdf-processing", "web-scraping")
+            skill_name: Skill 名称 (如 "web-scraping")
 
         Returns:
             Skill 的完整指令内容，包含使用方法和代码示例

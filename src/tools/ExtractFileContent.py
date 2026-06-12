@@ -1,3 +1,5 @@
+import contextlib
+import io
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -76,38 +78,216 @@ def _resolve_read_path(name: str) -> Path:
     return resolve_readable_path(name, work_base=_WORK_DATABASE_ROOT, repo_root=runtime_repo_root())
 
 
-def _read_pdf_pages(pdf) -> str:
-    content = ""
-    for page in pdf:
-        text = page.get_text()
+def _pdf_slug(name: str) -> str:
+    stem = Path(name or "pdf").stem or "pdf"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._")
+    return (slug or "pdf")[:80]
+
+
+def _relative_artifact_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_WORK_DATABASE_ROOT.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _escape_markdown_cell(value) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _markdown_table(rows: list[list]) -> str:
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized = [
+        [_escape_markdown_cell(row[i]) if i < len(row) else "" for i in range(width)]
+        for row in rows
+    ]
+    if not normalized:
+        return ""
+    header = normalized[0]
+    body = normalized[1:] or [["" for _ in range(width)]]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in range(width)) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in body)
+    return "\n".join(lines)
+
+
+def _extract_page_tables(page) -> tuple[list[list[list]], list[str]]:
+    tables: list[list[list]] = []
+    warnings: list[str] = []
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            finder = page.find_tables()
+        for table in getattr(finder, "tables", []):
+            rows = table.extract()
+            if rows:
+                tables.append(rows)
+    except Exception as e:
+        warnings.append(f"table extraction failed: {type(e).__name__}: {e}")
+    return tables, warnings
+
+
+def _extract_page_links(page) -> list[str]:
+    links: list[str] = []
+    for link in page.get_links():
+        uri = link.get("uri")
+        if uri:
+            links.append(str(uri))
+            continue
+        target_page = link.get("page")
+        if target_page is not None and target_page >= 0:
+            links.append(f"page {target_page + 1}")
+    return links
+
+
+def _export_page_images(
+    doc, page, page_number: int, output_root: Path
+) -> tuple[list[dict], list[str]]:
+    image_dir = output_root / "images"
+    images: list[dict] = []
+    warnings: list[str] = []
+    for image_number, image_info in enumerate(page.get_images(full=True), 1):
+        xref = image_info[0]
+        try:
+            extracted = doc.extract_image(xref)
+            data = extracted.get("image")
+            if not data:
+                warnings.append(f"page {page_number} image {image_number}: empty image data")
+                continue
+            ext = (extracted.get("ext") or "png").lower()
+            image_dir.mkdir(parents=True, exist_ok=True)
+            output_path = image_dir / f"page-{page_number:03d}-image-{image_number:03d}.{ext}"
+            output_path.write_bytes(data)
+            images.append(
+                {
+                    "path": _relative_artifact_path(output_path),
+                    "width": extracted.get("width") or image_info[2],
+                    "height": extracted.get("height") or image_info[3],
+                    "ext": ext,
+                }
+            )
+        except Exception as e:
+            warnings.append(
+                f"page {page_number} image {image_number}: {type(e).__name__}: {e}"
+            )
+    return images, warnings
+
+
+def _export_page_preview(page, page_number: int, output_root: Path) -> str:
+    pages_dir = output_root / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    output_path = pages_dir / f"page-{page_number:03d}.png"
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    pix.save(output_path)
+    return _relative_artifact_path(output_path)
+
+
+def _format_metadata(pdf) -> list[str]:
+    lines = [
+        "## Document Metadata",
+        f"- Page count: {pdf.page_count}",
+        f"- Encrypted: {str(bool(pdf.is_encrypted)).lower()}",
+    ]
+    metadata = pdf.metadata or {}
+    for key in (
+        "title",
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "producer",
+        "creationDate",
+        "modDate",
+    ):
+        value = metadata.get(key)
+        if value:
+            lines.append(f"- {key}: {value}")
+    return lines
+
+
+def _format_pdf_document(pdf, source_name: str) -> str:
+    output_root = _WORK_DATABASE_ROOT / "extracted" / _pdf_slug(source_name)
+    lines = [f"# PDF Extraction: {Path(source_name).name or 'attachment.pdf'}", ""]
+    lines.extend(_format_metadata(pdf))
+    lines.append("")
+
+    warnings: list[str] = []
+    found_content = False
+    for page_index, page in enumerate(pdf, 1):
+        text = _clean_extracted_text(page.get_text("text") or "")
+        tables, table_warnings = _extract_page_tables(page)
+        images, image_warnings = _export_page_images(pdf, page, page_index, output_root)
+        links = _extract_page_links(page)
+        warnings.extend(f"page {page_index}: {w}" for w in table_warnings + image_warnings)
+
+        image_only = not text and not tables and bool(images)
+        found_content = found_content or bool(text or tables or images or links)
+
+        lines.append(f"## Page {page_index}")
+        lines.append(f"- image_only: {str(image_only).lower()}")
+        if image_only:
+            preview = _export_page_preview(page, page_index, output_root)
+            lines.append(
+                "- warning: OCR not performed; use read_image on the page preview "
+                "if visual analysis is needed."
+            )
+            lines.append(f"- page_preview: {preview}")
+
         if text:
-            content += text + "\n"
-    if not content.strip():
-        raise ValueError("无法从PDF中提取文本内容")
-    return content
+            lines.extend(["", "### Text", text])
+        if tables:
+            lines.extend(["", "### Tables"])
+            for table_index, rows in enumerate(tables, 1):
+                table_markdown = _markdown_table(rows)
+                if table_markdown:
+                    lines.extend([f"#### Table {table_index}", table_markdown])
+        if images:
+            lines.extend(["", "### Images"])
+            for image_index, image in enumerate(images, 1):
+                lines.append(
+                    f"- image {image_index}: {image['path']} "
+                    f"({image['width']}x{image['height']}, {image['ext']})"
+                )
+        if links:
+            lines.extend(["", "### Links"])
+            for link in links:
+                lines.append(f"- {link}")
+        lines.append("")
+
+    if not found_content:
+        warnings.append("No extractable text, tables, images, or links found; OCR not performed.")
+
+    if warnings:
+        lines.extend(["## Warnings", *[f"- {warning}" for warning in warnings]])
+    return "\n".join(lines).strip()
 
 
 def extract_text_from_pdf(file_path):
-    """从 PDF 文件路径提取文本。"""
+    """Extract structured Markdown from a PDF file path."""
     try:
         with fitz.open(file_path) as pdf:
-            return _read_pdf_pages(pdf)
+            if pdf.needs_pass:
+                return "Error: PDF is encrypted and requires a password"
+            return _format_pdf_document(pdf, Path(file_path).name)
     except Exception as e:
-        print(f"PDF处理错误：{str(e)}")
-        return None
+        return f"Error: PDF processing failed - {type(e).__name__}: {e}"
 
 
-def extract_text_from_pdf_bytes(data: bytes) -> str | None:
-    """从 PDF 字节流提取并清洗文本。"""
+def extract_text_from_pdf_bytes(data: bytes, *, filename: str | None = None) -> str | None:
+    """Extract structured Markdown from PDF bytes."""
     if not data:
         return None
     try:
         with fitz.open(stream=data, filetype="pdf") as pdf:
-            content = _read_pdf_pages(pdf)
-        return _clean_extracted_text(content)
+            if pdf.needs_pass:
+                return "Error: PDF is encrypted and requires a password"
+            return _format_pdf_document(pdf, filename or "attachment.pdf")
     except Exception as e:
-        print(f"PDF字节流处理错误：{str(e)}")
-        return None
+        return f"Error: PDF processing failed - {type(e).__name__}: {e}"
 
 
 def is_pdf_content(data: bytes, *, media_type: str = "", filename: str = "") -> bool:
@@ -120,9 +300,9 @@ def is_pdf_content(data: bytes, *, media_type: str = "", filename: str = "") -> 
 
 
 def pdf_attachment_text_block(data: bytes, *, filename: str | None = None) -> str:
-    extracted = extract_text_from_pdf_bytes(data)
+    extracted = extract_text_from_pdf_bytes(data, filename=filename)
     if not extracted:
-        return "PDF 附件无法解析为文本，请尝试发送截图或纯文本。"
+        return "PDF attachment could not be parsed. OCR was not performed."
     label = f"【PDF 附件：{filename}】" if filename else "【PDF 附件】"
     return f"{label}\n\n{extracted}"
 
@@ -166,6 +346,7 @@ def extract_text(name: str) -> str:
         ext = file_path.suffix.lower()
         if ext == ".pdf":
             content = extract_text_from_pdf(str(file_path))
+            return content if content else f"Error: Could not extract content from '{name}'"
         elif ext in (".xlsx", ".xls"):
             content = extract_text_from_excel(str(file_path))
         elif ext == ".docx":

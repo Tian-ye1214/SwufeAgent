@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING
 import logger
 from persist_utils import safe_name
 from ModelGateway.ModelChecker import (
-    estimate_history_tokens_async,
     get_effective_max_context_async,
     prewarm_effective_max_contexts_by_role_async,
 )
+from ModelGateway.usage_accounting import latest_usage_input_tokens
 from agent_core.input_messages import user_message_from_cli_input
-from app_config import get_context_config
 from cli.file_ref import augment_text_with_file_refs, load_file_refs
 from cli.output import ContextUsageItem, clear_context_usage, set_context_usage
 from cli.render import print_repl_welcome, print_success, print_warning
@@ -43,7 +42,7 @@ class AgentCliController:
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
     RESET_COMMANDS = {"/clear", "新任务"}  # 备用：当前未在本类内引用
-    BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/context", "/skills"}
+    BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/context", "/usage", "/skills"}
 
     def __init__(self, system: "AgentSystem") -> None:
         self.system = system
@@ -152,19 +151,11 @@ class AgentCliController:
             ("coordinator", "Coordinator", [history]),
         ]
         for role, label, histories in roles_and_histories:
-            ctx_cfg = get_context_config(role)
-            chars_per_token = float(ctx_cfg["token_estimate_fallback_chars_per_token"])
             max_tokens = int(await get_effective_max_context_async(role=role))
             used_tokens = 0
             for role_history in histories:
                 if role_history.messages:
-                    used_tokens += int(
-                        await estimate_history_tokens_async(
-                            role_history.messages,
-                            chars_per_token=chars_per_token,
-                            role=role,
-                        )
-                    )
+                    used_tokens = latest_usage_input_tokens(role_history.messages) or 0
             percent = 0.0 if max_tokens <= 0 else min(100.0, used_tokens * 100.0 / max_tokens)
             items.append(ContextUsageItem(label, used_tokens, max_tokens, percent))
         set_context_usage(items)

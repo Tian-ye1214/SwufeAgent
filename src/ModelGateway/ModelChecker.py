@@ -1,8 +1,7 @@
-"""上下文窗口探测、Token 估算与各角色历史压缩（中间段摘录 + 结构化 Markdown 摘要）。"""
+"""上下文窗口探测与各角色历史压缩（中间段摘录 + 结构化 Markdown 摘要）。"""
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import threading
@@ -22,18 +21,13 @@ from app_config import (
     settings,
 )
 from prompt import (
-    format_long_term_memory_for_prompt,
     format_prompt_current_time,
-    get_coordinator_system_prompt,
-    get_manager_system_prompt,
-    get_worker_system_prompt,
     load_prompt,
 )
 from tools.memory import ChatHistory, pydantic_messages_to_text
 
-import tiktoken
-
 from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
+from ModelGateway.usage_accounting import latest_usage_input_tokens
 
 import logger
 
@@ -49,83 +43,6 @@ from pydantic_ai.messages import (
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
 _COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
-# 多模态（图像/二进制）part 的粗略 token 估算——base64 不进窗口，按每张固定估值计入。
-_MULTIMODAL_PART_TOKEN_ESTIMATE = 1000
-
-
-def _count_text_tokens(text: str, chars_per_token: float) -> int:
-    try:
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
-    except Exception as e:
-        logger.error(f"tiktoken分词错误: {e}")
-        return max(1, int(len(text) / max(chars_per_token, 0.25)))
-
-
-def estimate_message_tokens(msg: Any, chars_per_token: float) -> int:
-    """单条 pydantic-ai 消息的 token 估算。"""
-    if isinstance(msg, ModelRequest):
-        parts: list[str] = []
-        image_tokens = 0
-        for p in msg.parts:
-            if isinstance(p, UserPromptPart):
-                content = p.content
-                if isinstance(content, str):
-                    parts.append(content)
-                elif isinstance(content, (list, tuple)):
-                    for item in content:
-                        if isinstance(item, str):
-                            parts.append(item)
-                        else:  # 多模态 part（图像/二进制/URL）
-                            image_tokens += _MULTIMODAL_PART_TOKEN_ESTIMATE
-                else:
-                    parts.append(str(content))
-            elif isinstance(p, BaseToolReturnPart):
-                parts.append(f"{p.tool_name}:{p.tool_call_id}:{p.model_response_str()}")
-        return _count_text_tokens("\n".join(parts), chars_per_token) + image_tokens
-    if isinstance(msg, ModelResponse):
-        parts: list[str] = []
-        for p in msg.parts:
-            if isinstance(p, TextPart):
-                parts.append(p.content)
-            elif isinstance(p, BaseToolCallPart):
-                args = p.args if isinstance(p.args, str) else json.dumps(p.args, ensure_ascii=False)
-                parts.append(f"{p.tool_name}:{args}")
-        return _count_text_tokens("\n".join(parts), chars_per_token)
-    return _count_text_tokens(str(msg), chars_per_token)
-
-
-def estimate_history_tokens(
-    messages: list,
-    *,
-    chars_per_token: float | None = None,
-    role
-) -> int:
-    if not messages:
-        return 0
-    ctx = get_context_config(role)
-    cpt = float(chars_per_token if chars_per_token is not None else ctx["token_estimate_fallback_chars_per_token"])
-    return sum(estimate_message_tokens(m, cpt) for m in messages)
-
-
-def count_text_tokens(text: str, chars_per_token: float = 4.0) -> int:
-    """独立文本的 token 计数，供 system prompt / 记忆注入等固定开销计量。"""
-    return _count_text_tokens(text or "", chars_per_token)
-
-
-_ROLE_SYSTEM_PROMPT_BUILDERS = {
-    "coordinator": get_coordinator_system_prompt,
-    "manager": get_manager_system_prompt,
-    "worker": get_worker_system_prompt,
-}
-
-
-def estimate_system_prompt_tokens(role: str, skills_manager: Any, memory_injection: str) -> int:
-    """构建并计量某角色 system prompt 的 token（含 skills 摘要、记忆注入、行为约束等固定开销）。"""
-    builder = _ROLE_SYSTEM_PROMPT_BUILDERS.get(role)
-    if builder is None:
-        return 0
-    return count_text_tokens(builder(skills_manager, memory_injection))
 
 
 def context_usage_breakdown(
@@ -135,20 +52,16 @@ def context_usage_breakdown(
     skills_manager: Any,
     memory_injection: str,
 ) -> dict[str, Any]:
-    """某角色当前上下文用量分解：system prompt（含记忆注入子项）、历史、合计、上限、压缩阈值、占比。"""
+    """基于最近一次真实模型 usage 的上下文占用。没有真实 usage 时不回退估算。"""
     ctx = get_context_config(role)
-    cpt = float(ctx["token_estimate_fallback_chars_per_token"])
-    system_tokens = estimate_system_prompt_tokens(role, skills_manager, memory_injection)
-    memory_tokens = count_text_tokens(format_long_term_memory_for_prompt(memory_injection))
-    history_tokens = estimate_history_tokens(history_messages, chars_per_token=cpt, role=role)
     max_tokens = get_effective_max_context(role=role)
-    total = system_tokens + history_tokens
+    used = latest_usage_input_tokens(history_messages)
+    total = int(used or 0)
     threshold = int(max_tokens * float(ctx["auto_compress_ratio"]))
     percent = 0.0 if max_tokens <= 0 else min(100.0, total * 100.0 / max_tokens)
     return {
-        "system": system_tokens,
-        "memory": memory_tokens,
-        "history": history_tokens,
+        "has_usage": used is not None,
+        "input": total,
         "total": total,
         "max": max_tokens,
         "threshold": threshold,
@@ -190,6 +103,7 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 _OPENROUTER_LOCK = threading.Lock()
 _OPENROUTER_CONTEXT_MAP: dict[str, int] | None = None
 _OPENROUTER_OUTPUT_MAP: dict[str, int] | None = None
+_OPENROUTER_META_MAP: dict[str, dict[str, Any]] | None = None
 _OPENROUTER_FAILED = False
 
 def _openrouter_cache_path() -> Path:
@@ -198,9 +112,12 @@ def _openrouter_cache_path() -> Path:
     return d / "openrouter_models.json"
 
 
-def _openrouter_raw_to_maps(data: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+def _openrouter_raw_to_maps(
+    data: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, dict[str, Any]]]:
     ctx_map: dict[str, int] = {}
     out_map: dict[str, int] = {}
+    meta_map: dict[str, dict[str, Any]] = {}
     for m in data.get("data", []):
         if not isinstance(m, dict):
             continue
@@ -209,13 +126,42 @@ def _openrouter_raw_to_maps(data: dict[str, Any]) -> tuple[dict[str, int], dict[
             continue
         bare = mid.rsplit("/", 1)[-1] if "/" in mid else None
 
-        ctx = m.get("context_length")
+        meta = {
+            k: m[k]
+            for k in (
+                "id",
+                "name",
+                "canonical_slug",
+                "context_length",
+                "top_provider",
+                "pricing",
+                "architecture",
+                "supported_parameters",
+                "default_parameters",
+                "knowledge_cutoff",
+                "expiration_date",
+            )
+            if k in m
+        }
+        meta_map[mid] = meta
+        if bare and bare not in meta_map:
+            meta_map[bare] = meta
+
+        ctx = None
+        tp = m.get("top_provider")
+        if isinstance(tp, dict):
+            tp_ctx = tp.get("context_length")
+            if isinstance(tp_ctx, int) and tp_ctx >= 4096:
+                ctx = tp_ctx
+        if ctx is None:
+            raw_ctx = m.get("context_length")
+            if isinstance(raw_ctx, int) and raw_ctx >= 4096:
+                ctx = raw_ctx
         if isinstance(ctx, int) and ctx >= 4096:
             ctx_map[mid] = ctx
             if bare and bare not in ctx_map:
                 ctx_map[bare] = ctx
 
-        tp = m.get("top_provider")
         if isinstance(tp, dict):
             out = tp.get("max_completion_tokens")
             if isinstance(out, int) and out >= 1:
@@ -223,13 +169,17 @@ def _openrouter_raw_to_maps(data: dict[str, Any]) -> tuple[dict[str, int], dict[
                 if bare and bare not in out_map:
                     out_map[bare] = out
 
-    return ctx_map, out_map
+    return ctx_map, out_map, meta_map
 
 
 def _ensure_openrouter_maps() -> None:
-    global _OPENROUTER_CONTEXT_MAP, _OPENROUTER_OUTPUT_MAP, _OPENROUTER_FAILED
+    global _OPENROUTER_CONTEXT_MAP, _OPENROUTER_OUTPUT_MAP, _OPENROUTER_META_MAP, _OPENROUTER_FAILED
     with _OPENROUTER_LOCK:
-        if _OPENROUTER_CONTEXT_MAP is not None:
+        if (
+            _OPENROUTER_CONTEXT_MAP is not None
+            and _OPENROUTER_OUTPUT_MAP is not None
+            and _OPENROUTER_META_MAP is not None
+        ):
             return
         if _OPENROUTER_FAILED:
             return
@@ -239,12 +189,18 @@ def _ensure_openrouter_maps() -> None:
         try:
             with open(cache_path, encoding="utf-8") as f:
                 cached = json.load(f)
-            ctx_map, out_map = _openrouter_raw_to_maps(cached)
+            ctx_map, out_map, meta_map = _openrouter_raw_to_maps(cached)
             with _OPENROUTER_LOCK:
                 _OPENROUTER_CONTEXT_MAP = ctx_map
                 _OPENROUTER_OUTPUT_MAP = out_map
+                _OPENROUTER_META_MAP = meta_map
                 _OPENROUTER_FAILED = False
-            logger.info("OpenRouter 模型元数据已从缓存加载，context=%d 条 output=%d 条", len(ctx_map), len(out_map))
+            logger.info(
+                "OpenRouter 模型元数据已从缓存加载，context=%d 条 output=%d 条 meta=%d 条",
+                len(ctx_map),
+                len(out_map),
+                len(meta_map),
+            )
             return
         except Exception as e:
             logger.warning("OpenRouter 缓存读取失败: %s，将重新拉取", e)
@@ -267,12 +223,19 @@ def _ensure_openrouter_maps() -> None:
     except Exception as e:
         logger.warning("OpenRouter 缓存写入失败: %s", e)
 
-    ctx_map, out_map = _openrouter_raw_to_maps(raw)
+    ctx_map, out_map, meta_map = _openrouter_raw_to_maps(raw)
     with _OPENROUTER_LOCK:
         _OPENROUTER_CONTEXT_MAP = ctx_map
         _OPENROUTER_OUTPUT_MAP = out_map
+        _OPENROUTER_META_MAP = meta_map
         _OPENROUTER_FAILED = False
-    logger.info("OpenRouter 模型元数据已加载（%s），context=%d 条 output=%d 条", _OPENROUTER_URL, len(ctx_map), len(out_map))
+    logger.info(
+        "OpenRouter 模型元数据已加载（%s），context=%d 条 output=%d 条 meta=%d 条",
+        _OPENROUTER_URL,
+        len(ctx_map),
+        len(out_map),
+        len(meta_map),
+    )
 
 
 def _openrouter_lookup(name: str, m: dict[str, int] | None) -> int | None:
@@ -295,6 +258,29 @@ def _lookup_openrouter(name: str) -> int | None:
 def _lookup_openrouter_output(name: str) -> int | None:
     _ensure_openrouter_maps()
     return _openrouter_lookup(name, _OPENROUTER_OUTPUT_MAP)
+
+
+def _openrouter_meta_lookup(name: str, m: dict[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+    if not m:
+        return None
+    low = name.lower()
+    if low in m:
+        return m[low]
+    bare = low.rsplit("/", 1)[-1] if "/" in low else None
+    if bare and bare in m:
+        return m[bare]
+    return None
+
+
+def _lookup_openrouter_meta(name: str) -> dict[str, Any] | None:
+    _ensure_openrouter_maps()
+    meta = _openrouter_meta_lookup(name, _OPENROUTER_META_MAP)
+    if meta:
+        return meta
+    normalized = _normalize_model_name(name)
+    if normalized != name.lower():
+        return _openrouter_meta_lookup(normalized, _OPENROUTER_META_MAP)
+    return None
 
 
 def _multi_source_lookup(name: str, fns: tuple) -> int | None:
@@ -325,12 +311,16 @@ def lookup_model_max_output_tokens(model_name: str) -> int | None:
 def merge_openrouter_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """
     根据 OpenRouter 元数据覆盖模型参数：
-    - max_output_tokens 覆盖 params['max_tokens']
+    - max_output_tokens 作为 params['max_tokens'] 的上限
     """
     out = dict(params)
     max_out = lookup_model_max_output_tokens(model_name)
     if isinstance(max_out, int) and max_out > 0:
-        out["max_tokens"] = max_out
+        configured = out.get("max_tokens")
+        if isinstance(configured, int) and configured > 0:
+            out["max_tokens"] = min(configured, max_out)
+        else:
+            out["max_tokens"] = max_out
     return out
 
 
@@ -418,50 +408,26 @@ def _user_spans(messages: list) -> list[tuple[int, int]]:
     return spans
 
 
-def _tokens_range(messages: list, i: int, j: int, cpt: float) -> int:
-    if i >= j:
-        return 0
-    return sum(estimate_message_tokens(messages[k], cpt) for k in range(i, j))
-
-
 def _compute_head_end(
-    messages: list,
     spans: list[tuple[int, int]],
     *,
     head_turns: int,
-    head_max_tokens: int,
-    cpt: float,
 ) -> int:
     if not spans or head_turns <= 0:
         return 0
     n = min(head_turns, len(spans))
-    end_idx = spans[n - 1][1]
-    while n > 0 and _tokens_range(messages, 0, end_idx, cpt) > head_max_tokens:
-        n -= 1
-        if n <= 0:
-            return 0
-        end_idx = spans[n - 1][1]
-    return end_idx
+    return spans[n - 1][1]
 
 
 def _compute_tail_start(
-    messages: list,
     spans: list[tuple[int, int]],
     *,
     tail_turns: int,
-    tail_max_tokens: int,
-    cpt: float,
 ) -> int:
     if not spans or tail_turns <= 0:
-        return len(messages)
+        return spans[-1][1] if spans else 0
     n = min(tail_turns, len(spans))
-    start_idx = spans[len(spans) - n][0]
-    while n > 0 and _tokens_range(messages, start_idx, len(messages), cpt) > tail_max_tokens:
-        n -= 1
-        if n <= 0:
-            return len(messages)
-        start_idx = spans[len(spans) - n][0]
-    return start_idx
+    return spans[len(spans) - n][0]
 
 
 def _tool_calls_up_to(messages: list, hi: int) -> dict[str, tuple[str, Any]]:
@@ -568,7 +534,7 @@ def _call_compressor_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        **chat_completion_inference_request_fields(comp_params, **kwargs),
+        **chat_completion_inference_request_fields(comp_params, model_name=model, **kwargs),
     }
     headers = {"Content-Type": "application/json"}
     if key:
@@ -591,46 +557,27 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
         return False
 
     ctx = get_context_config(role)
-    cpt = float(ctx["token_estimate_fallback_chars_per_token"])
     max_ctx = get_effective_max_context(role=role)
-    used = estimate_history_tokens(messages, chars_per_token=cpt, role=role)
+    used = latest_usage_input_tokens(messages)
     threshold = max_ctx * float(ctx["auto_compress_ratio"])
 
-    if not force and used < threshold:
+    if not force and (used is None or used < threshold):
         return False
 
     cfg = settings()["context"]["compression"]
     knobs = {
-            "weak_streak_max": int(cfg["weak_streak_max"]),
-            "min_saved_ratio": float(cfg["min_saved_ratio"]),
             "middle_tool_args_max_chars": int(cfg["middle_tool_args_max_chars"]),
     }
 
-    if not force and history._compress_weak_streak >= int(knobs["weak_streak_max"]):
-        logger.warning(
-            "上下文压缩跳过：连续 %s 次压缩收益低于 %.0f%%（抗抖动）",
-            int(knobs["weak_streak_max"]),
-            float(knobs["min_saved_ratio"]) * 100,
-        )
-        return False
-
     spans = _user_spans(messages)
 
-    head_max_tokens = int(max_ctx * float(ctx["head_max_ratio"]))
     head_end = _compute_head_end(
-        messages,
         spans,
         head_turns=int(ctx["head_turns"]),
-        head_max_tokens=head_max_tokens,
-        cpt=cpt,
     )
-    tail_max_tokens = int(max_ctx * float(ctx["tail_max_ratio"]))
     tail_start = _compute_tail_start(
-        messages,
         spans,
         tail_turns=int(ctx["tail_turns"]),
-        tail_max_tokens=tail_max_tokens,
-        cpt=cpt,
     )
 
     if head_end >= tail_start:
@@ -672,14 +619,6 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
     )
     history.set_messages(new_messages)
     history.compress_summary_state = summary_md.strip()
-
-    used_after = estimate_history_tokens(new_messages, chars_per_token=cpt, role=role)
-    denom = max(used, 1)
-    saved_ratio = (used - used_after) / denom
-    if saved_ratio < float(knobs["min_saved_ratio"]):
-        history._compress_weak_streak += 1
-    else:
-        history._compress_weak_streak = 0
     return True
 
 
@@ -724,20 +663,6 @@ async def get_effective_max_context_async(
     role: str | None = None,
 ) -> int:
     return await asyncio.to_thread(lambda: get_effective_max_context(model_name, role=role))
-
-
-async def estimate_history_tokens_async(
-    messages: list,
-    *,
-    chars_per_token: float | None = None,
-    role: str,
-) -> int:
-    return await asyncio.to_thread(
-        estimate_history_tokens,
-        messages,
-        chars_per_token=chars_per_token,
-        role=role,
-    )
 
 
 async def compress_history_async(

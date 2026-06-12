@@ -292,6 +292,7 @@ class LongTermMemory:
             "messages": [{"role": "user", "content": user_content}],
             **chat_completion_inference_request_fields(
                 w_params,
+                model_name=model_name,
                 max_tokens=int(ltm["max_output_tokens"]),
                 temperature=0.2,
                 **kwargs,

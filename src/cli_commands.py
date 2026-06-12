@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from decimal import Decimal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -13,19 +14,67 @@ from app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_para
 from lifecycle import AgentInvocationState
 from runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
+    _lookup_openrouter_meta,
     compress_history_async,
     context_usage_breakdown,
+    lookup_model_context,
+    lookup_model_max_output_tokens,
     prewarm_effective_max_contexts_by_role_async,
+)
+from ModelGateway.usage_accounting import (
+    UsageReport,
+    model_message_files_for_path,
+    session_model_message_files,
+    summarize_usage_files,
 )
 from prompt import get_skills_as_in_system_prompt
 from skills.SkillsManager import SkillsManager
 from tools.memory import ChatHistory
-from tools.conversation_log import read_saved_model_messages_file
+from tools.conversation_log import drain_pending_saves, read_saved_model_messages_file
 from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
+import logger
 
 
 def _out(text: str = "") -> None:
     console.print(text)
+
+
+def _format_model_tokens(value: Any) -> str:
+    if not isinstance(value, int) or value <= 0:
+        return "-"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f}k"
+    return str(value)
+
+
+def _openrouter_agent_meta_lines(model_name: str) -> list[str]:
+    meta = _lookup_openrouter_meta(model_name)
+    if not meta:
+        return []
+
+    lines: list[str] = []
+    ctx = lookup_model_context(model_name)
+    max_out = lookup_model_max_output_tokens(model_name)
+    lines.append(
+        f"OpenRouter: context {_format_model_tokens(ctx)}  max_output {_format_model_tokens(max_out)}"
+    )
+
+    arch = meta.get("architecture")
+    if isinstance(arch, dict):
+        inputs = arch.get("input_modalities")
+        if isinstance(inputs, list) and inputs:
+            lines.append(f"modalities: {', '.join(str(x) for x in inputs)}")
+
+    pricing = meta.get("pricing")
+    if isinstance(pricing, dict):
+        prompt_price = pricing.get("prompt")
+        completion_price = pricing.get("completion")
+        if prompt_price is not None or completion_price is not None:
+            lines.append(f"price: prompt={prompt_price or '-'} completion={completion_price or '-'}")
+
+    return lines
 
 
 def print_cli_help() -> None:
@@ -72,6 +121,8 @@ def print_agent_models() -> None:
         lines.append(f"  模型名: {name}")
         th_s = f"  reasoning→thinking: {p['thinking']}"
         lines.append(f"  temperature: {p['temperature']}  max_tokens: {p['max_tokens']}{th_s}")
+        for meta_line in _openrouter_agent_meta_lines(name):
+            lines.append(f"  {meta_line}")
         lines.append("")
     print_panel("\n".join(lines), title="Agent 模型")
 
@@ -114,6 +165,136 @@ def _k_tokens(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
+def _format_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _format_usd(value: Decimal) -> str:
+    return f"${_format_decimal(value)}"
+
+
+def _format_usage_report(report: UsageReport) -> str:
+    lines: list[str] = []
+    totals = report.totals
+    lines.append("Total")
+    lines.append(f"  responses: {totals.responses}")
+    if totals.missing_usage_responses:
+        lines.append(f"  missing usage responses: {totals.missing_usage_responses}")
+    lines.append(
+        f"  raw tokens: input={totals.input_tokens} output={totals.output_tokens} "
+        f"reasoning={totals.reasoning_tokens}"
+    )
+    lines.append(
+        f"  billable tokens: prompt={totals.prompt_billable_tokens} "
+        f"completion={totals.completion_billable_tokens}"
+    )
+
+    total_input = Decimal("0")
+    total_output = Decimal("0")
+    total_cost = Decimal("0")
+    unavailable = 0
+    for summary in report.by_model.values():
+        if summary.price is None:
+            unavailable += summary.price_unavailable_responses
+            continue
+        total_input += summary.price.input_usd
+        total_output += summary.price.output_usd
+        total_cost += summary.price.total_usd
+        unavailable += summary.price_unavailable_responses
+    if report.by_model:
+        if unavailable:
+            lines.append("  estimated cost: unavailable for some responses")
+        else:
+            lines.append(
+                f"  estimated cost: input={_format_usd(total_input)} "
+                f"output={_format_usd(total_output)} total={_format_usd(total_cost)}"
+            )
+
+    if report.by_model:
+        lines.append("")
+        lines.append("By model")
+        for model_name in sorted(report.by_model):
+            summary = report.by_model[model_name]
+            t = summary.totals
+            lines.append(
+                f"  {model_name}: responses={t.responses} "
+                f"raw={t.input_tokens}/{t.output_tokens} "
+                f"billable={t.prompt_billable_tokens}/{t.completion_billable_tokens}"
+            )
+            if summary.price is None:
+                lines.append("    price: unavailable")
+            else:
+                p = summary.price
+                lines.append(
+                    f"    price: total={_format_usd(p.total_usd)} "
+                    f"input={_format_usd(p.input_usd)} output={_format_usd(p.output_usd)} "
+                    f"source={p.source}"
+                )
+            if summary.price_unavailable_responses:
+                lines.append(
+                    f"    price unavailable responses: {summary.price_unavailable_responses}"
+                )
+
+    if report.files:
+        lines.append("")
+        lines.append(f"Files: {len(report.files)}")
+        for item in report.files[:10]:
+            lines.append(f"  {item.path}")
+        if len(report.files) > 10:
+            lines.append(f"  ... {len(report.files) - 10} more")
+    return "\n".join(lines)
+
+
+def _conversation_session_key(system: Any) -> str | None:
+    logs = getattr(system, "_session_logs", None)
+    if logs is not None:
+        session_key = getattr(logs, "session_key", None)
+        if callable(session_key):
+            value = session_key()
+            if value:
+                return str(value)
+    value = getattr(system, "session_key", None)
+    if isinstance(value, str) and "/" in value:
+        return value
+    return None
+
+
+async def _print_usage_report(raw: str, system: Any) -> None:
+    tail = raw.strip()[6:].strip()
+    if tail:
+        if (tail.startswith('"') and tail.endswith('"')) or (
+            tail.startswith("'") and tail.endswith("'")
+        ):
+            tail = tail[1:-1]
+        target = Path(tail).expanduser()
+        if not target.is_absolute():
+            target = (Path.cwd() / target).resolve()
+        files = model_message_files_for_path(target)
+        if not files:
+            print_error(f"未找到 model_messages 日志: {target}")
+            return
+    else:
+        await drain_pending_saves()
+        session_key = _conversation_session_key(system)
+        if not session_key:
+            print_error("当前会话尚未绑定日志目录；请使用 /usage <path>")
+            return
+        files = session_model_message_files(logger.LOG_DIR, session_key)
+        if not files:
+            print_error(f"当前会话没有 model_messages 日志: {session_key}")
+            return
+
+    try:
+        report = await asyncio.to_thread(summarize_usage_files, files)
+    except Exception as e:
+        print_error(f"统计 usage 失败: {e}")
+        return
+    print_panel(_format_usage_report(report), title="Usage")
+
+
 async def _print_context_usage(
     system: Any,
     coordinator_history: ChatHistory | None,
@@ -139,10 +320,10 @@ async def _print_context_usage(
             f"{label}: {bd['percent']:.0f}%  "
             f"({_k_tokens(bd['total'])}/{_k_tokens(bd['max'])} tok)"
         )
-        lines.append(
-            f"   系统提示 {_k_tokens(bd['system'])}"
-            f"（含记忆注入 {_k_tokens(bd['memory'])}） · 历史 {_k_tokens(bd['history'])}"
-        )
+        if bd.get("has_usage"):
+            lines.append(f"   latest real input_tokens {_k_tokens(bd['input'])}")
+        else:
+            lines.append("   no real usage yet; estimates are disabled")
         lines.append(f"   自动压缩阈值 {_k_tokens(bd['threshold'])} tok")
         lines.append("")
     print_panel("\n".join(lines).rstrip(), title="上下文用量")
@@ -244,6 +425,9 @@ async def handle_slash_command(
         return True, None
     if cmd == "/context":
         await _print_context_usage(system, coordinator_history, manager_history)
+        return True, None
+    if cmd == "/usage":
+        await _print_usage_report(raw, system)
         return True, None
     if cmd == "/pwd":
         print_success(str(Path.cwd()))
