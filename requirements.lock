@@ -6,7 +6,7 @@ akracer==0.0.14 ; sys_platform == 'linux'
 akshare==1.18.64
 altgraph==0.17.5
 annotated-types==0.7.0
-anthropic==0.97.0
+anthropic==0.109.1
 anyio==4.13.0
 attrs==26.1.0
 beautifulsoup4==4.15.0
@@ -82,9 +82,9 @@ pyasn1==0.6.3
 pyasn1-modules==0.4.2
 pycparser==3.0 ; implementation_name != 'PyPy'
 pydantic==2.13.3
-pydantic-ai-slim==1.80.0
+pydantic-ai-slim==1.105.0
 pydantic-core==2.46.3
-pydantic-graph==1.80.0
+pydantic-graph==1.105.0
 pyee==13.0.1
 pygments==2.20.0
 pyinstaller==6.20.0

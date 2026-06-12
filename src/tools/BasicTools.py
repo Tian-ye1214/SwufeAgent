@@ -678,6 +678,48 @@ class BasicToolkit:
             ]
         )
 
+    def worker_tool_groups(self, *, include_browser: bool) -> dict[str, list]:
+        """Worker tools grouped for resident tools and deferred capabilities."""
+        browser = [
+            self.browser_navigate,
+            self.browser_get_content,
+            self.browser_screenshot,
+            self.browser_click,
+            self.browser_fill,
+            self.browser_press_key,
+            self.browser_wait_for_selector,
+            self.browser_evaluate,
+            self.browser_close,
+        ] if include_browser else []
+        groups = {
+            "core": [
+                self.list_files,
+                self.read_file,
+                self.search_in_files,
+                self.search_web,
+                self.ask_user,
+            ],
+            "file_mutation": [
+                self.write_file,
+                self.append_to_file,
+                self.edit_file,
+                self.create_directory,
+            ],
+            "execution": [
+                self.run_command,
+                self.execute_file,
+            ],
+            "media": [
+                self.read_image,
+                extract_text,
+            ],
+            "memory": list(self._extra_worker_tools),
+            "skills": list(self._skills_toolkit.tools),
+        }
+        if browser:
+            groups["browser"] = browser
+        return {name: tools for name, tools in groups.items() if tools}
+
     def _worker_tools(self, *, include_browser: bool) -> list:
         """Worker 工具集。``include_browser=False`` 用于并行 Worker——它们共用一个浏览器
         页面会互相串台，故并行时不发浏览器工具（仍可用 search_web）。"""

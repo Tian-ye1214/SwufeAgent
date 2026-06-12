@@ -1,5 +1,7 @@
 import json
-from openai.types import chat as oa_chat
+from dataclasses import replace
+from typing import Any
+
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
@@ -25,34 +27,8 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         model_settings: _ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        self._log_missing_reasoning_content(messages)
         response = await super().request(messages, model_settings, model_request_parameters)
         return self._repair_tool_calls_json(response)
-
-    def _log_missing_reasoning_content(self, messages: list[ModelMessage]) -> None:
-        profile = OpenAIModelProfile.from_profile(self.profile)
-        field = profile.openai_chat_thinking_field
-        if not field or profile.openai_chat_send_back_thinking_parts != 'field':
-            return
-
-        missing_indices: list[int] = []
-        for idx, message in enumerate(messages):
-            if not isinstance(message, ModelResponse):
-                continue
-            mapped = self._map_model_response(message)
-            if mapped.get('role') != 'assistant':
-                continue
-            value = mapped.get(field)
-            if not isinstance(value, str):
-                missing_indices.append(idx)
-
-        if missing_indices:
-            logger.debug(
-                "thinking history missing `%s` on assistant messages: count=%s indices=%s",
-                field,
-                len(missing_indices),
-                missing_indices,
-            )
 
     def _ensure_valid_json(self, args_str: str, tool_name: str) -> str:
         """保证返回的字符串一定是合法 JSON。先校验，再 json_repair，最后 fallback 标记。"""
@@ -85,45 +61,24 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
                         repaired_args = json.dumps(original_args, ensure_ascii=False)
                     else:
                         repaired_args = self._ensure_valid_json(original_args, part.tool_name)
-                    part = ToolCallPart(
-                        tool_name=part.tool_name,
-                        args=repaired_args,
-                        tool_call_id=part.tool_call_id,
-                        id=part.id,
-                        provider_details=part.provider_details,
-                    )
+                    part = replace(part, args=repaired_args)
                 except Exception as e:
                     logger.warning("repair tool call JSON failed for %s: %s", part.tool_name, e)
                     # fallback：用 _ensure_valid_json 保证不存入坏数据
                     if isinstance(part.args, str):
                         safe_args = self._ensure_valid_json(part.args, part.tool_name)
-                        part = ToolCallPart(
-                            tool_name=part.tool_name,
-                            args=safe_args,
-                            tool_call_id=part.tool_call_id,
-                            id=part.id,
-                            provider_details=part.provider_details,
-                        )
+                        part = replace(part, args=safe_args)
             repaired_parts.append(part)
 
-        return ModelResponse(
-            parts=repaired_parts,
-            usage=response.usage,
-            model_name=response.model_name,
-            timestamp=response.timestamp,
-            provider_name=response.provider_name,
-            provider_details=response.provider_details,
-            provider_response_id=response.provider_response_id,
-            finish_reason=response.finish_reason,
-            run_id=response.run_id,
-            metadata=response.metadata,
-        )
+        return replace(response, parts=repaired_parts)
 
-    def _process_thinking(self, message: oa_chat.ChatCompletionMessage) -> list[ThinkingPart] | None:
+    def _process_thinking(self, message: Any) -> list[ThinkingPart] | None:
         """DeepSeek thinking + tools: reasoning_content must round-trip even when empty, or API returns 400."""
         inherited = super()._process_thinking(message)
         if inherited:
             return inherited
+        if not getattr(message, 'tool_calls', None):
+            return None
         profile = OpenAIModelProfile.from_profile(self.profile)
         if (
             profile.openai_chat_thinking_field
@@ -136,16 +91,18 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
         return None
 
 
-class ThinkingProvider(OpenAIProvider):
-    def model_profile(self, model_name: str) -> ModelProfile | None:
-        profile = deepseek_model_profile(model_name)
-        return OpenAIModelProfile(
-            json_schema_transformer=OpenAIJsonSchemaTransformer,
-            supports_json_object_output=True,
-            supports_thinking=True,
-            openai_chat_thinking_field='reasoning_content',
-            openai_chat_send_back_thinking_parts='field',
-        ).update(profile)
+def _openai_compatible_thinking_profile(model_name: str) -> ModelProfile:
+    provider_profile = OpenAIProvider.model_profile(model_name)
+    profile = OpenAIModelProfile.from_profile(provider_profile).update(
+        deepseek_model_profile(model_name)
+    )
+    return OpenAIModelProfile(
+        json_schema_transformer=OpenAIJsonSchemaTransformer,
+        supports_json_object_output=True,
+        supports_thinking=True,
+        openai_chat_thinking_field='reasoning_content',
+        openai_chat_send_back_thinking_parts='field',
+    ).update(profile)
 
 
 def create_model(model_name: str, parameter: dict):
@@ -170,8 +127,15 @@ def create_model(model_name: str, parameter: dict):
         del param["thinking"]
         if extra:
             param['extra_body'] = extra
-        provider = ThinkingProvider(base_url=api_base, api_key=api_key)
+        provider = OpenAIProvider(base_url=api_base, api_key=api_key)
+        profile = _openai_compatible_thinking_profile(model_name)
     else:
         del param["thinking"]
         provider = OpenAIProvider(base_url=api_base, api_key=api_key)
-    return JsonRepairOpenAIChatModel(model_name, provider=provider, settings=ModelSettings(**param))
+        profile = None
+    return JsonRepairOpenAIChatModel(
+        model_name,
+        provider=provider,
+        profile=profile,
+        settings=ModelSettings(**param),
+    )

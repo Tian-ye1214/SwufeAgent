@@ -6,8 +6,9 @@ import time
 import traceback
 
 import logger
+from pydantic_ai import RunContext
 from prompt import get_worker_system_prompt, load_prompt
-from ModelGateway.agent_factory import create_agent
+from ModelGateway.agent_factory import create_agent, create_worker_toolsets_and_capabilities
 from ModelGateway.ModelChecker import maybe_auto_compress_async
 from app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
 from lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
@@ -72,7 +73,7 @@ class _BoardWorkerTools:
         """
         return await self._board.get_updates(exclude_worker=self._worker_id)
 
-    async def report_progress(self, message: str) -> str:
+    async def report_progress(self, ctx: RunContext, message: str) -> str:
         """
         Report your current progress to other workers via the shared message board.
         Use this to share intermediate results or important findings.
@@ -80,6 +81,12 @@ class _BoardWorkerTools:
             message: Summary of what you've accomplished so far
         """
         await self._board.post(self._worker_id, self._task_desc, message, status="in_progress")
+        ctx.enqueue(
+            "[Parallel worker progress recorded]\n"
+            f"{self._worker_id}: {message}\n"
+            "Continue the current task; call check_other_workers_progress before duplicating work.",
+            priority="asap",
+        )
         return "Progress update posted to the message board."
 
 
@@ -147,6 +154,27 @@ class WorkerOrchestrator:
             raise RuntimeError("Worker 执行前须绑定 session_key")
         return await self._registry.ensure_agent(self._session_key, "worker", suffix)
 
+    def _create_worker_agent(
+        self,
+        model_name: str,
+        model_params: dict[str, Any],
+        instructions: str,
+        *,
+        include_browser: bool,
+        core_extra_tools: list[Any] | None = None,
+    ):
+        toolsets, capabilities = create_worker_toolsets_and_capabilities(
+            self._toolkit.worker_tool_groups(include_browser=include_browser),
+            core_extra_tools=core_extra_tools or (),
+        )
+        return create_agent(
+            model_name,
+            model_params,
+            instructions=instructions,
+            toolsets=toolsets,
+            capabilities=capabilities,
+        )
+
     async def execute_task_with_worker(
         self,
         task_description: str,
@@ -173,11 +201,11 @@ class WorkerOrchestrator:
         worker_sysprompt = await asyncio.to_thread(
             get_worker_system_prompt, self._toolkit.skills_manager, mem
         )
-        worker_agent = create_agent(
+        worker_agent = self._create_worker_agent(
             w_name,
             w_params,
-            self._toolkit.workers_tools,
             worker_sysprompt,
+            include_browser=True,
         )
         prompt_text = (
             f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -356,7 +384,6 @@ class WorkerOrchestrator:
         tm = self._task_manager
 
         board_tools = self._create_board_tools(board, worker_id, task.description)
-        all_tools = self._toolkit.workers_tools_no_browser + board_tools
 
         def _parallel_worker_prompt():
             mem = self._memory_injection_getter()
@@ -366,7 +393,13 @@ class WorkerOrchestrator:
 
         full_system_prompt = await asyncio.to_thread(_parallel_worker_prompt)
         w_name, w_params = get_model_and_params("worker")
-        worker_agent = create_agent(w_name, w_params, all_tools, full_system_prompt)
+        worker_agent = self._create_worker_agent(
+            w_name,
+            w_params,
+            full_system_prompt,
+            include_browser=False,
+            core_extra_tools=board_tools,
+        )
 
         other_progress = await board.get_updates(exclude_worker=worker_id)
 
