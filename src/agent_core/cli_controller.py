@@ -90,6 +90,11 @@ class AgentCliController:
 
     def _queue_input(self, raw_input: str, state: CliSessionState) -> None:
         self._queued_inputs.append(QueuedCliInput(raw_input=raw_input, state=state))
+        if self.system.has_current_goal_turn:
+            print_success(
+                f"输入已记录（{len(self._queued_inputs)} 项待合并）。将在目标模式下一轮纳入。"
+            )
+            return
         print_success(
             f"输入已入队（{len(self._queued_inputs)} 项待处理）。将在当前回合结束后运行。"
         )
@@ -122,9 +127,17 @@ class AgentCliController:
                 raw_input,
                 batch[0].state,
                 wait_for_turn=False,
+                goal_mode=False,
             )
         finally:
             self._queue_draining = False
+
+    def _take_goal_queued_inputs(self) -> list[str]:
+        if not self._queued_inputs:
+            return []
+        batch = list(self._queued_inputs)
+        self._queued_inputs.clear()
+        return [item.raw_input for item in batch]
 
     async def _publish_context_usage(self, history: ChatHistory) -> None:
         system = self.system
@@ -188,6 +201,7 @@ class AgentCliController:
         state: CliSessionState,
         *,
         wait_for_turn: bool,
+        goal_mode: bool = False,
     ) -> str:
         system = self.system
         history = state.history
@@ -219,7 +233,15 @@ class AgentCliController:
             await system.bind_session(safe_session_key)
             state.is_first_input = False
 
-        turn_task = system._start_user_turn(message, history)
+        if goal_mode:
+            turn_task = system._start_goal_turn(
+                message,
+                history,
+                conversation_log_hint=(raw_input or message.text or "")[:40],
+                take_queued_inputs=self._take_goal_queued_inputs,
+            )
+        else:
+            turn_task = system._start_user_turn(message, history)
         if turn_task is None:
             self._queue_input(raw_input, state)
             return "continue"
@@ -239,6 +261,7 @@ class AgentCliController:
         state: CliSessionState,
         *,
         wait_for_turn: bool,
+        goal_mode: bool = False,
     ) -> str:
         raw_input = raw_input.strip()
         if not raw_input:
@@ -272,6 +295,7 @@ class AgentCliController:
             raw_input,
             state,
             wait_for_turn=wait_for_turn,
+            goal_mode=goal_mode,
         )
 
     async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:

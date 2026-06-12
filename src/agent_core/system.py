@@ -34,12 +34,14 @@ import traceback
 import time
 import asyncio
 import uuid
+from collections.abc import Callable
 from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
 from RAG.embedding_function import close_http_client
+from agent_core.goal_mode import run_goal_loop
 
 from lifecycle import (
     AgentRegistry,
@@ -57,6 +59,28 @@ def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
     if not supports_model_stream():
         return None
     return TextEventStreamHandler(title="Coordinator")
+
+
+def _messages_with_replaced_output(result: Any, output: str) -> list[Any]:
+    """Return result messages with the last assistant text part replaced."""
+    messages = list(result.all_messages())
+    for message_index in range(len(messages) - 1, -1, -1):
+        message = messages[message_index]
+        parts = getattr(message, "parts", None)
+        if not parts:
+            continue
+        new_parts = list(parts)
+        for part_index in range(len(new_parts) - 1, -1, -1):
+            part = new_parts[part_index]
+            if getattr(part, "part_kind", None) != "text":
+                continue
+            if not hasattr(part, "model_copy"):
+                continue
+            new_parts[part_index] = part.model_copy(update={"content": output})
+            if hasattr(message, "model_copy"):
+                messages[message_index] = message.model_copy(update={"parts": new_parts})
+            return messages
+    return messages
 
 
 class AgentSystem:
@@ -125,6 +149,16 @@ class AgentSystem:
     @property
     def has_current_turn(self) -> bool:
         return self._current_turn is not None
+
+    @property
+    def has_current_goal_turn(self) -> bool:
+        return bool(self._current_turn and self._current_turn.get("mode") == "goal")
+
+    @property
+    def current_goal_iteration(self) -> int:
+        if not self.has_current_goal_turn:
+            return 0
+        return int(self._current_turn.get("goal_iteration") or 0)
 
     @property
     def queued_cli_input_count(self) -> int:
@@ -206,7 +240,42 @@ class AgentSystem:
             return None
         turn_id = uuid.uuid4().hex[:8]
         task = asyncio.create_task(self._run_user_turn(turn_id, message, history))
-        self._current_turn = {"turn_id": turn_id, "task": task, "text": (message.text or "")[:200]}
+        self._current_turn = {
+            "turn_id": turn_id,
+            "task": task,
+            "text": (message.text or "")[:200],
+            "mode": "single",
+        }
+        task.add_done_callback(self._on_turn_task_done)
+        return task
+
+    def _start_goal_turn(
+        self,
+        message: UserMessage,
+        history: ChatHistory,
+        *,
+        conversation_log_hint: str,
+        take_queued_inputs: Callable[[], list[str]],
+    ) -> asyncio.Task[None] | None:
+        if self._current_turn is not None:
+            return None
+        turn_id = uuid.uuid4().hex[:8]
+        task = asyncio.create_task(
+            self._run_goal_turn(
+                turn_id,
+                message,
+                history,
+                conversation_log_hint=conversation_log_hint,
+                take_queued_inputs=take_queued_inputs,
+            )
+        )
+        self._current_turn = {
+            "turn_id": turn_id,
+            "task": task,
+            "text": (message.text or ""),
+            "mode": "goal",
+            "goal_iteration": 0,
+        }
         task.add_done_callback(self._on_turn_task_done)
         return task
 
@@ -221,6 +290,49 @@ class AgentSystem:
             )
         except asyncio.CancelledError:
             logger.info("用户回合已取消 turn_id=%s", turn_id)
+        except ModelHTTPError as e:
+            body = e.body or {}
+            code = body.get("code", "") if isinstance(body, dict) else ""
+            if code == "data_inspection_failed":
+                print_warning(
+                    "模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。"
+                    "请尝试换一种表达方式，或 /clear 清空上下文后重试。"
+                )
+            else:
+                print_warning(f"模型请求错误 (HTTP {e.status_code}): {e}")
+                logger.error("详细信息:\n%s", traceback.format_exc())
+                self._task_manager.reset()
+        except Exception as e:
+            print_warning(f"未预期的系统错误: {e}")
+            logger.error("详细信息:\n%s", traceback.format_exc())
+            self._task_manager.reset()
+
+    async def _run_goal_turn(
+        self,
+        turn_id: str,
+        message: UserMessage,
+        history: ChatHistory,
+        *,
+        conversation_log_hint: str,
+        take_queued_inputs: Callable[[], list[str]],
+    ) -> None:
+        def set_iteration(iteration: int) -> None:
+            ct = self._current_turn
+            if ct is not None and ct.get("turn_id") == turn_id:
+                ct["goal_iteration"] = iteration
+
+        try:
+            await run_goal_loop(
+                self,
+                message=message,
+                history=history,
+                turn_id=turn_id,
+                conversation_log_hint=conversation_log_hint,
+                take_queued_inputs=take_queued_inputs,
+                set_iteration=set_iteration,
+            )
+        except asyncio.CancelledError:
+            logger.info("目标模式回合已取消 turn_id=%s", turn_id)
         except ModelHTTPError as e:
             body = e.body or {}
             code = body.get("code", "") if isinstance(body, dict) else ""
@@ -521,6 +633,7 @@ class AgentSystem:
         conversation_log_hint: str = "",
         conversation_log_extra: dict | None = None,
         turn_id: str | None = None,
+        output_transform: Callable[[str], str] | None = None,
     ) -> tuple["ChatHistory", str]:
         """
         任务协调系统入口，负责判断任务复杂度并调用相应的执行器。
@@ -545,6 +658,7 @@ class AgentSystem:
                 conversation_log_hint=conversation_log_hint,
                 conversation_log_extra=conversation_log_extra,
                 turn_id=turn_id,
+                output_transform=output_transform,
             )
         finally:
             self._cli_turn_id = prev_cli_turn
@@ -557,6 +671,7 @@ class AgentSystem:
         conversation_log_hint: str,
         conversation_log_extra: dict | None,
         turn_id: str | None,
+        output_transform: Callable[[str], str] | None,
     ) -> tuple["ChatHistory", str]:
         if not self._context_prewarmed:
             await prewarm_effective_max_contexts_by_role_async(
@@ -590,7 +705,7 @@ class AgentSystem:
 
         start_time = time.time()
         coord_aid = await self._agent_id("coordinator")
-        stream_handler = _make_coordinator_stream_handler()
+        stream_handler = None if output_transform is not None else _make_coordinator_stream_handler()
         try:
             result = await run_agent_with_lifecycle(
                 agent=agent,
@@ -606,12 +721,16 @@ class AgentSystem:
         except BaseException:
             clear_model_stream()
             raise
-        output = result.output
+        raw_output = str(result.output or "")
+        output = output_transform(raw_output) if output_transform is not None else raw_output
         if stream_handler is not None:
             finish_model_stream(output, title="Coordinator")
         else:
             show_model_output(output, title="Coordinator")
-        history.update(result)
+        if output != raw_output:
+            history.set_messages(_messages_with_replaced_output(result, output))
+        else:
+            history.update(result)
         elapsed = time.time() - start_time
 
         logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
@@ -636,9 +755,10 @@ class AgentSystem:
         state: CliSessionState,
         *,
         wait_for_turn: bool,
+        goal_mode: bool = False,
     ) -> str:
         return await self._cli_controller.process_line(
-            raw_input, state, wait_for_turn=wait_for_turn
+            raw_input, state, wait_for_turn=wait_for_turn, goal_mode=goal_mode
         )
 
     async def run_interactive(self, *, stop_event: asyncio.Event | None = None) -> None:

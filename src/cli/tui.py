@@ -4,6 +4,7 @@ import asyncio
 import math
 import queue
 import threading
+from enum import Enum
 from typing import Any
 
 from textual.binding import Binding
@@ -26,6 +27,19 @@ WORKING_LABEL = "工作中"
 WORKING_FRAMES = ("", ".", "..", "...")
 STREAM_PREVIEW_MAX_LINES = 10
 STREAM_PREVIEW_MAX_CHARS = 6000
+
+
+class TuiRunMode(str, Enum):
+    REVIEW = "review"
+    PASS = "pass"
+    GOAL = "goal"
+
+    def next(self) -> "TuiRunMode":
+        if self == TuiRunMode.REVIEW:
+            return TuiRunMode.PASS
+        if self == TuiRunMode.PASS:
+            return TuiRunMode.GOAL
+        return TuiRunMode.REVIEW
 
 
 class AgentInputSuggester(Suggester):
@@ -162,7 +176,7 @@ class RedLotusTui(App[None]):
         self._model_stream_title = ""
         self._model_stream_text = ""
         self._ui_thread_id = 0
-        self._review_enabled = True  # 全局模式：True=审查模式，False=放行模式（写入直接落盘）
+        self._run_mode = TuiRunMode.REVIEW
         self._review_mode = False
         self._review_items: list = []  # [(key, name, hunk), ...] 当前未决定的改动
         self._review_idx = 0
@@ -192,7 +206,7 @@ class RedLotusTui(App[None]):
         set_output_sink(TextualOutputSink(self, log, status))
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
         self._ui_thread_id = threading.get_ident()
-        if self._review_enabled:
+        if self._run_mode == TuiRunMode.REVIEW:
             self.system.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
@@ -226,12 +240,15 @@ class RedLotusTui(App[None]):
             except RuntimeError:
                 raise RuntimeError("Textual app is no longer running, cannot ask user")
 
-            try:
-                result = result_queue.get(timeout=_ASK_TIMEOUT)
-            except queue.Empty:
-                raise RuntimeError(
-                    f"ask_user timed out after {_ASK_TIMEOUT}s (no reply from TUI)"
-                )
+            if self.system.has_current_goal_turn:
+                result = result_queue.get()
+            else:
+                try:
+                    result = result_queue.get(timeout=_ASK_TIMEOUT)
+                except queue.Empty:
+                    raise RuntimeError(
+                        f"ask_user timed out after {_ASK_TIMEOUT}s (no reply from TUI)"
+                    )
 
             if isinstance(result, Exception):
                 raise result
@@ -412,11 +429,13 @@ class RedLotusTui(App[None]):
             self._exit_review()
 
     def action_toggle_mode(self) -> None:
-        """Shift+Tab：审查模式 ⇄ 放行模式。放行=后续写入直接落盘、不进暂存区。"""
+        """Shift+Tab：审查模式 -> 放行模式 -> 目标模式 -> 审查模式。"""
         if self._review_mode:
             return  # 审查浮层中不切换全局模式
-        self._review_enabled = not self._review_enabled
-        if self._review_enabled:
+        if self.system.has_current_goal_turn:
+            return
+        self._run_mode = self._run_mode.next()
+        if self._run_mode == TuiRunMode.REVIEW:
             self.system.review_store.activate(self._on_reviews_changed)
         else:
             self.system.review_store.deactivate()  # 清空待审查；后续写入直接放行
@@ -471,9 +490,11 @@ class RedLotusTui(App[None]):
         )
 
     def _mode_chip(self) -> Text:
-        if self._review_enabled:
+        if self._run_mode == TuiRunMode.REVIEW:
             return Text(" ⏵ 审查模式 ", style="bold black on cyan")
-        return Text(" ⏵⏵ 放行模式 ", style="bold black on green")
+        if self._run_mode == TuiRunMode.PASS:
+            return Text(" ⏵⏵ 放行模式 ", style="bold black on green")
+        return Text(" ◎ 目标模式 ", style="bold black on yellow")
 
     def _status_text(self) -> Any:
         if self._review_mode:
@@ -484,7 +505,7 @@ class RedLotusTui(App[None]):
             t.append(self._mode_chip())
             t.append("  ")
             t.append(READY_LABEL, style="dim")
-            if self._review_enabled and self._pending_count > 0:
+            if self._run_mode == TuiRunMode.REVIEW and self._pending_count > 0:
                 t.append("       ")
                 t.append(f" ⚑ 待审查 {self._pending_count} 处 · 按 Ctrl+R 审查 ", style="bold black on yellow")
             return t
@@ -493,7 +514,12 @@ class RedLotusTui(App[None]):
         t = Text()
         t.append(self._mode_chip())
         t.append("  ")
-        t.append(f"{WORKING_LABEL}{suffix}")
+        if self.system.has_current_goal_turn:
+            iteration = self.system.current_goal_iteration
+            label = f"目标循环第 {iteration} 轮" if iteration else "目标循环"
+            t.append(f"{label}{suffix}")
+        else:
+            t.append(f"{WORKING_LABEL}{suffix}")
         return t
 
     @staticmethod
@@ -637,7 +663,12 @@ class RedLotusTui(App[None]):
 
     async def _handle_line(self, value: str) -> None:
         try:
-            action = await self.system.process_cli_line(value, self.state, wait_for_turn=False)
+            action = await self.system.process_cli_line(
+                value,
+                self.state,
+                wait_for_turn=False,
+                goal_mode=self._run_mode == TuiRunMode.GOAL,
+            )
             if action == "break":
                 self.exit()
         finally:
