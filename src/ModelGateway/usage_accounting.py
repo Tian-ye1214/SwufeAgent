@@ -171,14 +171,7 @@ def billable_tokens_from_usage(usage: Any) -> BillableTokens:
         usage, "prompt_cache_miss_tokens"
     )
     prompt_tokens = max(_int_attr(usage, "input_tokens"), prompt_cache_total)
-    prompt_tokens += _int_attr(usage, "cache_write_tokens")
-    prompt_tokens += _int_attr(usage, "cache_read_tokens")
-    prompt_tokens += _int_attr(usage, "input_audio_tokens")
-    prompt_tokens += _int_attr(usage, "cache_audio_read_tokens")
-
     completion_tokens = _int_attr(usage, "output_tokens")
-    completion_tokens += _int_attr(usage, "output_audio_tokens")
-    completion_tokens += _detail_int(usage, "reasoning_tokens")
 
     return BillableTokens(
         prompt_tokens=prompt_tokens,

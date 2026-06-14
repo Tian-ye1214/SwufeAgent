@@ -308,11 +308,13 @@ def pdf_attachment_text_block(data: bytes, *, filename: str | None = None) -> st
 
 
 def extract_text_from_excel(file):
-    df = pd.read_excel(file)
+    sheets = pd.read_excel(file, sheet_name=None)
     content = ""
-    for column in df.columns:
-        content += f"{column}:\n"
-        content += df[column].to_string() + "\n\n"
+    for sheet_name, df in sheets.items():
+        content += f"【Sheet: {sheet_name}】\n"
+        for column in df.columns:
+            content += f"{column}:\n"
+            content += df[column].to_string() + "\n\n"
     return content
 
 

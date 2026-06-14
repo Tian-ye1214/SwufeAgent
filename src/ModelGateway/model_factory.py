@@ -18,7 +18,7 @@ from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 import logger
-from app_config import get_env, http_chat_completions_thinking_extras
+from app_config import get_env, http_chat_completions_thinking_extras, unified_thinking_setting
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
@@ -132,30 +132,31 @@ def create_model(model_name: str, parameter: dict):
     api_base = get_env("BASE_URL", warn=False) or None
     http_client = _get_shared_http_client()
     param = dict(parameter)
+    thinking_extras = http_chat_completions_thinking_extras(param)
+    thinking_level = unified_thinking_setting(param)
+    param.pop("thinking", None)
+    param.pop("reasoning_effort", None)
 
     if 'gemini' in model_name:
-        del param["thinking"]
+        param["thinking"] = thinking_level
         provider = GoogleProvider(base_url='https://api.zhizengzeng.com/google', api_key=api_key, http_client=http_client)
         return GoogleModel(model_name, provider=provider, settings=ModelSettings(**param))
 
     if 'claude' in model_name:
-        del param["thinking"]
+        param["thinking"] = thinking_level
         provider = AnthropicProvider(base_url='https://api.zhizengzeng.com/anthropic', api_key=api_key, http_client=http_client)
         return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**param))
 
     if any(m in model_name.lower() for m in ('deepseek', 'kimi')):
         eb = param.get('extra_body')
         extra = dict(eb) if isinstance(eb, dict) else {}
-        extra.update(http_chat_completions_thinking_extras(param))
-        del param["thinking"]
+        extra.update(thinking_extras)
         if extra:
             param['extra_body'] = extra
-        provider = OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client)
         profile = _openai_compatible_thinking_profile(model_name)
     else:
-        del param["thinking"]
-        provider = OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client)
         profile = None
+    provider = OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client)
     return JsonRepairOpenAIChatModel(
         model_name,
         provider=provider,

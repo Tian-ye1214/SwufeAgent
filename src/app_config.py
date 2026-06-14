@@ -97,6 +97,15 @@ def get_agent_run_policy() -> AgentRunPolicy:
     return AgentRunPolicy.from_config(settings())
 
 
+def _resolve_reasoning_effort(model_params: dict[str, Any]) -> str | None:
+    if str(model_params.get("thinking", "")).strip().lower() != "enabled":
+        return None
+    effort = str(model_params.get("reasoning_effort", "")).strip().lower()
+    if effort == "max":
+        effort = "xhigh"
+    return effort if effort in ["minimal", "low", "medium", "high", "xhigh"] else None
+
+
 def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
     from ModelGateway.ModelChecker import merge_openrouter_into_model_params
 
@@ -106,7 +115,7 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
     s = str(reff).strip().lower()
     if s in ("none", "off", "false"):
         raw["reasoning_effort"] = False
-    elif s in ("minimal", "low", "medium", "high", "xhigh", "max"):
+    elif s in ["minimal", "low", "medium", "high", "xhigh"] or s == "max":
         raw["reasoning_effort"] = s
     else:
         raw["reasoning_effort"] = "medium"
@@ -118,22 +127,21 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
 
 
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
-    reasoning_effort = model_params["reasoning_effort"]
-    thinking_type = str(model_params["thinking"]).strip().lower()
-    if thinking_type == "enabled" and reasoning_effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort}
-    return {"thinking": {"type": "disabled"}}
+    """OpenAI 兼容 chat/completions 的 extra_body 思考参数(DeepSeek/Kimi 用)。"""
+    effort = _resolve_reasoning_effort(model_params)
+    if effort is None:
+        return {"thinking": {"type": "disabled"}}
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
+
+
+def unified_thinking_setting(model_params: dict[str, Any]) -> bool | str:
+    return _resolve_reasoning_effort(model_params) or False
 
 
 def _openrouter_reasoning_extras(model_params: dict[str, Any], supported: set[str]) -> dict[str, Any]:
-    reasoning_effort = model_params.get("reasoning_effort")
-    thinking_type = str(model_params.get("thinking", "")).strip().lower()
-    if thinking_type != "enabled":
+    effort = _resolve_reasoning_effort(model_params)
+    if effort is None:
         return {}
-    if reasoning_effort not in ("minimal", "low", "medium", "high", "xhigh", "max"):
-        return {}
-
-    effort = "xhigh" if reasoning_effort == "max" else reasoning_effort
     if "reasoning" in supported:
         return {"reasoning": {"effort": effort}}
     if "include_reasoning" in supported:
