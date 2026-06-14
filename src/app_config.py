@@ -151,21 +151,26 @@ def _openrouter_reasoning_extras(model_params: dict[str, Any], supported: set[st
     return {}
 
 
+def _openrouter_supported_params(model_name: str | None) -> set[str] | None:
+    """OpenRouter 元数据中该模型支持的请求参数集合;无模型名/无元数据/无该字段时返回 None。"""
+    if not model_name:
+        return None
+    from ModelGateway.ModelChecker import _lookup_openrouter_meta
+
+    meta = _lookup_openrouter_meta(model_name)
+    supported = meta.get("supported_parameters") if meta else None
+    if not isinstance(supported, list):
+        return None
+    return {str(p) for p in supported}
+
+
 def _filter_openrouter_supported_request_fields(
     model_name: str | None,
     fields: dict[str, Any],
 ) -> dict[str, Any]:
-    if not model_name:
+    allowed = _openrouter_supported_params(model_name)
+    if allowed is None:
         return fields
-    from ModelGateway.ModelChecker import _lookup_openrouter_meta
-
-    meta = _lookup_openrouter_meta(model_name)
-    if not meta:
-        return fields
-    supported = meta.get("supported_parameters")
-    if not isinstance(supported, list):
-        return fields
-    allowed = {str(p) for p in supported}
     return {k: v for k, v in fields.items() if k in allowed}
 
 
@@ -177,15 +182,7 @@ def chat_completion_inference_request_fields(
 ) -> dict[str, Any]:
     """OpenAI 兼容 chat/completions 请求体中除 model、messages 外的推理相关字段；config 与运行时 kwargs 均可扩展。"""
     mp = dict(model_params)
-    meta_supported: set[str] | None = None
-    if model_name:
-        from ModelGateway.ModelChecker import _lookup_openrouter_meta
-
-        meta = _lookup_openrouter_meta(model_name)
-        supported = meta.get("supported_parameters") if meta else None
-        if isinstance(supported, list):
-            meta_supported = {str(p) for p in supported}
-
+    meta_supported = _openrouter_supported_params(model_name)
     if meta_supported is None:
         tex = http_chat_completions_thinking_extras(mp)
     else:

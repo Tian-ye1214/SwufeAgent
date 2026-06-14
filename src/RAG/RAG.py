@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 import logger
 from app_config import get_env
+from persist_utils import iso_utc_now
 from RAG.DataBase import EmbedDataBase
 from RAG.embedding_function import embed_texts, rerank_documents
 
@@ -98,7 +98,7 @@ class RAG:
         await self._db.ensure_connected()
         texts = [r["text"] for r in rows]
         vectors = await embed_texts(texts)
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = iso_utc_now()
         built: list[dict[str, Any]] = []
         for i, r in enumerate(rows):
             built.append(

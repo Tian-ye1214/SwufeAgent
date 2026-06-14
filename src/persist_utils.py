@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -68,3 +69,7 @@ def safe_name(text: str, *, extra: str = "_-", max_len: int = 50, fallback: str 
     """把任意字符串清洗成文件名/键安全形式：非字母数字且不在 extra 内的字符替换为 _。"""
     cleaned = "".join(c if c.isalnum() or c in extra else "_" for c in text)
     return cleaned[:max_len] or fallback
+
+
+def iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

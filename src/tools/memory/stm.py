@@ -4,13 +4,12 @@ import asyncio
 import json
 import threading
 from contextlib import nullcontext
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import logger
 from app_config import get_env
-from persist_utils import load_json_state, rel_key, save_locked_json
+from persist_utils import iso_utc_now, load_json_state, rel_key, save_locked_json
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
 from tools.memory.message_text import turn_texts_from_messages
@@ -123,7 +122,7 @@ class ShortTermMemory:
             {
                 "source": source,
                 "error": error,
-                "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "at": iso_utc_now(),
             },
             ensure_ascii=False,
         )
@@ -139,7 +138,7 @@ class ShortTermMemory:
         session_key: str,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = iso_utc_now()
         for i in range(turns_done, len(turn_texts)):
             text = turn_texts[i].strip()
             if not text:

@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from app_config import settings
-from persist_utils import atomic_write_json, safe_name
+from persist_utils import atomic_write_json, iso_utc_now, safe_name
 import logger
 
 _PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
@@ -100,7 +100,7 @@ class ConversationLog:
 
     def _write(self, base: Path, model_messages: list[Any], extra: dict[str, Any] | None) -> None:
         raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
-        saved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        saved_at = iso_utc_now()
         meta: dict[str, Any] = {"agent": self._name, "date": self._date, "topic": self._topic}
         if extra:
             meta.update(extra)
