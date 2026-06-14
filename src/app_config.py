@@ -15,9 +15,16 @@ from dotenv import dotenv_values
 from pydantic_ai.usage import UsageLimits
 from runtime_state import AgentRunPolicy
 
-_d = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-CONFIG_FILE = _d / "config.json"
-DOTENV_FILE = _d / ".env" if getattr(sys, "frozen", False) else _d.parent / ".env"
+def _resolve_runtime_paths() -> tuple[Path, Path]:
+    """定位 config.json 与 .env：打包后两者均在 exe 同级目录；源码运行时 config.json 随源码在 src/，.env 在项目根。"""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+        return base / "config.json", base / ".env"
+    src = Path(__file__).resolve().parent
+    return src / "config.json", src.parent / ".env"
+
+
+CONFIG_FILE, DOTENV_FILE = _resolve_runtime_paths()
 
 _CONFIG: dict[str, Any] | None = None
 _DOTENV_CACHE: dict[str, str] | None = None
