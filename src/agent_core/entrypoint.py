@@ -5,6 +5,8 @@ import signal
 
 from agent_core.system import AgentSystem
 from ModelGateway.model_factory import close_shared_http_client
+from RAG.embedding_function import close_http_client as close_rag_http_client
+from tools.memory.ltm import close_http_client as close_ltm_http_client
 
 
 def install_stop_handlers(stop_event: asyncio.Event) -> None:
@@ -31,6 +33,8 @@ async def run_cli() -> None:
     finally:
         await system.shutdown()
         await close_shared_http_client()
+        await close_rag_http_client()
+        await close_ltm_http_client()
 
 
 def main() -> None:

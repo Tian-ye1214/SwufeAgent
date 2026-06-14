@@ -40,7 +40,6 @@ from typing import Any, Coroutine, Tuple
 from pydantic_ai.exceptions import ModelHTTPError
 
 from skills.SkillsManager import SkillsManager
-from RAG.embedding_function import close_http_client
 from agent_core.goal_mode import run_goal_loop
 
 from lifecycle import (
@@ -201,7 +200,6 @@ class AgentSystem:
                 await asyncio.gather(*pending, return_exceptions=True)
         await drain_pending_saves()
         await self._memory.close()
-        await close_http_client()
         self._toolkit.close()
         logger.info("[lifecycle] shutdown complete")
 

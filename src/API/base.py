@@ -22,6 +22,8 @@ from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
 from ModelGateway.model_factory import close_shared_http_client
+from RAG.embedding_function import close_http_client as close_rag_http_client
+from tools.memory.ltm import close_http_client as close_ltm_http_client
 import logger
 import tool_telemetry
 
@@ -224,6 +226,15 @@ class BotBase:
 
     async def _evict_session(self, session_id: str) -> None:
         await self._reset_session(session_id)
+        # _reset_session 内部 await（shutdown 最长 15s）期间可能有新消息重新激活该会话：
+        # 此时 dispatch_message 已重建消费者并入队。若仍清空队列字典，会丢消息并留下
+        # 一个永远阻塞在空队列上的悬挂消费者。检测到重新激活则放弃本次回收。
+        # 注：_reset_session 返回后到此处无 await，检查与下方 pop 对协程而言是原子的。
+        if session_id in self._consumer_tasks:
+            return
+        q = self._session_queues.get(session_id)
+        if q is not None and q.qsize() > 0:
+            return
         self._session_queues.pop(session_id, None)
         self._session_generation.pop(session_id, None)
         self._last_active.pop(session_id, None)
@@ -505,6 +516,8 @@ class BotBase:
         self._session_queues.clear()
         self._session_generation.clear()
         await close_shared_http_client()
+        await close_rag_http_client()
+        await close_ltm_http_client()
         logger.info(f"[{self.platform_tag}] 已释放全部会话与 Agent 资源（共 {n} 个 Agent 实例）")
 
     def release_all_resources(self) -> None:

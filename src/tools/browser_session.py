@@ -34,8 +34,10 @@ class PlaywrightBrowserSession:
                 raise
 
     def close(self) -> None:
-        """关闭浏览器（不停止线程池）。"""
+        """关闭浏览器（不停止线程池）。从未启动过时直接返回，避免为空操作白白拉起后台线程。"""
         if self._stopped:
+            return
+        if self._pw is None and self._browser is None and self._context is None and self._page is None:
             return
         try:
             self._run(self._close_impl, timeout=60.0)

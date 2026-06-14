@@ -21,6 +21,28 @@ from tools.memory.consolidation import (
 from tools.memory.message_text import user_prompts_to_text
 
 
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """进程级共享长期记忆合并客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(90.0))
+    return _shared_client
+
+
+async def close_http_client() -> None:
+    """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
+    global _shared_client
+    client, _shared_client = _shared_client, None
+    if client is not None and not client.is_closed:
+        try:
+            await client.aclose()
+        except Exception as e:
+            logger.debug("关闭长期记忆 HTTP 客户端时忽略异常: %s", e)
+
+
 class LongTermMemory:
     """跨会话长期记忆，持久化到 src/prompts/LongTermMemory/ 目录。
 
@@ -299,18 +321,17 @@ class LongTermMemory:
             ),
         }
 
-        async with httpx.AsyncClient(http2=True, timeout=90.0) as client:
-            resp = await client.post(
-                f"{api_base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data["choices"][0]["message"]["content"]
+        resp = await _get_shared_client().post(
+            f"{api_base}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
 
         return self._parse_consolidation_response(raw)
 

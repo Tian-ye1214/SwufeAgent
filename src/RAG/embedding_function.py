@@ -33,9 +33,26 @@ def _client_kwargs(timeout: float) -> dict[str, Any]:
     }
 
 
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """进程级共享 embedding/rerank 客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(**_client_kwargs(60.0))
+    return _shared_client
+
+
 async def close_http_client() -> None:
-    """Compatibility hook; embedding/rerank clients are short-lived per request."""
-    return
+    """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
+    global _shared_client
+    client, _shared_client = _shared_client, None
+    if client is not None and not client.is_closed:
+        try:
+            await client.aclose()
+        except Exception as e:
+            logger.debug("关闭 RAG HTTP 客户端时忽略异常: %s", e)
 
 
 async def embed_texts(
@@ -49,16 +66,15 @@ async def embed_texts(
     logger.debug("RAG embed: batch_size=%d", len(texts))
     model = _require_rag_model("embedding")
     body = {"model": model, "input": texts}
-    async with httpx.AsyncClient(**_client_kwargs(timeout)) as client:
-        response = await client.post(
-            "/embeddings",
-            headers={
-                "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=timeout,
-        )
+    response = await _get_shared_client().post(
+        "/embeddings",
+        headers={
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -90,16 +106,15 @@ async def rerank_documents(
     if top_n is not None:
         body["top_n"] = top_n
 
-    async with httpx.AsyncClient(**_client_kwargs(timeout)) as client:
-        response = await client.post(
-            "/rerank",
-            headers={
-                "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=timeout,
-        )
+    response = await _get_shared_client().post(
+        "/rerank",
+        headers={
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
     response.raise_for_status()
     data = response.json()
 
