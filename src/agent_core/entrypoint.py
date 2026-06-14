@@ -4,6 +4,7 @@ import asyncio
 import signal
 
 from agent_core.system import AgentSystem
+from ModelGateway.model_factory import close_shared_http_client
 
 
 def install_stop_handlers(stop_event: asyncio.Event) -> None:
@@ -29,6 +30,7 @@ async def run_cli() -> None:
         await system.run_interactive(stop_event=stop_event)
     finally:
         await system.shutdown()
+        await close_shared_http_client()
 
 
 def main() -> None:

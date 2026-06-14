@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ _STYLES = {
 _stm_quiet: ContextVar[int] = ContextVar("stm_quiet", default=0)
 LOG_DIR: Path
 _task_sink_id: int | None = None
+SESSION_LOG_MAX_BYTES = 10 * 1024 * 1024   # 单会话日志上限，超出滚动保留一个 .log.1
+LOG_RETENTION_DAYS = 14.0                   # logs 根目录 *.log 保留天数；<=0 关闭清理
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,7 @@ def configure(cfg: LoggingConfig) -> None:
     _lg.remove()
     _lg.add(_console_sink, level=cfg.level, format=cfg.console_fmt, filter=_console_filter)
     _lg.add(_session_sink, level=cfg.level, format=cfg.file_fmt, filter=_session_filter)
+    prune_old_logs()
 
 
 
@@ -83,6 +87,13 @@ def _session_filter(record: dict) -> bool:
 def _session_sink(message: Any) -> None:
     path = LOG_DIR / f"{message.record['extra']['session']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.exists() and path.stat().st_size >= SESSION_LOG_MAX_BYTES:
+            backup = path.with_name(path.name + ".1")
+            backup.unlink(missing_ok=True)
+            path.rename(backup)
+    except OSError:
+        pass
     with path.open("a", encoding="utf-8") as f:
         f.write(str(message))
 
@@ -128,6 +139,24 @@ def setup_task_logger(task_name: str = "task") -> None:
     info("日志文件已创建: %s", path)
 
 
+def prune_old_logs(max_age_days: float | None = None) -> None:
+    """删除 logs 根目录下超过保留期的 *.log / *.log.1（不递归，不动 conversations 等子目录）。"""
+    days = LOG_RETENTION_DAYS if max_age_days is None else max_age_days
+    if days <= 0:
+        return
+    cutoff = time.time() - days * 86400.0
+    try:
+        candidates = list(LOG_DIR.glob("*.log")) + list(LOG_DIR.glob("*.log.1"))
+    except OSError:
+        return
+    for p in candidates:
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @contextmanager
 def session_log_context(session_name: str):
     """把本上下文内的日志额外落到 {session}.log。"""
@@ -157,6 +186,7 @@ __all__ = [
     "error",
     "info_file_only",
     "setup_task_logger",
+    "prune_old_logs",
     "session_log_context",
     "stm_ingest_console_quiet",
 ]

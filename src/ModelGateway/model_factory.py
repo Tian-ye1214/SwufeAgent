@@ -1,4 +1,5 @@
 import json
+import httpx
 from dataclasses import replace
 from typing import Any
 
@@ -12,7 +13,7 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai import ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
-from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.models import ModelRequestParameters, create_async_http_client
 from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
@@ -105,19 +106,41 @@ def _openai_compatible_thinking_profile(model_name: str) -> ModelProfile:
     ).update(profile)
 
 
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = create_async_http_client()
+    return _shared_http_client
+
+
+async def close_shared_http_client() -> None:
+    """进程退出时关闭共享 HTTP 客户端（仅在真正退出时调用，勿在单会话 shutdown 调用）。"""
+    global _shared_http_client
+    client, _shared_http_client = _shared_http_client, None
+    if client is not None and not client.is_closed:
+        try:
+            await client.aclose()
+        except Exception as e:
+            logger.debug("关闭共享 HTTP 客户端时忽略异常: %s", e)
+
+
 def create_model(model_name: str, parameter: dict):
     api_key = get_env("API_KEY", warn=False) or None
     api_base = get_env("BASE_URL", warn=False) or None
+    http_client = _get_shared_http_client()
     param = dict(parameter)
 
     if 'gemini' in model_name:
         del param["thinking"]
-        provider = GoogleProvider(base_url='https://api.zhizengzeng.com/google', api_key=api_key)
+        provider = GoogleProvider(base_url='https://api.zhizengzeng.com/google', api_key=api_key, http_client=http_client)
         return GoogleModel(model_name, provider=provider, settings=ModelSettings(**param))
 
     if 'claude' in model_name:
         del param["thinking"]
-        provider = AnthropicProvider(base_url='https://api.zhizengzeng.com/anthropic', api_key=api_key)
+        provider = AnthropicProvider(base_url='https://api.zhizengzeng.com/anthropic', api_key=api_key, http_client=http_client)
         return AnthropicModel(model_name, provider=provider, settings=ModelSettings(**param))
 
     if any(m in model_name.lower() for m in ('deepseek', 'kimi')):
@@ -127,11 +150,11 @@ def create_model(model_name: str, parameter: dict):
         del param["thinking"]
         if extra:
             param['extra_body'] = extra
-        provider = OpenAIProvider(base_url=api_base, api_key=api_key)
+        provider = OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client)
         profile = _openai_compatible_thinking_profile(model_name)
     else:
         del param["thinking"]
-        provider = OpenAIProvider(base_url=api_base, api_key=api_key)
+        provider = OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client)
         profile = None
     return JsonRepairOpenAIChatModel(
         model_name,

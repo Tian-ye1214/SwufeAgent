@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import time
 import asyncio
 import contextvars
 import uuid
@@ -20,6 +21,7 @@ from app_config import get_env, settings
 from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
+from ModelGateway.model_factory import close_shared_http_client
 import logger
 import tool_telemetry
 
@@ -40,12 +42,15 @@ class BotBase:
     """
     AGENT_RUN_TIMEOUT_S = 900.0
     SEND_REPLY_TIMEOUT_S = 120.0
+    SESSION_IDLE_TTL_S = 3600.0          # 空闲超过此时长的会话将被后台回收；<=0 关闭回收
+    SESSION_GC_INTERVAL_S = 300.0        # 空闲会话清扫间隔
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
     END_TASK_COMMANDS = frozenset({"结束任务", "/结束任务", "结束当前任务", "/结束当前任务"})
 
     # 子类可覆盖（从环境变量读取超时）
     _ENV_AGENT_TIMEOUT: str = ""
     _ENV_SEND_TIMEOUT: str = ""
+    _ENV_SESSION_IDLE_TTL: str = ""
     _ENV_THREAD_WORKERS: str = ""
 
     def __init__(self):
@@ -57,6 +62,8 @@ class BotBase:
         self._session_generation: dict[str, int] = {}
         self._pending_questions: dict[str, dict] = {}
         self._last_attachments: dict[str, list] = {}
+        self._last_active: dict[str, float] = {}
+        self._gc_task: asyncio.Task | None = None
         self._released = False
         self._agent_ctx: contextvars.ContextVar = contextvars.ContextVar(
             f"{self.__class__.__name__}_ctx", default=None
@@ -69,6 +76,10 @@ class BotBase:
             s = get_env(self._ENV_SEND_TIMEOUT, default="", warn=False)
             if s.strip():
                 self.SEND_REPLY_TIMEOUT_S = float(s)
+        if self._ENV_SESSION_IDLE_TTL:
+            s = get_env(self._ENV_SESSION_IDLE_TTL, default="", warn=False)
+            if s.strip():
+                self.SESSION_IDLE_TTL_S = float(s)
 
     @property
     def platform_tag(self) -> str:
@@ -163,6 +174,60 @@ class BotBase:
                 await asyncio.gather(t, return_exceptions=True)
         logger.info(f"[{self.platform_tag}] 会话 {session_id} 已重置")
 
+    def _touch(self, session_id: str) -> None:
+        self._last_active[session_id] = time.monotonic()
+
+    def _session_idle_ttl(self) -> float:
+        """有效空闲 TTL：<=0 表示关闭回收；否则夹紧到大于单回合超时，杜绝误杀运行中的长任务。"""
+        ttl = self.SESSION_IDLE_TTL_S
+        if ttl <= 0:
+            return 0.0
+        return max(ttl, self.AGENT_RUN_TIMEOUT_S + 60.0)
+
+    def _ensure_session_gc(self) -> None:
+        if self._session_idle_ttl() <= 0:
+            return
+        if self._gc_task is not None and not self._gc_task.done():
+            return
+        self._gc_task = asyncio.create_task(
+            self._session_gc_loop(), name=f"{self.platform_tag.lower()}-session-gc"
+        )
+
+    async def _session_gc_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.SESSION_GC_INTERVAL_S)
+                await self._evict_idle_sessions()
+                logger.prune_old_logs()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.platform_tag}] 空闲会话清扫异常: {e}", exc_info=True)
+
+    async def _evict_idle_sessions(self) -> None:
+        ttl = self._session_idle_ttl()
+        if ttl <= 0:
+            return
+        now = time.monotonic()
+        stale = [sid for sid, ts in list(self._last_active.items()) if now - ts > ttl]
+        for sid in stale:
+            q = self._session_queues.get(sid)
+            if q is not None and q.qsize() > 0:
+                continue
+            last = self._last_active.get(sid)
+            if last is None or time.monotonic() - last <= ttl:
+                continue
+            logger.info(
+                f"[{self.platform_tag}] 回收空闲会话 {sid}（空闲 {int(time.monotonic() - last)}s）"
+            )
+            await self._evict_session(sid)
+
+    async def _evict_session(self, session_id: str) -> None:
+        await self._reset_session(session_id)
+        self._session_queues.pop(session_id, None)
+        self._session_generation.pop(session_id, None)
+        self._last_active.pop(session_id, None)
+
     def _merge_turns(self, batch: list[QueuedTurn]) -> QueuedTurn:
         if len(batch) == 1:
             return batch[0]
@@ -225,6 +290,7 @@ class BotBase:
                 finally:
                     for _ in batch:
                         queue.task_done()
+                    self._touch(session_id)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -397,12 +463,19 @@ class BotBase:
         if (n := q.qsize()):
             logger.info(f"[{self.platform_tag}] {session_id} 入队（前方还有 {n} 条待处理）")
         await q.put(QueuedTurn(msg, send_reply, loop))
+        self._touch(session_id)
         self._ensure_consumer(session_id)
+        self._ensure_session_gc()
 
     async def release_all_resources_async(self) -> None:
         if self._released:
             return
         self._released = True
+        gc_task = self._gc_task
+        self._gc_task = None
+        if gc_task is not None and not gc_task.done() and gc_task is not asyncio.current_task():
+            gc_task.cancel()
+            await asyncio.gather(gc_task, return_exceptions=True)
         agents = list(self._agent_systems.values())
         n = len(agents)
         for pending in list(self._pending_questions.values()):
@@ -424,12 +497,14 @@ class BotBase:
             self._sessions,
             self._is_first,
             self._last_attachments,
+            self._last_active,
             self._agent_systems,
         ):
             attr.clear()
         self._consumer_tasks.clear()
         self._session_queues.clear()
         self._session_generation.clear()
+        await close_shared_http_client()
         logger.info(f"[{self.platform_tag}] 已释放全部会话与 Agent 资源（共 {n} 个 Agent 实例）")
 
     def release_all_resources(self) -> None:

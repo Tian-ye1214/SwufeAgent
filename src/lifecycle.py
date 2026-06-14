@@ -162,6 +162,8 @@ class AgentRegistry:
                 agent.current_invocation_id = None
                 agent.state = AgentInstanceState.IDLE
                 agent.last_active_at = time.monotonic()
+                if agent.role == "worker":
+                    self._agents.pop(inv.agent_id, None)
 
     async def get_invocation(self, invocation_id: str) -> AgentInvocation | None:
         async with self._lock:
