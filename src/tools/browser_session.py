@@ -30,8 +30,21 @@ class PlaywrightBrowserSession:
             try:
                 return future.result(timeout=timeout)
             except FutureTimeoutError:
-                future.cancel()
+                self._discard_poisoned_executor()
                 raise
+
+    def _discard_poisoned_executor(self) -> None:
+        poisoned = self._executor
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._headless = None
+        try:
+            poisoned.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
     def close(self) -> None:
         """关闭浏览器（不停止线程池）。从未启动过时直接返回，避免为空操作白白拉起后台线程。"""
