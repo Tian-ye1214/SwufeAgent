@@ -497,7 +497,7 @@ class BasicToolkit:
                             if keyword.lower() in line.lower():
                                 rel_path = file_path.relative_to(self._base_dir)
                                 results.append(f"{rel_path}:{line_num}: {line.strip()}")
-                except:
+                except Exception:
                     continue
 
             if results:
@@ -721,51 +721,13 @@ class BasicToolkit:
         return {name: tools for name, tools in groups.items() if tools}
 
     def _worker_tools(self, *, include_browser: bool) -> list:
-        """Worker 工具集。``include_browser=False`` 用于并行 Worker——它们共用一个浏览器
-        页面会互相串台，故并行时不发浏览器工具（仍可用 search_web）。"""
-        browser = [
-            # Browser automation (Playwright / Chromium)
-            self.browser_navigate,
-            self.browser_get_content,
-            self.browser_screenshot,
-            self.browser_click,
-            self.browser_fill,
-            self.browser_press_key,
-            self.browser_wait_for_selector,
-            self.browser_evaluate,
-            self.browser_close,
-        ] if include_browser else []
-        return [
-            # Read / list
-            self.list_files,
-            self.read_file,
-            self.read_image,
-            # Write
-            self.write_file,
-            self.append_to_file,
-            self.edit_file,
-            # Directories
-            self.create_directory,
-            # Search
-            self.search_in_files,
-            self.search_web,
-            *browser,
-            # Execute
-            self.run_command,
-            self.execute_file,
-            # Images and user input
-            self.ask_user,
-            extract_text,
-            *self._extra_worker_tools,
-            # Agent Skills tools
-            *self._skills_toolkit.tools,
-        ]
+        """扁平工具集（Coordinator 直用）：由 worker_tool_groups 拍平，单一真相源。"""
+        tools: list = []
+        for group in self.worker_tool_groups(include_browser=include_browser).values():
+            tools.extend(group)
+        return tools
 
     @property
     def workers_tools(self) -> list:
         """List of tool callables exposed to the Worker Agent."""
         return self._worker_tools(include_browser=True)
-
-    @property
-    def workers_tools_no_browser(self) -> list:
-        return self._worker_tools(include_browser=False)

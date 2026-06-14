@@ -76,7 +76,7 @@ def detect_gpu():
                         "name": parts[0].strip(),
                         "memory": f"{int(float(parts[1].strip()))} MB"
                     })
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except Exception:
         pass
 
     if not gpu_info["has_gpu"]:

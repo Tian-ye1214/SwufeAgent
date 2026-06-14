@@ -20,6 +20,7 @@ CONFIG_FILE = _d / "config.json"
 DOTENV_FILE = _d / ".env" if getattr(sys, "frozen", False) else _d.parent / ".env"
 
 _CONFIG: dict[str, Any] | None = None
+_DOTENV_CACHE: dict[str, str] | None = None
 
 
 def load_config() -> dict[str, Any]:
@@ -37,17 +38,27 @@ def settings() -> dict[str, Any]:
 
 def reset_config(cfg: dict[str, Any] | None = None) -> None:
     """重置进程内配置缓存：传 cfg 直接注入（测试隔离用）；不传则下次 settings() 重新加载。"""
-    global _CONFIG
+    global _CONFIG, _DOTENV_CACHE
     _CONFIG = cfg
+    _DOTENV_CACHE = None
+
+
+def _dotenv_values() -> dict[str, str]:
+    """解析并缓存 .env（进程内静态）：键值均 strip，空值丢弃。"""
+    global _DOTENV_CACHE
+    if _DOTENV_CACHE is None:
+        env: dict[str, str] = {}
+        if DOTENV_FILE.is_file():
+            for k, v in (dotenv_values(DOTENV_FILE) or {}).items():
+                if v and str(v).strip():
+                    env[str(k).strip()] = str(v).strip()
+        _DOTENV_CACHE = env
+    return _DOTENV_CACHE
 
 
 def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
-    env: dict[str, str] = {}
-    if DOTENV_FILE.is_file():
-        for k, v in (dotenv_values(DOTENV_FILE) or {}).items():
-            if v and str(v).strip():
-                env[str(k).strip()] = str(v).strip()
-    if val := (env.get(key) or "").strip():
+    """配置读取唯一入口：先 .env（缓存），再 config.json 根级标量；都没有则告警并返回 default。"""
+    if val := (_dotenv_values().get(key) or "").strip():
         return val
     raw = settings().get(key)
     if raw is not None and not isinstance(raw, (dict, list)):
@@ -70,7 +81,7 @@ def get_agent_usage_limits() -> "_UsageLimits":
     """单次 Agent 运行对模型请求次数上限"""
     cfg = settings()
     raw = cfg["request_limit"]
-    if raw is None or raw.strip().lower() in ("none", "unlimited", "null"):
+    if raw is None or str(raw).strip().lower() in ("none", "unlimited", "null", ""):
         return UsageLimits(request_limit=None)
     return UsageLimits(request_limit=int(raw))
 

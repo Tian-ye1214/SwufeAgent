@@ -38,7 +38,7 @@ class WeChatAgentBot(BotBase):
 
     async def _build_user_message(self, bot: WeChatBot, msg) -> UserMessage:
         """Build a UserMessage from text plus downloaded media bytes."""
-        text = (msg.text or "").strip()
+        text = self.clean_text(msg.text or "")
         attachments: list = []
         try:
             media = await bot.download(msg)
@@ -72,7 +72,7 @@ class WeChatAgentBot(BotBase):
         user_message = await self._build_user_message(bot, msg)
         await self.dispatch_message(
             session_id,
-            self.clean_text(user_message.text),
+            user_message.text,
             user_message.attachments,
             partial(bot.reply, msg),
             asyncio.get_running_loop(),
