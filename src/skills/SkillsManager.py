@@ -48,6 +48,7 @@ class SkillsManager:
         re.DOTALL,
     )
     SKILL_FILENAME = "SKILL.md"
+    IGNORED_RESOURCE_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
 
     def __init__(self, skills_dir: str | Path | None = None):
         if skills_dir is None:
@@ -116,6 +117,16 @@ class SkillsManager:
             result = self._parse_skill_file(skill_file)
             if result:
                 metadata, instructions = result
+                if not metadata.name:
+                    logger.warning(
+                        f"Skill {skill_file} 缺少 name，回退使用文件夹名 '{item.name}'"
+                    )
+                    metadata.name = item.name
+                if metadata.name in target:
+                    logger.warning(
+                        f"Skill 名称冲突: '{metadata.name}' 已存在，"
+                        f"目录 '{item.name}' 将覆盖之前的同名技能"
+                    )
                 target[metadata.name] = Skill(
                     metadata=metadata,
                     instructions=instructions,
@@ -175,9 +186,12 @@ class SkillsManager:
         resources = []
         skill_dir = skill.path
         for item in skill_dir.rglob("*"):
-            if item.is_file() and item.name != self.SKILL_FILENAME:
-                rel_path = item.relative_to(skill_dir)
-                resources.append(str(rel_path))
+            if not item.is_file() or item.name == self.SKILL_FILENAME:
+                continue
+            rel_path = item.relative_to(skill_dir)
+            if any(part in self.IGNORED_RESOURCE_DIRS for part in rel_path.parts):
+                continue
+            resources.append(str(rel_path))
         return resources
 
     @staticmethod
