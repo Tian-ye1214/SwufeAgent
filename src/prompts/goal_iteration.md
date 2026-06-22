@@ -21,7 +21,7 @@ You are running in RedLotus TUI goal mode.
 
 {iteration}
 
-## Previous cleaned coordinator output
+## Previous turn summary (coordinator text and delegation/tool results)
 
 {previous_output}
 

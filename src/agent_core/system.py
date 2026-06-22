@@ -80,6 +80,14 @@ def _messages_with_replaced_output(result: Any, output: str) -> list[Any]:
     return messages
 
 
+def _coordinator_tool_report(primary: str, fallback: str) -> str:
+    """Prefer primary tool output; fall back when delegation produced no summary text."""
+    text = (primary or "").strip()
+    if text:
+        return text
+    return (fallback or "").strip()
+
+
 async def _maybe_auto_compress(
     history: ChatHistory,
     *,
@@ -543,7 +551,7 @@ class AgentSystem:
                 task_state=self.structured_task_status(),
                 log_suffix="summary 后",
             )
-            return final_text
+            return _coordinator_tool_report(final_text, final_summary)
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
             try:
@@ -569,7 +577,7 @@ class AgentSystem:
                     log_suffix="summary 后",
                 )
                 show_model_output(final_result.output, title="最终报告")
-                return final_result.output
+                return _coordinator_tool_report(final_result.output, final_summary)
             except Exception:
                 show_model_output(final_summary, title="任务汇总", markdown=False)
                 return final_summary

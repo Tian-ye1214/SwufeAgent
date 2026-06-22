@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from pydantic_ai.messages import BaseToolReturnPart, ModelRequest, ModelResponse, TextPart
+
 from agent_core.input_messages import UserMessage
 from prompt import load_prompt
+from tools.memory.message_text import split_messages_into_turns
 
 
 class GoalSignal(str, Enum):
@@ -51,6 +54,32 @@ def parse_goal_output(text: str) -> GoalParseResult:
         return GoalParseResult(GoalSignal.CONTINUE, cleaned, 0)
     signal = GoalSignal(matches[-1].group(1).upper())
     return GoalParseResult(signal, cleaned, len(matches))
+
+
+def summarize_last_coordinator_turn(messages: list) -> str:
+    """Build goal-mode previous_output from the latest turn's assistant text and tool returns."""
+    turns = split_messages_into_turns(messages)
+    if not turns:
+        return ""
+    sections: list[str] = []
+    for msg in turns[-1]:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    text = (part.content or "").strip()
+                    if text:
+                        sections.append(text)
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, BaseToolReturnPart):
+                    content = (
+                        part.model_response_str()
+                        if hasattr(part, "model_response_str")
+                        else str(part.content)
+                    )
+                    tool_name = part.tool_name or "tool"
+                    sections.append(f"[{tool_name}]\n{content}")
+    return "\n\n".join(sections).strip()
 
 
 def build_goal_iteration_prompt(
@@ -130,7 +159,7 @@ async def run_goal_loop(
         )
 
         parsed = parse_result or parse_goal_output(output)
-        previous_output = output
+        previous_output = summarize_last_coordinator_turn(_history.messages) or output
         missing_marker = parsed.missing_marker
 
         pending_updates.extend(take_queued_inputs())
