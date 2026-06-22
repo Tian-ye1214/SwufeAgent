@@ -62,11 +62,11 @@ class TaskManager:
             self.task_order.clear()
             
             for task_data in tasks_data:
-                task_id = str(task_data.get("id", len(self.tasks) + 1))
+                task_id = str(task_data.get("id", len(self.tasks) + 1)).strip()
                 task = Task(
                     id=task_id,
                     description=task_data.get("description", ""),
-                    dependencies=task_data.get("dependencies", [])
+                    dependencies=[str(d).strip() for d in task_data.get("dependencies", [])]
                 )
                 self.tasks[task_id] = task
                 self.task_order.append(task_id)

@@ -187,6 +187,7 @@ def read_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:
         raise ValueError(f"invalid model_messages file: {path}")
     meta_raw = data.get("meta")
     meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+    meta["saved_at"] = data.get("saved_at")
     return ModelMessagesTypeAdapter.validate_python(raw), meta
 
 
@@ -324,7 +325,10 @@ def _max_price(
 def _openrouter_price_candidates(model_name: str) -> list[tuple[Decimal | None, Decimal | None, str]]:
     from ModelGateway.ModelChecker import _lookup_openrouter_meta
 
-    meta = _lookup_openrouter_meta(model_name)
+    try:
+        meta = _lookup_openrouter_meta(model_name)
+    except Exception:
+        meta = None
     pricing = meta.get("pricing") if isinstance(meta, dict) else None
     if not isinstance(pricing, dict):
         return []

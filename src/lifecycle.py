@@ -91,6 +91,7 @@ class AgentRegistry:
     @staticmethod
     def _prefix_matches(keys, prefix: str) -> list[str]:
         key = prefix.strip()
+        keys = list(keys)
         if key in keys:
             return [key]
         return [k for k in keys if k.startswith(key)]

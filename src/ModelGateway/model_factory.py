@@ -19,7 +19,7 @@ import json_repair
 
 import logger
 from app_config import get_env, http_chat_completions_thinking_extras, unified_thinking_setting
-from shared_http import close_client, get_client
+from shared_http import get_client
 
 _HTTP_KEY = "model"
 
@@ -136,11 +136,6 @@ def _openai_compatible_thinking_profile(model_name: str) -> ModelProfile:
 
 def _get_shared_http_client() -> httpx.AsyncClient:
     return get_client(_HTTP_KEY, create_async_http_client)
-
-
-async def close_shared_http_client() -> None:
-    """进程退出时关闭共享 HTTP 客户端（仅在真正退出时调用，勿在单会话 shutdown 调用）。"""
-    await close_client(_HTTP_KEY)
 
 
 def create_model(model_name: str, parameter: dict):

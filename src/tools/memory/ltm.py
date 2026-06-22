@@ -19,7 +19,7 @@ from tools.memory.consolidation import (
     merge_looks_like_unrelated_rewrite,
 )
 from tools.memory.message_text import user_prompts_to_text
-from shared_http import close_client, get_client
+from shared_http import get_client
 
 _HTTP_KEY = "ltm"
 
@@ -30,11 +30,6 @@ def _get_shared_client() -> httpx.AsyncClient:
         _HTTP_KEY,
         lambda: httpx.AsyncClient(http2=True, timeout=httpx.Timeout(90.0)),
     )
-
-
-async def close_http_client() -> None:
-    """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
-    await close_client(_HTTP_KEY)
 
 
 class LongTermMemory:

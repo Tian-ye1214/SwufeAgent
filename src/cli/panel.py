@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -114,6 +114,7 @@ class TaskPanelStats:
 class RuntimePanelStats:
     session_key: str = "-"
     active_invocations: int = 0
+    active_invocations_error: bool = False
     context_input_tokens: dict[str, int] = field(default_factory=dict)
     tasks: TaskPanelStats = field(default_factory=TaskPanelStats)
 
@@ -154,7 +155,7 @@ class PanelSnapshotCache:
     def _parse(self, path: Path) -> PanelFileResult:
         try:
             messages, meta = self._reader(path)
-            saved_at = _read_saved_at(path)
+            saved_at = str(meta.get("saved_at") or "")
             usage_summary = summarize_messages(
                 messages,
                 meta=meta,
@@ -191,7 +192,7 @@ async def build_panel_snapshot(
     cache: PanelSnapshotCache | None = None,
 ) -> PanelSnapshot:
     root = Path(log_root or logger.LOG_DIR)
-    history, sessions = _collect_history(root, cache or PanelSnapshotCache())
+    history, sessions = await asyncio.to_thread(_collect_history, root, cache or PanelSnapshotCache())
     visible_sessions = sessions if include_all else sessions[:RECENT_SESSION_LIMIT]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
     return PanelSnapshot(
@@ -279,7 +280,7 @@ async def _collect_runtime(
             active = await list_active(getattr(system, "session_key", None))
             runtime.active_invocations = len(active)
         except Exception:
-            runtime.active_invocations = 0
+            runtime.active_invocations_error = True
     return runtime
 
 
@@ -297,12 +298,6 @@ def _collect_task_stats(task_manager: Any) -> TaskPanelStats:
         else:
             stats.pending += 1
     return stats
-
-
-def _read_saved_at(path: Path) -> str:
-    with Path(path).open(encoding="utf-8") as f:
-        data = json.load(f)
-    return str(data.get("saved_at") or "")
 
 
 def _file_identity(path: Path, meta: dict[str, Any]) -> tuple[str, str, str]:
@@ -339,7 +334,7 @@ def _render_kpis(snapshot: PanelSnapshot) -> Table:
         f"历史对话 {history.conversation_count}",
         f"model_messages {history.file_count}",
         f"responses {history.response_count}",
-        f"active {runtime.active_invocations}",
+        f"active {'?' if runtime.active_invocations_error else runtime.active_invocations}",
     )
     table.add_row(
         f"session {runtime.session_key}",
@@ -354,8 +349,6 @@ def _render_runtime(runtime: RuntimePanelStats) -> Table:
     table = Table(title="当前运行态", expand=True)
     table.add_column("项目")
     table.add_column("值", justify="right")
-    table.add_row("Session", runtime.session_key)
-    table.add_row("Active invocations", str(runtime.active_invocations))
     for label, tokens in runtime.context_input_tokens.items():
         table.add_row(f"{label} context input", _fmt_int(tokens))
     return table
@@ -433,7 +426,7 @@ def _render_sessions(sessions: list[PanelSessionSummary], *, include_all: bool) 
         return table
     for session in sessions:
         agents = ",".join(sorted(session.agents))
-        tokens = session.input_tokens + session.output_tokens
+        tokens = session.input_tokens + session.output_tokens + session.reasoning_tokens
         table.add_row(
             session.saved_at or session.date,
             session.topic,

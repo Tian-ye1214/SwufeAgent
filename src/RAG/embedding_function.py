@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import logger
 from app_config import get_env, settings
-from shared_http import close_client, get_client
+from shared_http import get_client
 
 _HTTP_KEY = "rag"
 
@@ -32,11 +32,6 @@ def _client_kwargs(timeout: float) -> dict[str, Any]:
 def _get_shared_client() -> httpx.AsyncClient:
     """进程级共享 embedding/rerank 客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
     return get_client(_HTTP_KEY, lambda: httpx.AsyncClient(**_client_kwargs(60.0)))
-
-
-async def close_http_client() -> None:
-    """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
-    await close_client(_HTTP_KEY)
 
 
 async def embed_texts(

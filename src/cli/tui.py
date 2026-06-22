@@ -191,6 +191,7 @@ class RedLotusTui(App[None]):
         self._panel_include_all = False
         self._panel_cache = PanelSnapshotCache()
         self._panel_timer = None
+        self._panel_refresh_task = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -408,7 +409,7 @@ class RedLotusTui(App[None]):
         panel_view = self.query_one("#panel-view", VerticalScroll)
         panel_view.border_title = "工作区总览 · 每 3 秒刷新 · Esc 退出"
         panel_view.display = True
-        await self._refresh_panel()
+        self._schedule_panel_refresh()
         self._ensure_panel_timer()
         self.query_one("#input", AgentInput).focus()
         self.refresh_status()
@@ -416,29 +417,39 @@ class RedLotusTui(App[None]):
     async def _refresh_panel(self) -> None:
         if not self._panel_mode:
             return
-        snapshot = await build_panel_snapshot(
-            log_root=logger.LOG_DIR,
-            system=self.system,
-            coordinator_history=self.state.history,
-            manager_history=getattr(self.system, "_manager_history", None),
-            include_all=self._panel_include_all,
-            cache=self._panel_cache,
-        )
-        self.query_one("#panel-content", Static).update(render_panel(snapshot))
+        try:
+            snapshot = await build_panel_snapshot(
+                log_root=logger.LOG_DIR,
+                system=self.system,
+                coordinator_history=self.state.history,
+                manager_history=getattr(self.system, "_manager_history", None),
+                include_all=self._panel_include_all,
+                cache=self._panel_cache,
+            )
+            self.query_one("#panel-content", Static).update(render_panel(snapshot))
+        except Exception as e:
+            logger.error(f"刷新工作区面板失败: {type(e).__name__}: {e}", exc_info=True)
+
+    def _schedule_panel_refresh(self) -> None:
+        if not self._panel_mode:
+            return
+        task = self._panel_refresh_task
+        if task is not None and not task.done():
+            return
+        self._panel_refresh_task = asyncio.create_task(self._refresh_panel())
 
     def _ensure_panel_timer(self) -> None:
         if self._panel_timer is not None:
             return
-
-        def _tick() -> None:
-            if self._panel_mode:
-                asyncio.create_task(self._refresh_panel())
-
-        self._panel_timer = self.set_interval(3.0, _tick)
+        self._panel_timer = self.set_interval(3.0, self._schedule_panel_refresh)
 
     def _stop_panel_timer(self) -> None:
         timer = self._panel_timer
         self._panel_timer = None
+        task = self._panel_refresh_task
+        self._panel_refresh_task = None
+        if task is not None and not task.done():
+            task.cancel()
         if timer is None:
             return
         stop = getattr(timer, "stop", None)

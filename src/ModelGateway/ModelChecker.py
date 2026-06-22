@@ -556,10 +556,11 @@ def _lint_compression_summary(summary_md: str) -> str:
     sections = _level2_sections(body)
     headings = [heading for heading, _ in sections]
     required = list(_COMPRESS_REQUIRED_HEADINGS)
-    if headings != required:
+    missing = [h for h in required if h not in headings]
+    if missing:
         errors.append(
-            "压缩摘要标题不符合固定顺序: "
-            f"expected={required!r} actual={headings!r}"
+            "压缩摘要缺少必需标题: "
+            f"missing={missing!r} actual={headings!r}"
         )
     else:
         bodies = {heading: section_body for heading, section_body in sections}

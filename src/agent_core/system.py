@@ -626,8 +626,8 @@ class AgentSystem:
 
     async def run_agent_system(
         self,
-        message: "str | UserMessage",
-        history: "ChatHistory | None" = None,
+        message: "UserMessage",
+        history: "ChatHistory",
         *,
         conversation_log_hint: str = "",
         conversation_log_extra: dict | None = None,
@@ -638,8 +638,8 @@ class AgentSystem:
         任务协调系统入口，负责判断任务复杂度并调用相应的执行器。
 
         Parameters:
-            message: 用户输入（str 或 UserMessage 实例，str 会自动转换）
-            history: 对话历史（ChatHistory 实例，传 None 则自动创建）
+            message: 用户输入（UserMessage 实例）
+            history: 对话历史（ChatHistory 实例）
 
         Returns:
             tuple[ChatHistory, str]: (更新后的对话历史, Agent 输出)
@@ -663,7 +663,7 @@ class AgentSystem:
     async def _run_agent_system_impl(
         self,
         message: UserMessage,
-        history: "ChatHistory | None",
+        history: "ChatHistory",
         *,
         conversation_log_hint: str,
         conversation_log_extra: dict | None,

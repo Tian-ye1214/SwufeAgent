@@ -348,7 +348,10 @@ class BasicToolkit:
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with self._file_lock:
-                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                try:
+                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                except Exception:
+                    old_content = ""
                 file_path.write_text(content, encoding="utf-8")
             show_file_diff(old_content, content, path=name)
             self._review_store.register(file_path, name=name, baseline=old_content, snapshot=content)

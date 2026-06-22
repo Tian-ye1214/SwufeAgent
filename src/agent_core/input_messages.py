@@ -44,12 +44,6 @@ class UserMessage:
         return BinaryContent(data=resolved.read_bytes(), media_type=mime)
 
 
-def user_message_from_text(message: str | UserMessage) -> UserMessage:
-    if isinstance(message, UserMessage):
-        return message
-    return UserMessage(text=str(message))
-
-
 def user_message_from_cli_input(raw_input: str) -> UserMessage:
     attachments: list = []
     text = raw_input
