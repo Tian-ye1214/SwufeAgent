@@ -34,6 +34,21 @@ def _get_shared_client() -> httpx.AsyncClient:
     return get_client(_HTTP_KEY, lambda: httpx.AsyncClient(**_client_kwargs(60.0)))
 
 
+async def _rag_api_post(endpoint: str, body: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    """RAG 接口统一 POST：构造鉴权头、校验状态、解析 JSON。"""
+    response = await _get_shared_client().post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 async def embed_texts(
     texts: str | list[str],
     *,
@@ -45,17 +60,7 @@ async def embed_texts(
     logger.debug("RAG embed: batch_size=%d", len(texts))
     model = _require_rag_model("embedding")
     body = {"model": model, "input": texts}
-    response = await _get_shared_client().post(
-        "/embeddings",
-        headers={
-            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    data = response.json()
+    data = await _rag_api_post("/embeddings", body, timeout=timeout)
 
     items = data.get("data") or []
     n = len(items)
@@ -85,17 +90,7 @@ async def rerank_documents(
     if top_n is not None:
         body["top_n"] = top_n
 
-    response = await _get_shared_client().post(
-        "/rerank",
-        headers={
-            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    data = response.json()
+    data = await _rag_api_post("/rerank", body, timeout=timeout)
 
     out: list[dict[str, Any]] = []
     for row in data.get("results", []):

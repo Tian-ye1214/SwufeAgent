@@ -41,6 +41,14 @@ def _out(text: str = "") -> None:
     console.print(text)
 
 
+def _strip_quotes(text: str) -> str:
+    """去除首尾成对的引号（粘贴路径常带引号）。"""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
 def _format_model_tokens(value: Any) -> str:
     if not isinstance(value, int) or value <= 0:
         return "-"
@@ -268,10 +276,7 @@ def _conversation_session_key(system: Any) -> str | None:
 async def _print_usage_report(raw: str, system: Any) -> None:
     tail = raw.strip()[6:].strip()
     if tail:
-        if (tail.startswith('"') and tail.endswith('"')) or (
-            tail.startswith("'") and tail.endswith("'")
-        ):
-            tail = tail[1:-1]
+        tail = _strip_quotes(tail)
         target = Path(tail).expanduser()
         if not target.is_absolute():
             target = (Path.cwd() / target).resolve()
@@ -572,11 +577,7 @@ async def _cmd_load(ctx: SlashCommandContext) -> bool | None:
     if not tail:
         print_error("用法: /load <*.model_messages.json 路径>")
         return None
-    raw_path = tail.strip()
-    if (raw_path.startswith('"') and raw_path.endswith('"')) or (
-        raw_path.startswith("'") and raw_path.endswith("'")
-    ):
-        raw_path = raw_path[1:-1]
+    raw_path = _strip_quotes(tail)
     load_path = Path(raw_path).expanduser()
     if not load_path.is_file():
         print_error(f"找不到文件: {load_path}")

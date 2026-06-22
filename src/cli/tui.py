@@ -591,37 +591,30 @@ class RedLotusTui(App[None]):
         return t
 
     @staticmethod
-    def _user_input_renderable(value: str) -> Panel:
+    def _panel_renderable(
+        content: str,
+        title: str,
+        *,
+        text_style: str = "bold white",
+        border_style: str = "bright_blue",
+    ) -> Panel:
         return Panel(
-            Text(value, style="bold white"), title="用户",
-            title_align="left", border_style="bright_blue",
-            padding=(0, 1), expand=False,
+            Text(content or " ", style=text_style),
+            title=title,
+            title_align="left",
+            border_style=border_style,
+            padding=(0, 1),
+            expand=False,
         )
 
     def _write_user_input(self, value: str) -> None:
         self.query_one("#output", RichLog).write(
-            self._user_input_renderable(value), scroll_end=True,
-        )
-
-    @staticmethod
-    def _user_reply_renderable(value: str) -> Panel:
-        return Panel(
-            Text(value, style="bold white"), title="用户回复",
-            title_align="left", border_style="bright_blue",
-            padding=(0, 1), expand=False,
+            self._panel_renderable(value, "用户"), scroll_end=True,
         )
 
     def _write_user_reply(self, value: str) -> None:
         self.query_one("#output", RichLog).write(
-            self._user_reply_renderable(value), scroll_end=True,
-        )
-
-    @staticmethod
-    def _model_stream_renderable(title: str, text: str) -> Panel:
-        return Panel(
-            Text(text or " ", style="white"), title=title,
-            title_align="left", border_style="cyan",
-            padding=(0, 1), expand=False,
+            self._panel_renderable(value, "用户回复"), scroll_end=True,
         )
 
     def _stream_preview(self) -> Static:
@@ -639,9 +632,11 @@ class RedLotusTui(App[None]):
 
     def _refresh_model_stream(self) -> None:
         self._stream_preview().update(
-            self._model_stream_renderable(
-                self._model_stream_title,
+            self._panel_renderable(
                 self._model_stream_visible_text(self._model_stream_text),
+                self._model_stream_title,
+                text_style="white",
+                border_style="cyan",
             )
         )
 

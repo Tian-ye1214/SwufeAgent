@@ -354,6 +354,27 @@ class AgentSystem:
         except Exception as e:
             self._handle_turn_error(e)
 
+    async def _save_manager_result(
+        self,
+        *,
+        phase: str,
+        turn_id: str,
+        result=None,
+        log_suffix: str = "",
+    ) -> None:
+        if result is not None:
+            self._manager_history.update(result)
+        self._session_logs.for_agent("manager").save(
+            self._manager_history.messages,
+            extra={"kind": "manager", "phase": phase, "turn_id": turn_id},
+        )
+        await _maybe_auto_compress(
+            self._manager_history,
+            role="manager",
+            task_state=self.structured_task_status(),
+            log_suffix=log_suffix,
+        )
+
     def _injection_for_session(self) -> str:
         return self._memory.injection_for_session()
 
@@ -500,16 +521,7 @@ class AgentSystem:
                 message_history=self._manager_history.messages,
                 usage_limits=get_agent_usage_limits(),
             )
-        self._manager_history.update(result)
-        self._session_logs.for_agent("manager").save(
-            self._manager_history.messages,
-            extra={"kind": "manager", "phase": "planning", "turn_id": tid},
-        )
-        await _maybe_auto_compress(
-            self._manager_history,
-            role="manager",
-            task_state=self.structured_task_status(),
-        )
+        await self._save_manager_result(phase="planning", turn_id=tid, result=result)
         show_model_output(result.output, title="Manager 规划")
 
         print_phase("第二阶段: 多Worker并行执行任务")
@@ -541,16 +553,7 @@ class AgentSystem:
                     s, self._manager_history, title="最终报告"
                 ),
             )
-            self._session_logs.for_agent("manager").save(
-                self._manager_history.messages,
-                extra={"kind": "manager", "phase": "summary", "turn_id": tid},
-            )
-            await _maybe_auto_compress(
-                self._manager_history,
-                role="manager",
-                task_state=self.structured_task_status(),
-                log_suffix="summary 后",
-            )
+            await self._save_manager_result(phase="summary", turn_id=tid, log_suffix="summary 后")
             return _coordinator_tool_report(final_text, final_summary)
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
@@ -565,17 +568,7 @@ class AgentSystem:
                     message_history=self._manager_history.messages,
                     usage_limits=get_agent_usage_limits(),
                 )
-                self._manager_history.update(final_result)
-                self._session_logs.for_agent("manager").save(
-                    self._manager_history.messages,
-                    extra={"kind": "manager", "phase": "summary", "turn_id": tid},
-                )
-                await _maybe_auto_compress(
-                    self._manager_history,
-                    role="manager",
-                    task_state=self.structured_task_status(),
-                    log_suffix="summary 后",
-                )
+                await self._save_manager_result(phase="summary", turn_id=tid, result=final_result, log_suffix="summary 后")
                 show_model_output(final_result.output, title="最终报告")
                 return _coordinator_tool_report(final_result.output, final_summary)
             except Exception:
