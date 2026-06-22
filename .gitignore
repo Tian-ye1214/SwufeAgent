@@ -13,3 +13,8 @@ logs/
 WorkDatabase/
 build/
 dist/
+data/
+.cursor/
+.claude/
+.codegraph/
+tests
