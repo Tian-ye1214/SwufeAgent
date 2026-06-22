@@ -6,29 +6,12 @@ from pathlib import Path
 
 from prompt_toolkit.completion import Completer, Completion
 
-from app_config import get_agent_roles
-from path_sandbox import runtime_repo_root
-
-COMMANDS: tuple[str, ...] = (
-    "/help",
-    "/exit",
-    "/quit",
-    "/clear",
-    "/status",
-    "/config",
-    "/usage",
-    "/pwd",
-    "/cd",
-    "/skills",
-    "/agent",
-    "/api",
-    "/compress",
-    "/cancel",
-    "/stop",
-    "/load",
-    "/trace",
-    "/tasks",
+from cli.completion import (
+    completion_for_input,
+    iter_agent_role_completions,
+    iter_command_completions,
 )
+from path_sandbox import runtime_repo_root
 
 _COMPLETION_LIMIT = 50
 
@@ -38,34 +21,23 @@ class AgentCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+        ctx = completion_for_input(text)
+        if ctx is None:
+            return
 
-        if text.startswith("/") and " " not in text:
+        if ctx.kind == "command":
             word = document.get_word_before_cursor(WORD=True)
-            for cmd in COMMANDS:
-                if cmd.startswith(word):
-                    yield Completion(cmd, start_position=-len(word), display_meta="command")
+            for cmd in iter_command_completions(word):
+                yield Completion(cmd, start_position=-len(word), display_meta="command")
             return
 
-        if text.startswith("/agent "):
-            parts = text.split()
-            prefix = parts[-1] if len(parts) > 1 else ""
-            if len(parts) == 2:
-                for role in get_agent_roles():
-                    if role.startswith(prefix):
-                        yield Completion(role, start_position=-len(prefix), display_meta="role")
+        if ctx.kind == "agent_role":
+            for role in iter_agent_role_completions(ctx.prefix):
+                yield Completion(role, start_position=-len(ctx.prefix), display_meta="role")
             return
 
-        if text.startswith("/cd ") or text.startswith("/load "):
-            prefix = text.split(" ", 1)[1] if " " in text else ""
-            yield from _iter_file_completions(prefix, at_mode=False)
-            return
-
-        at_index = text.rfind("@")
-        if at_index != -1:
-            fragment = text[at_index + 1 :]
-            if " " in fragment:
-                return
-            yield from _iter_file_completions(fragment, at_mode=True)
+        if ctx.kind == "file_path":
+            yield from _iter_file_completions(ctx.prefix, at_mode=ctx.at_mode)
 
 
 def _resolve_parent(fragment: str) -> tuple[Path, str]:

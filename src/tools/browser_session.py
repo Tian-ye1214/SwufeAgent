@@ -111,118 +111,79 @@ class PlaywrightBrowserSession:
             self._close_impl()
             return f"启动浏览器失败: {type(e).__name__}: {e}"
 
-    def navigate(self, url: str, headless: bool, wait_until: str = "domcontentloaded") -> str:
+    def _page_action(
+        self,
+        headless: bool,
+        fn: Callable[[Page], str],
+        error_prefix: str,
+    ) -> str:
         def _work() -> str:
             err = self._ensure_started_impl(headless)
             if err:
                 return err
             assert self._page is not None
             try:
-                self._page.goto(url, wait_until=wait_until, timeout=60_000)
-                msg = f"OK\nURL: {self._page.url}\nTitle: {self._page.title()}"
-                if headless:
-                    msg += (
-                        "\n\n说明: 当前为无头 Chromium，页面在 Agent 进程内打开，"
-                        "不会出现在您日常使用的 Chrome/Edge 窗口里。"
-                        "若要弹出可見窗口，请设置环境变量 BROWSER_HEADLESS=0（仍为独立浏览器，非系统默认）。"
-                    )
-                return msg
+                return fn(self._page)
             except Exception as e:
-                return f"导航失败: {type(e).__name__}: {e}"
+                return f"{error_prefix}: {type(e).__name__}: {e}"
         return self._run(_work)
+
+    def navigate(self, url: str, headless: bool, wait_until: str = "domcontentloaded") -> str:
+        def _action(page: Page) -> str:
+            page.goto(url, wait_until=wait_until, timeout=60_000)
+            msg = f"OK\nURL: {page.url}\nTitle: {page.title()}"
+            if headless:
+                msg += (
+                    "\n\n说明: 当前为无头 Chromium，页面在 Agent 进程内打开，"
+                    "不会出现在您日常使用的 Chrome/Edge 窗口里。"
+                    "若要弹出可見窗口，请设置环境变量 BROWSER_HEADLESS=0（仍为独立浏览器，非系统默认）。"
+                )
+            return msg
+        return self._page_action(headless, _action, "导航失败")
 
     def get_content(self, headless: bool) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                text = self._page.evaluate("""() => document.body ? document.body.innerText : ''""")
-                if not isinstance(text, str):
-                    text = str(text)
-                text = text.strip()
-                return f"URL: {self._page.url}\n---\n{text or '(无文本内容)'}"
-            except Exception as e:
-                return f"读取页面文本失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            text = page.evaluate("""() => document.body ? document.body.innerText : ''""")
+            if not isinstance(text, str):
+                text = str(text)
+            text = text.strip()
+            return f"URL: {page.url}\n---\n{text or '(无文本内容)'}"
+        return self._page_action(headless, _action, "读取页面文本失败")
 
     def screenshot(self, headless: bool, filename: str, full_page: bool = False) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                self._page.screenshot(path=filename, full_page=full_page)
-                return f"截图已保存: {filename}"
-            except Exception as e:
-                return f"截图失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            page.screenshot(path=filename, full_page=full_page)
+            return f"截图已保存: {filename}"
+        return self._page_action(headless, _action, "截图失败")
 
     def click(self, headless: bool, selector: str) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                self._page.click(selector, timeout=30_000)
-                return f"已点击: {selector}"
-            except Exception as e:
-                return f"点击失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            page.click(selector, timeout=30_000)
+            return f"已点击: {selector}"
+        return self._page_action(headless, _action, "点击失败")
 
     def fill(self, headless: bool, selector: str, text: str) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                self._page.fill(selector, text, timeout=30_000)
-                return f"已填入 {selector}"
-            except Exception as e:
-                return f"填充失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            page.fill(selector, text, timeout=30_000)
+            return f"已填入 {selector}"
+        return self._page_action(headless, _action, "填充失败")
 
     def press(self, headless: bool, key: str) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                self._page.keyboard.press(key)
-                return f"已按键: {key}"
-            except Exception as e:
-                return f"按键失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            page.keyboard.press(key)
+            return f"已按键: {key}"
+        return self._page_action(headless, _action, "按键失败")
 
     def wait_for_selector(self, headless: bool, selector: str, timeout_ms: int = 30_000) -> str:
         timeout_ms = max(1, min(int(timeout_ms), 110_000))
 
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                self._page.wait_for_selector(selector, timeout=timeout_ms)
-                return f"已出现元素: {selector}"
-            except Exception as e:
-                return f"等待元素超时或失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            page.wait_for_selector(selector, timeout=timeout_ms)
+            return f"已出现元素: {selector}"
+        return self._page_action(headless, _action, "等待元素超时或失败")
 
     def run_javascript(self, headless: bool, expression: str) -> str:
-        def _work() -> str:
-            err = self._ensure_started_impl(headless)
-            if err:
-                return err
-            assert self._page is not None
-            try:
-                result = self._page.evaluate(expression)
-                return f"结果: {repr(result)}"
-            except Exception as e:
-                return f"执行脚本失败: {type(e).__name__}: {e}"
-        return self._run(_work)
+        def _action(page: Page) -> str:
+            result = page.evaluate(expression)
+            return f"结果: {repr(result)}"
+        return self._page_action(headless, _action, "执行脚本失败")

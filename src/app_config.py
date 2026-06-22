@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from persist_utils import save_locked_json
@@ -12,19 +10,11 @@ if TYPE_CHECKING:
 
 import logger
 from dotenv import dotenv_values
+from paths import config_file, dotenv_file
 from pydantic_ai.usage import UsageLimits
 from runtime_state import AgentRunPolicy
 
-def _resolve_runtime_paths() -> tuple[Path, Path]:
-    """定位 config.json 与 .env：打包后两者均在 exe 同级目录；源码运行时 config.json 随源码在 src/，.env 在项目根。"""
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-        return base / "config.json", base / ".env"
-    src = Path(__file__).resolve().parent
-    return src / "config.json", src.parent / ".env"
-
-
-CONFIG_FILE, DOTENV_FILE = _resolve_runtime_paths()
+CONFIG_FILE, DOTENV_FILE = config_file(), dotenv_file()
 
 _CONFIG: dict[str, Any] | None = None
 _DOTENV_CACHE: dict[str, str] | None = None
@@ -41,13 +31,6 @@ def settings() -> dict[str, Any]:
     if _CONFIG is None:
         load_config()
     return _CONFIG  # type: ignore[return-value]
-
-
-def reset_config(cfg: dict[str, Any] | None = None) -> None:
-    """重置进程内配置缓存：传 cfg 直接注入（测试隔离用）；不传则下次 settings() 重新加载。"""
-    global _CONFIG, _DOTENV_CACHE
-    _CONFIG = cfg
-    _DOTENV_CACHE = None
 
 
 def _dotenv_values() -> dict[str, str]:

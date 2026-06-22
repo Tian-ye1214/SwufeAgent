@@ -322,12 +322,9 @@ def _max_price(
 
 
 def _openrouter_price_candidates(model_name: str) -> list[tuple[Decimal | None, Decimal | None, str]]:
-    try:
-        from ModelGateway.ModelChecker import _lookup_openrouter_meta
+    from ModelGateway.ModelChecker import _lookup_openrouter_meta
 
-        meta = _lookup_openrouter_meta(model_name)
-    except Exception:
-        meta = None
+    meta = _lookup_openrouter_meta(model_name)
     pricing = meta.get("pricing") if isinstance(meta, dict) else None
     if not isinstance(pricing, dict):
         return []

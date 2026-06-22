@@ -7,6 +7,7 @@ import os
 import time
 from decimal import Decimal
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -399,6 +400,258 @@ async def _print_lifecycle_status(system: Any) -> None:
     print_panel("\n".join(lines), title="Agent 生命周期")
 
 
+SlashHandler = Callable[["SlashCommandContext"], Awaitable[bool | None]]
+
+
+@dataclass
+class SlashCommandContext:
+    raw: str
+    parts: list[str]
+    cmd: str
+    skills_manager: SkillsManager
+    coordinator_history: ChatHistory | None
+    manager_history: ChatHistory | None
+    reset_cli_session_for_load: Callable[[], Awaitable[None]]
+    bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None]
+    system: Any
+
+
+async def _cmd_help(ctx: SlashCommandContext) -> bool | None:
+    print_cli_help()
+    return None
+
+
+async def _cmd_config(ctx: SlashCommandContext) -> bool | None:
+    print_config_summary()
+    return None
+
+
+async def _cmd_context(ctx: SlashCommandContext) -> bool | None:
+    await _print_context_usage(ctx.system, ctx.coordinator_history, ctx.manager_history)
+    return None
+
+
+async def _cmd_usage(ctx: SlashCommandContext) -> bool | None:
+    await _print_usage_report(ctx.raw, ctx.system)
+    return None
+
+
+async def _cmd_pwd(ctx: SlashCommandContext) -> bool | None:
+    print_success(str(Path.cwd()))
+    return None
+
+
+async def _cmd_cd(ctx: SlashCommandContext) -> bool | None:
+    if len(ctx.parts) < 2:
+        print_error("用法：/cd <path>")
+        return None
+    target = Path(ctx.parts[1].strip()).expanduser()
+    if not target.is_absolute():
+        target = (Path.cwd() / target).resolve()
+    if not target.is_dir():
+        print_error(f"目录不存在: {target}")
+        return None
+    os.chdir(target)
+    print_success(f"已切换工作目录: {target}")
+    return None
+
+
+async def _cmd_status(ctx: SlashCommandContext) -> bool | None:
+    await _print_lifecycle_status(ctx.system)
+    return None
+
+
+async def _cmd_trace(ctx: SlashCommandContext) -> bool | None:
+    if len(ctx.parts) < 2:
+        print_error("用法: /trace <turn_id>")
+        return None
+    print_markdown(TRACE_STORE.format_turn(ctx.parts[1].strip()))
+    return None
+
+
+async def _cmd_tasks(ctx: SlashCommandContext) -> bool | None:
+    print_markdown_panel(ctx.system.structured_task_status(), title="任务状态")
+    return None
+
+
+async def _cmd_stop(ctx: SlashCommandContext) -> bool | None:
+    msg = await ctx.system.cancel_current_turn()
+    _out(msg)
+    return None
+
+
+async def _cmd_cancel(ctx: SlashCommandContext) -> bool | None:
+    if len(ctx.parts) < 2:
+        print_error("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>")
+        return None
+    if ctx.parts[1].lower() == "agent":
+        if len(ctx.parts) < 3:
+            print_error("用法: /cancel agent <agent_id>")
+            return None
+        aid = ctx.parts[2].strip()
+        n = await ctx.system.registry.cancel_agent(aid)
+        if n:
+            print_success(f"已请求取消 agent_id={aid!r} 的当前 invocation。")
+        else:
+            print_warning(f"未找到 agent_id={aid!r} 的活跃 invocation。")
+        return None
+    iid = ctx.parts[1].strip()
+    n_match = await ctx.system.registry.count_active_invocation_prefix_matches(iid)
+    if n_match > 1:
+        print_warning(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。")
+        return None
+    resolved = await ctx.system.registry.resolve_active_invocation_id(iid)
+    ok = await ctx.system.registry.cancel(iid)
+    if ok:
+        print_success(f"已请求取消 invocation_id={(resolved or iid)!r}。")
+        return None
+    sk = getattr(ctx.system, "session_key", None)
+    if sk:
+        recent = await ctx.system.registry.find_recent_invocation_by_prefix(sk, iid)
+        if recent is not None:
+            print_warning(
+                f"invocation {iid!r} 已在近期历史中结束"
+                f"（state={recent.state.value}），无法取消。"
+            )
+            return None
+    print_warning(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。")
+    return None
+
+
+async def _cmd_skills(ctx: SlashCommandContext) -> bool | None:
+    print_loaded_skills(ctx.skills_manager)
+    return None
+
+
+async def _cmd_agent(ctx: SlashCommandContext) -> bool | None:
+    roles = get_agent_roles()
+    role_text = "|".join(roles)
+    if len(ctx.parts) == 1:
+        print_agent_models()
+        _out(f"切换模型: /agent <{role_text}> <模型名称>")
+        return None
+    if len(ctx.parts) < 3:
+        print_error(f"用法: /agent <{role_text}> <模型名称>")
+        return None
+    role = ctx.parts[1].lower()
+    model_name = ctx.parts[2].strip()
+    try:
+        set_model_name(role, model_name)
+        print_success(f"已设置 [{role}] 模型为: {model_name}（已写入 config.json）")
+        await prewarm_effective_max_contexts_by_role_async(
+            reason=f"切换模型 {role}={model_name!r}"
+        )
+    except ValueError as e:
+        print_error(str(e))
+    return None
+
+
+async def _cmd_api(ctx: SlashCommandContext) -> bool | None:
+    interactive_set_api()
+    return None
+
+
+async def _cmd_load(ctx: SlashCommandContext) -> bool | None:
+    tail = ctx.raw.strip()[5:].strip()
+    if not tail:
+        print_error("用法: /load <*.model_messages.json 路径>")
+        return None
+    raw_path = tail.strip()
+    if (raw_path.startswith('"') and raw_path.endswith('"')) or (
+        raw_path.startswith("'") and raw_path.endswith("'")
+    ):
+        raw_path = raw_path[1:-1]
+    load_path = Path(raw_path).expanduser()
+    if not load_path.is_file():
+        print_error(f"找不到文件: {load_path}")
+        return None
+    try:
+        messages, meta = read_saved_model_messages_file(load_path)
+    except Exception as e:
+        print_error(f"加载失败: {e}")
+        return None
+    agent = (meta.get("agent") or "").strip().lower()
+    if agent not in ("coordinator", "manager"):
+        print_error(
+            f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持从 coordinator 或 manager 落盘文件恢复。"
+        )
+        return None
+    if ctx.coordinator_history is None or ctx.manager_history is None:
+        print_error("当前环境未绑定历史对象，无法加载。")
+        return None
+    await ctx.reset_cli_session_for_load()
+    if agent == "coordinator":
+        ctx.coordinator_history.set_messages(messages)
+        ctx.manager_history.reset()
+        ctx.bind_loaded_snapshot_for_save("coordinator", load_path, meta)
+        print_success(
+            f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。"
+        )
+    else:
+        ctx.manager_history.set_messages(messages)
+        ctx.coordinator_history.reset()
+        ctx.bind_loaded_snapshot_for_save("manager", load_path, meta)
+        print_success(
+            f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。"
+        )
+    return True
+
+
+async def _cmd_compress(ctx: SlashCommandContext) -> bool | None:
+    task_state_getter = getattr(ctx.system, "structured_task_status", None)
+    task_state = task_state_getter() if callable(task_state_getter) else None
+    role_histories: list[tuple[str, str, list[ChatHistory]]] = [
+        ("manager", "Manager", [ctx.manager_history] if ctx.manager_history is not None else []),
+        ("coordinator", "Coordinator", [ctx.coordinator_history] if ctx.coordinator_history is not None else []),
+    ]
+    if not any(histories for _, _, histories in role_histories):
+        print_error("当前环境未绑定任何 Agent 历史，无法压缩。")
+        return None
+
+    lines = ["压缩结果（按角色）"]
+    for role, label, histories in role_histories:
+        if not histories:
+            lines.append(f"  • {label}: 未绑定历史")
+            continue
+
+        try:
+            for h in histories:
+                msgs = list(h.messages)
+                if not msgs:
+                    continue
+                await compress_history_async(
+                    h,
+                    role=role,
+                    force=True,
+                    task_state=task_state,
+                )
+                lines.append(f"  • {label}: 已压缩")
+        except Exception as e:
+            lines.append(f"  • {label}: 压缩失败: {e}")
+    print_panel("\n".join(lines), title="上下文压缩")
+    return None
+
+
+SLASH_COMMAND_HANDLERS: dict[str, SlashHandler] = {
+    "/help": _cmd_help,
+    "/config": _cmd_config,
+    "/context": _cmd_context,
+    "/usage": _cmd_usage,
+    "/pwd": _cmd_pwd,
+    "/cd": _cmd_cd,
+    "/status": _cmd_status,
+    "/trace": _cmd_trace,
+    "/tasks": _cmd_tasks,
+    "/stop": _cmd_stop,
+    "/cancel": _cmd_cancel,
+    "/skills": _cmd_skills,
+    "/agent": _cmd_agent,
+    "/api": _cmd_api,
+    "/load": _cmd_load,
+    "/compress": _cmd_compress,
+}
+
+
 async def handle_slash_command(
     raw: str,
     skills_manager: SkillsManager,
@@ -408,192 +661,30 @@ async def handle_slash_command(
     reset_cli_session_for_load: Callable[[], Awaitable[None]],
     bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None],
     system: Any,
-) -> tuple[bool, bool | None]:
+) -> bool | None:
     """
     处理以 / 开头的输入行。
-    返回 (True, None) 表示已消费该输入，不应作为普通任务发送。
-    返回 (True, True) 表示已消费且已将交互态视为「新会话首条」（如 /load 后）。
+    返回 None 表示已消费该输入，不应作为普通任务发送，且不改变 is_first_input。
+    返回 True 表示已消费且已将交互态视为「新会话首条」（如 /load 后）。
     """
     parts = raw.strip().split(maxsplit=2)
     cmd = parts[0].lower() if parts else ""
 
-    if cmd == "/help":
-        print_cli_help()
-        return True, None
-    if cmd == "/config":
-        print_config_summary()
-        return True, None
-    if cmd == "/context":
-        await _print_context_usage(system, coordinator_history, manager_history)
-        return True, None
-    if cmd == "/usage":
-        await _print_usage_report(raw, system)
-        return True, None
-    if cmd == "/pwd":
-        print_success(str(Path.cwd()))
-        return True, None
-    if cmd == "/cd":
-        if len(parts) < 2:
-            print_error("用法：/cd <path>")
-            return True, None
-        target = Path(parts[1].strip()).expanduser()
-        if not target.is_absolute():
-            target = (Path.cwd() / target).resolve()
-        if not target.is_dir():
-            print_error(f"目录不存在: {target}")
-            return True, None
-        os.chdir(target)
-        print_success(f"已切换工作目录: {target}")
-        return True, None
-    if cmd == "/status":
-        await _print_lifecycle_status(system)
-        return True, None
-    if cmd == "/trace":
-        if len(parts) < 2:
-            print_error("用法: /trace <turn_id>")
-            return True, None
-        print_markdown(TRACE_STORE.format_turn(parts[1].strip()))
-        return True, None
-    if cmd == "/tasks":
-        print_markdown_panel(system.structured_task_status(), title="任务状态")
-        return True, None
-    if cmd == "/stop":
-        msg = await system.cancel_current_turn()
-        _out(msg)
-        return True, None
-    if cmd == "/cancel":
-        if len(parts) < 2:
-            print_error("用法: /cancel <invocation_id> 或 /cancel agent <agent_id>")
-            return True, None
-        if parts[1].lower() == "agent":
-            if len(parts) < 3:
-                print_error("用法: /cancel agent <agent_id>")
-                return True, None
-            aid = parts[2].strip()
-            n = await system.registry.cancel_agent(aid)
-            if n:
-                print_success(f"已请求取消 agent_id={aid!r} 的当前 invocation。")
-            else:
-                print_warning(f"未找到 agent_id={aid!r} 的活跃 invocation。")
-            return True, None
-        iid = parts[1].strip()
-        n_match = await system.registry.count_active_invocation_prefix_matches(iid)
-        if n_match > 1:
-            print_warning(f"前缀 {iid!r} 匹配到多个活跃 invocation，请使用更长的 id。")
-            return True, None
-        resolved = await system.registry.resolve_active_invocation_id(iid)
-        ok = await system.registry.cancel(iid)
-        if ok:
-            print_success(f"已请求取消 invocation_id={(resolved or iid)!r}。")
-            return True, None
-        sk = getattr(system, "session_key", None)
-        if sk:
-            recent = await system.registry.find_recent_invocation_by_prefix(sk, iid)
-            if recent is not None:
-                print_warning(
-                    f"invocation {iid!r} 已在近期历史中结束"
-                    f"（state={recent.state.value}），无法取消。"
-                )
-                return True, None
-        print_warning(f"未找到活跃 invocation_id={iid!r}（支持 UUID 前缀匹配）。")
-        return True, None
-    if cmd == "/skills":
-        print_loaded_skills(skills_manager)
-        return True, None
-    if cmd == "/agent":
-        roles = get_agent_roles()
-        role_text = "|".join(roles)
-        if len(parts) == 1:
-            print_agent_models()
-            _out(f"切换模型: /agent <{role_text}> <模型名称>")
-            return True, None
-        if len(parts) < 3:
-            print_error(f"用法: /agent <{role_text}> <模型名称>")
-            return True, None
-        role = parts[1].lower()
-        model_name = parts[2].strip()
-        try:
-            set_model_name(role, model_name)
-            print_success(f"已设置 [{role}] 模型为: {model_name}（已写入 config.json）")
-            await prewarm_effective_max_contexts_by_role_async(
-                reason=f"切换模型 {role}={model_name!r}"
-            )
-        except ValueError as e:
-            print_error(str(e))
-        return True, None
-    if cmd == "/api":
-        interactive_set_api()
-        return True, None
-    if cmd == "/load":
-        tail = raw.strip()[5:].strip()
-        if not tail:
-            print_error("用法: /load <*.model_messages.json 路径>")
-            return True, None
-        raw_path = tail.strip()
-        if (raw_path.startswith('"') and raw_path.endswith('"')) or (
-            raw_path.startswith("'") and raw_path.endswith("'")
-        ):
-            raw_path = raw_path[1:-1]
-        load_path = Path(raw_path).expanduser()
-        if not load_path.is_file():
-            print_error(f"找不到文件: {load_path}")
-            return True, None
-        try:
-            messages, meta = read_saved_model_messages_file(load_path)
-        except Exception as e:
-            print_error(f"加载失败: {e}")
-            return True, None
-        agent = (meta.get("agent") or "").strip().lower()
-        if agent not in ("coordinator", "manager"):
-            print_error(
-                f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持从 coordinator 或 manager 落盘文件恢复。"
-            )
-            return True, None
-        if coordinator_history is None or manager_history is None:
-            print_error("当前环境未绑定历史对象，无法加载。")
-            return True, None
-        await reset_cli_session_for_load()
-        if agent == "coordinator":
-            coordinator_history.set_messages(messages)
-            manager_history.reset()
-            bind_loaded_snapshot_for_save("coordinator", load_path, meta)
-            print_success(
-                f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。"
-            )
-        else:
-            manager_history.set_messages(messages)
-            coordinator_history.reset()
-            bind_loaded_snapshot_for_save("manager", load_path, meta)
-            print_success(
-                f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。"
-            )
-        return True, True
-    if cmd == "/compress":
-        role_histories: list[tuple[str, str, list[ChatHistory]]] = [
-            ("manager", "Manager", [manager_history] if manager_history is not None else []),
-            ("coordinator", "Coordinator", [coordinator_history] if coordinator_history is not None else []),
-        ]
-        if not any(histories for _, _, histories in role_histories):
-            print_error("当前环境未绑定任何 Agent 历史，无法压缩。")
-            return True, None
+    ctx = SlashCommandContext(
+        raw=raw,
+        parts=parts,
+        cmd=cmd,
+        skills_manager=skills_manager,
+        coordinator_history=coordinator_history,
+        manager_history=manager_history,
+        reset_cli_session_for_load=reset_cli_session_for_load,
+        bind_loaded_snapshot_for_save=bind_loaded_snapshot_for_save,
+        system=system,
+    )
 
-        lines = ["压缩结果（按角色）"]
-        for role, label, histories in role_histories:
-            if not histories:
-                lines.append(f"  • {label}: 未绑定历史")
-                continue
-
-            try:
-                for h in histories:
-                    msgs = list(h.messages)
-                    if not msgs:
-                        continue
-                    await compress_history_async(h, role=role, force=True)
-                    lines.append(f"  • {label}: 已压缩")
-            except Exception as e:
-                lines.append(f"  • {label}: 压缩失败: {e}")
-        print_panel("\n".join(lines), title="上下文压缩")
-        return True, None
+    handler = SLASH_COMMAND_HANDLERS.get(cmd)
+    if handler is not None:
+        return await handler(ctx)
 
     print_warning(f"未知命令 {cmd}，输入 /help 查看可用命令")
-    return True, None
+    return None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import List, Dict
 from dataclasses import dataclass, field
 from enum import Enum
 import json_repair as json
@@ -25,20 +24,19 @@ class Task:
     result: str = ""
     retry_count: int = 0
     max_retries: int = 3
-    dependencies: List[str] = field(default_factory=list)
-    failure_history: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    failure_history: list[str] = field(default_factory=list)
     worker_chat_history: ChatHistory = field(default_factory=ChatHistory)
-    blocked_reason: str = ""
-    artifacts: List[str] = field(default_factory=list)
-    tool_summaries: List[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    tool_summaries: list[str] = field(default_factory=list)
 
 
 class TaskManager:
     """Task Manager - Manages the Todo List"""
     
     def __init__(self):
-        self.tasks: Dict[str, Task] = {}
-        self.task_order: List[str] = []
+        self.tasks: dict[str, Task] = {}
+        self.task_order: list[str] = []
     
     def reset(self):
         """Reset task manager state, clear all tasks"""
@@ -50,8 +48,7 @@ class TaskManager:
         """
         Create a task list from JSON.
         Parameters:
-            tasks_json: JSON format task list, format:
-                [{"id": "1", "description": "Task description", "dependencies": ["dependent task id"]}]
+            tasks_json: JSON array of id/description/dependencies objects.
         """
         logger.debug("(create_todo_list)")
         try:
@@ -94,8 +91,6 @@ class TaskManager:
             if not desc:
                 return f"task {task_id} description must not be empty"
             raw_deps = task_data.get("dependencies", [])
-            if raw_deps is None:
-                raw_deps = []
             if not isinstance(raw_deps, list):
                 return f"task {task_id} dependencies must be an array"
             deps = [str(d).strip() for d in raw_deps]
@@ -145,7 +140,7 @@ class TaskManager:
                 TaskStatus.IN_PROGRESS: "🔄",
                 TaskStatus.COMPLETED: "✅",
                 TaskStatus.FAILED: "❌"
-            }.get(task.status, "⬜")
+            }[task.status]
             
             line = f"{status_icon} [{task.id}] {task.description}"
             if task.dependencies:
@@ -157,42 +152,29 @@ class TaskManager:
         completed = sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
         total = len(self.tasks)
         lines.append("=" * 40)
-        lines.append(f"Progress: {completed}/{total} ({completed/total*100:.1f}%)" if total > 0 else "Progress: 0/0")
+        lines.append(f"Progress: {completed}/{total} ({completed/total*100:.1f}%)")
         todo_list = "\n".join(lines)
         
         return todo_list
     
-    def get_all_ready_tasks(self) -> List[Task]:
+    def get_all_ready_tasks(self) -> list[Task]:
         """获取所有可以并行执行的任务（依赖已满足且状态为PENDING）"""
-        ready = []
-        for task_id in self.task_order:
-            task = self.tasks[task_id]
-            if task.status != TaskStatus.PENDING:
-                continue
-            deps_satisfied = True
-            for dep_id in task.dependencies:
-                if dep_id not in self.tasks:
-                    continue
-                if self.tasks[dep_id].status != TaskStatus.COMPLETED:
-                    deps_satisfied = False
-                    break
-            if deps_satisfied:
-                ready.append(task)
-        return ready
-    
-    def mark_task_in_progress(self, task_id: str) -> str:
-        """Mark a task as in progress"""
-        if task_id not in self.tasks:
-            return f"Error: Task {task_id} does not exist"
-        self.tasks[task_id].status = TaskStatus.IN_PROGRESS
-        return f"Task {task_id} has started execution"
+        return [
+            self.tasks[task_id]
+            for task_id in self.task_order
+            if self.tasks[task_id].status == TaskStatus.PENDING
+            and all(
+                self.tasks[dep_id].status == TaskStatus.COMPLETED
+                for dep_id in self.tasks[task_id].dependencies
+            )
+        ]
     
     def mark_task_complete(self, task_id: str, result: str = "") -> str:
         """
         Mark a task as completed.
         Parameters:
             task_id: Task ID
-            result: Task execution result
+            result: Task result
         """
         logger.debug(f"(mark_task_complete {task_id})")
         if task_id not in self.tasks:
@@ -206,7 +188,7 @@ class TaskManager:
     
     def mark_task_failed(self, task_id: str, reason: str) -> str:
         """
-        Record task failure and increment retry count.
+        Record a task failure and schedule retry while attempts remain.
         Parameters:
             task_id: Task ID
             reason: Failure reason
@@ -241,7 +223,6 @@ class TaskManager:
         for task_id in self.task_order:
             task = self.tasks[task_id]
             blocked = self._blocked_reason(task)
-            task.blocked_reason = blocked
             lines.append(
                 f"[{task.status.value}] {task.id}: {task.description}"
                 f" deps={task.dependencies or []} retries={task.retry_count}/{task.max_retries}"
@@ -271,20 +252,6 @@ class TaskManager:
             return f"waiting for dependencies: {', '.join(incomplete)}"
         return ""
     
-    def is_all_completed(self) -> bool:
-        """Check if all tasks are completed"""
-        return bool(self.tasks) and all(
-            task.status == TaskStatus.COMPLETED 
-            for task in self.tasks.values()
-        )
-    
-    def has_failed_tasks(self) -> bool:
-        """Check if there are any failed tasks"""
-        return any(
-            task.status == TaskStatus.FAILED 
-            for task in self.tasks.values()
-        )
-    
     def get_final_summary(self) -> str:
         """Generate the final task execution summary report."""
         logger.debug("(get_final_summary)")
@@ -297,15 +264,9 @@ class TaskManager:
             ""
         ]
         
-        completed_tasks = []
-        failed_tasks = []
-        
-        for task_id in self.task_order:
-            task = self.tasks[task_id]
-            if task.status == TaskStatus.COMPLETED:
-                completed_tasks.append(task)
-            elif task.status == TaskStatus.FAILED:
-                failed_tasks.append(task)
+        ordered_tasks = [self.tasks[task_id] for task_id in self.task_order]
+        completed_tasks = [t for t in ordered_tasks if t.status == TaskStatus.COMPLETED]
+        failed_tasks = [t for t in ordered_tasks if t.status == TaskStatus.FAILED]
 
         lines.append(f"✅ Completed Tasks: {len(completed_tasks)}/{len(self.tasks)}")
         lines.append("-" * 40)
@@ -328,9 +289,9 @@ class TaskManager:
         lines.append("")
         lines.append("=" * 50)
 
-        if self.is_all_completed():
+        if len(completed_tasks) == len(self.tasks):
             lines.append("All tasks completed successfully!")
-        elif self.has_failed_tasks():
+        elif failed_tasks:
             lines.append("⚠️ Some tasks failed. Please review the failure reasons.")
         else:
             lines.append("Tasks in progress...")

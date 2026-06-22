@@ -46,13 +46,6 @@ class _AsyncThreadLock:
     async def __aexit__(self, *args: Any) -> None:
         self._lock.release()
 
-    def __enter__(self) -> _AsyncThreadLock:
-        self._lock.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._lock.release()
-
 
 class ShortTermMemory:
     """短期记忆：每轮 user→agent（含工具）单向量；回合结束后后台线程异步入库，供 Worker 检索。"""

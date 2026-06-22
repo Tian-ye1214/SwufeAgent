@@ -107,6 +107,12 @@ class EmbedDataBase:
             raise RuntimeError("数据库未连接，请先调用 await connect()")
         return self._db
 
+    def _ensure_table_sync(self, db) -> Any | None:
+        if self._table is not None:
+            return self._table
+        self._table = self._open_table_sync(db)
+        return self._table
+
     def _row_to_pydantic(self, r: dict[str, Any]):
         if self._extended_schema:
             return self._schema(
@@ -134,9 +140,8 @@ class EmbedDataBase:
             db = self._require_db()
             pydantic_rows = [self._row_to_pydantic(r) for r in rows]
             if self._table is None:
-                opened = self._open_table_sync(db)
+                opened = self._ensure_table_sync(db)
                 if opened is not None:
-                    self._table = opened
                     self._table.add(pydantic_rows)
                 else:
                     if self._table_lance_dir().is_dir():
@@ -159,11 +164,9 @@ class EmbedDataBase:
         await self.ensure_connected()
 
         def _count() -> int:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-                if self._table is None:
-                    return 0
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return 0
             return int(self._table.count_rows())
 
         return await asyncio.to_thread(_count)
@@ -187,11 +190,9 @@ class EmbedDataBase:
         num_sub_vectors = max(1, self.vector_dim // 8)
 
         def _build() -> None:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-                if self._table is None:
-                    return
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return
             self._table.create_index(
                 metric=metric,
                 vector_column_name="vector",
@@ -213,11 +214,9 @@ class EmbedDataBase:
         return True
 
     def _has_vector_index_sync(self) -> bool:
-        if self._table is None:
-            db = self._require_db()
-            self._table = self._open_table_sync(db)
-            if self._table is None:
-                return False
+        db = self._require_db()
+        if self._ensure_table_sync(db) is None:
+            return False
         try:
             indices = self._table.list_indices()
             return len(indices) > 0
@@ -233,10 +232,8 @@ class EmbedDataBase:
         await self.ensure_vector_index()
 
         def _search() -> list[dict[str, Any]]:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-            if self._table is None:
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
                 return []
             df = self._table.search(query_embedding).limit(top_k).to_pandas()
             out: list[dict[str, Any]] = []
@@ -254,17 +251,6 @@ class EmbedDataBase:
         out = await asyncio.to_thread(_search)
         logger.debug("RAG DB: vector_search top_k=%s, results=%d", top_k, len(out))
         return out
-
-    async def drop_table(self) -> None:
-        await self.ensure_connected()
-
-        def _drop() -> None:
-            db = self._require_db()
-            if self.table_name in db.table_names():
-                db.drop_table(self.table_name)
-            self._table = None
-
-        await asyncio.to_thread(_drop)
 
     async def close(self) -> None:
         def _close() -> None:

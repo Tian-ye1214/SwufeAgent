@@ -36,9 +36,3 @@ class ChatHistory:
     def messages(self) -> list:
         """传入 agent.run(message_history=...) 的只读引用。"""
         return self._messages
-
-    def __len__(self) -> int:
-        return len(self._messages)
-
-    def __bool__(self) -> bool:
-        return bool(self._messages)

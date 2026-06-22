@@ -68,6 +68,26 @@ def _record(
     )
 
 
+def _run_wrapped(
+    fn: Callable[..., Any],
+    policy: AgentRunPolicy | None,
+    name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    t0 = time.monotonic()
+    _notify(name, args, kwargs)
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as e:
+        _record(name, t0, False, error=e)
+        raise
+    if policy is not None and isinstance(result, str):
+        result = policy.truncate_text(result)
+    _record(name, t0, True, result=result)
+    return result
+
+
 def _wrap(fn: Callable[..., Any], policy: AgentRunPolicy | None) -> Callable[..., Any]:
     """给单个工具套壳：调用前发通知，调用后记事件；区分协程与普通函数。"""
     if getattr(fn, "_notify_tool_wrapped", False):
@@ -88,21 +108,10 @@ def _wrap(fn: Callable[..., Any], policy: AgentRunPolicy | None) -> Callable[...
                 result = policy.truncate_text(result)
             _record(name, t0, True, result=result)
             return result
-
     else:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            t0 = time.monotonic()
-            _notify(name, args, kwargs)
-            try:
-                result = fn(*args, **kwargs)
-            except Exception as e:
-                _record(name, t0, False, error=e)
-                raise
-            if policy is not None and isinstance(result, str):
-                result = policy.truncate_text(result)
-            _record(name, t0, True, result=result)
-            return result
+            return _run_wrapped(fn, policy, name, args, kwargs)
 
     wrapper._notify_tool_wrapped = True  # type: ignore[attr-defined]
     return wrapper

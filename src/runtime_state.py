@@ -92,9 +92,6 @@ class TurnTraceStore:
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._max_turns = max_turns
 
-    def clear(self) -> None:
-        self._events.clear()
-
     def record(self, turn_id: str | None, kind: str, **fields: Any) -> None:
         key = turn_id or "unbound"
         event = {

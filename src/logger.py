@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,6 +10,7 @@ from typing import Any
 
 from loguru import logger as _lg
 
+from paths import repo_root
 from persist_utils import safe_name
 
 CONSOLE_FMT = "{time:HH:mm:ss} | {level: <8} | {message}"
@@ -41,12 +41,7 @@ class LoggingConfig:
 
     @classmethod
     def default(cls) -> "LoggingConfig":
-        base = (
-            Path(sys.executable).resolve().parent
-            if getattr(sys, "frozen", False)
-            else Path(__file__).resolve().parent.parent  # src/logger.py → 项目根
-        )
-        return cls(log_dir=base / "logs")
+        return cls(log_dir=repo_root() / "logs")
 
 
 def configure(cfg: LoggingConfig) -> None:

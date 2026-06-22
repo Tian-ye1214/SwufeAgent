@@ -19,9 +19,28 @@ import json_repair
 
 import logger
 from app_config import get_env, http_chat_completions_thinking_extras, unified_thinking_setting
+from shared_http import close_client, get_client
+
+_HTTP_KEY = "model"
 
 
 class JsonRepairOpenAIChatModel(OpenAIChatModel):
+    class _ReasoningContentMapContext(OpenAIChatModel._MapModelResponseContext):
+        """Replay 兜底：带 tool_calls 的 assistant 消息缺 reasoning_content 时补空字符串。"""
+
+        def _into_message_param(self):
+            message_param = super()._into_message_param()
+            if message_param is None:
+                return None
+            field = self._model._reasoning_content_field_name()
+            if (
+                field
+                and field not in message_param
+                and message_param.get("tool_calls")
+            ):
+                message_param[field] = ""
+            return message_param
+
     async def request(
         self,
         messages: list[ModelMessage],
@@ -30,6 +49,15 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
     ) -> ModelResponse:
         response = await super().request(messages, model_settings, model_request_parameters)
         return self._repair_tool_calls_json(response)
+
+    def _map_model_response(self, message: ModelResponse):
+        return self._ReasoningContentMapContext(self).map_assistant_message(message)
+
+    def _reasoning_content_field_name(self) -> str | None:
+        profile = OpenAIModelProfile.from_profile(self.profile)
+        if profile.openai_chat_send_back_thinking_parts != "field":
+            return None
+        return profile.openai_chat_thinking_field or None
 
     def _ensure_valid_json(self, args_str: str, tool_name: str) -> str:
         """保证返回的字符串一定是合法 JSON。先校验，再 json_repair，最后 fallback 标记。"""
@@ -106,25 +134,13 @@ def _openai_compatible_thinking_profile(model_name: str) -> ModelProfile:
     ).update(profile)
 
 
-_shared_http_client: httpx.AsyncClient | None = None
-
-
 def _get_shared_http_client() -> httpx.AsyncClient:
-    global _shared_http_client
-    if _shared_http_client is None or _shared_http_client.is_closed:
-        _shared_http_client = create_async_http_client()
-    return _shared_http_client
+    return get_client(_HTTP_KEY, create_async_http_client)
 
 
 async def close_shared_http_client() -> None:
     """进程退出时关闭共享 HTTP 客户端（仅在真正退出时调用，勿在单会话 shutdown 调用）。"""
-    global _shared_http_client
-    client, _shared_http_client = _shared_http_client, None
-    if client is not None and not client.is_closed:
-        try:
-            await client.aclose()
-        except Exception as e:
-            logger.debug("关闭共享 HTTP 客户端时忽略异常: %s", e)
+    await close_client(_HTTP_KEY)
 
 
 def create_model(model_name: str, parameter: dict):

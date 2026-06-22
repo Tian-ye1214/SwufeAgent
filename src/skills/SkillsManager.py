@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 import logger
+from paths import skills_dir as default_skills_dir
 
 
 @dataclass
@@ -24,10 +25,6 @@ class Skill:
     metadata: SkillMetadata
     instructions: str = ""
     resources: Dict[str, str] = field(default_factory=dict)
-
-    @property
-    def name(self) -> str:
-        return self.metadata.name
 
     @property
     def description(self) -> str:
@@ -52,7 +49,7 @@ class SkillsManager:
 
     def __init__(self, skills_dir: str | Path | None = None):
         if skills_dir is None:
-            skills_dir = Path(__file__).resolve().parent.parent / "skills"
+            skills_dir = default_skills_dir()
         self.skills_dir = Path(skills_dir)
         self.skills: Dict[str, Skill] = {}
 

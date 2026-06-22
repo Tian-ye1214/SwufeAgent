@@ -8,11 +8,9 @@ from typing import Any
 @dataclass(frozen=True)
 class WorkerResult:
     success: bool
-    summary: str
     artifacts: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     needs_user_confirmation: bool = False
-    raw: str = ""
 
 
 def parse_worker_result(output: str) -> WorkerResult:
@@ -21,18 +19,18 @@ def parse_worker_result(output: str) -> WorkerResult:
     if structured is not None:
         status = str(structured.get("status", "")).strip().lower()
         if status in {"success", "succeeded", "ok", "completed"}:
-            return _from_structured(True, structured, text)
+            return _from_structured(True, structured)
         if status in {"failed", "failure", "error"}:
-            return _from_structured(False, structured, text)
+            return _from_structured(False, structured)
 
     first_line = text.splitlines()[0].upper() if text else ""
     if first_line.startswith("FAILED:"):
-        return WorkerResult(False, text, raw=text)
+        return WorkerResult(False)
     if first_line.startswith("SUCCESS:"):
-        return WorkerResult(True, text, raw=text)
+        return WorkerResult(True)
     if text.upper().startswith("ERROR:"):
-        return WorkerResult(False, text, raw=text)
-    return WorkerResult(True, text, raw=text)
+        return WorkerResult(False)
+    return WorkerResult(True)
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -62,13 +60,10 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
-def _from_structured(success: bool, data: dict[str, Any], raw: str) -> WorkerResult:
-    summary = str(data.get("summary") or data.get("message") or raw).strip()
+def _from_structured(success: bool, data: dict[str, Any]) -> WorkerResult:
     return WorkerResult(
         success=success,
-        summary=summary,
         artifacts=_string_list(data.get("artifacts")),
         risks=_string_list(data.get("risks")),
         needs_user_confirmation=bool(data.get("needs_user_confirmation", False)),
-        raw=raw,
     )

@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import re
 from functools import partial
@@ -9,9 +8,9 @@ from ncatbot.utils import config
 
 import logger
 from app_config import get_env
+from agent_core.input_messages import UserMessage
 from base import BotBase
 from qq_media_helpers import extract_media
-from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
 
 class QQBot(BotBase):
     _ENV_AGENT_TIMEOUT = "QQ_AGENT_TIMEOUT_S"
@@ -60,26 +59,6 @@ class QQBot(BotBase):
     async def _extract_attachments(self, event: BaseMessageEvent) -> list:
         return await extract_media(self._bot_client.api, event, self._FILE_ALLOW_EXT)
 
-    async def _inline_pdf_attachments(self, user_text: str, attachments: list) -> tuple[str, list]:
-        """Parse PDF BinaryContent into text and keep other attachments unchanged."""
-        out: list = []
-        blocks: list[str] = []
-        for att in attachments:
-            data = getattr(att, "data", b"") or b""
-            media_type = getattr(att, "media_type", "") or ""
-            if not data or not is_pdf_content(data, media_type=media_type):
-                out.append(att)
-                continue
-            block = await asyncio.to_thread(pdf_attachment_text_block, data)
-            if block.startswith("（"):
-                logger.warning("[QQ] PDF 解析失败，未注入文本")
-            blocks.append(block)
-        text = user_text
-        if blocks:
-            body = "\n\n".join(blocks)
-            text = f"{text}\n\n{body}".strip() if text else body
-        return text, out
-
     async def _on_shutdown(self, _: MetaEvent) -> None:
         await self.release_all_resources_async()
 
@@ -90,13 +69,11 @@ class QQBot(BotBase):
         session_id = self._session_id(event)
         user_text = self.clean_text(raw_text)
         attachments = await self._extract_attachments(event)
-        user_text, attachments = await self._inline_pdf_attachments(user_text, attachments)
-        await self.dispatch_message(
+        user_text, attachments = await self._partition_pdf_attachments(user_text, attachments)
+        await self.dispatch_user_message(
             session_id,
-            user_text,
-            attachments,
+            UserMessage(text=user_text, attachments=attachments),
             partial(self._reply_event, event),
-            asyncio.get_running_loop(),
         )
 
     def _register_handlers(self) -> None:

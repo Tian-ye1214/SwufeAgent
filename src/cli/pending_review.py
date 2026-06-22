@@ -73,10 +73,6 @@ class PendingReviewStore:
         self._entries: dict[str, ReviewEntry] = {}
         self._on_change: Callable[[], None] | None = None
 
-    @property
-    def active(self) -> bool:
-        return self._on_change is not None
-
     def activate(self, on_change: Callable[[], None]) -> None:
         self._on_change = on_change
 

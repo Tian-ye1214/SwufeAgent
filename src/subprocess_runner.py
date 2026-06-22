@@ -2,7 +2,7 @@
 """可取消的子进程执行原语。
 
 被 tools/ 与 skills/ 共用的叶子模块：只依赖标准库，不依赖任何项目模块，
-因此可被任意层 import 而不引入循环依赖。run_command / execute_file /
+因此可被任意层 import 而不引入循环依赖。run_command /
 execute_skill_script 共用同一套 杀进程树 / 超时 / 取消 语义。
 """
 import asyncio

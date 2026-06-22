@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import json_repair
 import logger
-from persist_utils import atomic_write_text, file_lock, load_json_state, rel_key, save_locked_json
+from persist_utils import atomic_write_text, file_lock
 from app_config import (
     chat_completion_inference_request_fields,
     get_env,
@@ -19,28 +19,22 @@ from tools.memory.consolidation import (
     merge_looks_like_unrelated_rewrite,
 )
 from tools.memory.message_text import user_prompts_to_text
+from shared_http import close_client, get_client
 
-
-_shared_client: httpx.AsyncClient | None = None
+_HTTP_KEY = "ltm"
 
 
 def _get_shared_client() -> httpx.AsyncClient:
     """进程级共享长期记忆合并客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
-    global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(90.0))
-    return _shared_client
+    return get_client(
+        _HTTP_KEY,
+        lambda: httpx.AsyncClient(http2=True, timeout=httpx.Timeout(90.0)),
+    )
 
 
 async def close_http_client() -> None:
     """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
-    global _shared_client
-    client, _shared_client = _shared_client, None
-    if client is not None and not client.is_closed:
-        try:
-            await client.aclose()
-        except Exception as e:
-            logger.debug("关闭长期记忆 HTTP 客户端时忽略异常: %s", e)
+    await close_client(_HTTP_KEY)
 
 
 class LongTermMemory:
@@ -49,7 +43,6 @@ class LongTermMemory:
     - MEMORY_GUIDANCE.md：给模型的长期记忆**使用**说明（随 load 注入 get_injection，不是抽取提示词）
     - soul_user_consolidation.md：从对话或日志增量中**合并**出 SOUL/USER 整篇正文的**唯一**提示词
     - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；无标题时整篇当正文；`\\n---\\n` 分隔的段落会合并
-    - log_sources_state.json：各 .log 已读字节偏移，避免重复喂给模型；**不存在时首次加载会自动创建**（version + 空 sources）
     """
     _CHAR_LIMIT = 8000
     _PROMPT_BODY_ELIDE = 10_000
@@ -60,7 +53,6 @@ class LongTermMemory:
     _MEMORY_DIR = Path(__file__).resolve().parent.parent.parent / "prompts" / "LongTermMemory"
     _GUIDANCE_FILE = "MEMORY_GUIDANCE.md"
     _CONSOLIDATION_TEMPLATE_FILE = "soul_user_consolidation.md"
-    _LOG_STATE_FILE = "log_sources_state.json"
     _TARGETS = {"soul": "SOUL.md", "user": "USER.md"}
     _MD_H1_SOUL = re.compile(r"^#\s*SOUL\s*$", re.IGNORECASE)
     _MD_H1_USER = re.compile(r"^#\s*USER\s*$", re.IGNORECASE)
@@ -70,8 +62,6 @@ class LongTermMemory:
         self._guidance_text: str = ""
         self._soul_body: str = ""
         self._user_body: str = ""
-        self._write_lock = asyncio.Lock()
-        self._logs_consolidate_lock = asyncio.Lock()
 
     def _sync_read_guidance(self) -> str:
         path = self._MEMORY_DIR / self._GUIDANCE_FILE
@@ -80,10 +70,6 @@ class LongTermMemory:
             return ""
         return path.read_text(encoding="utf-8").strip()
 
-    async def load(self) -> None:
-        """从磁盘加载 MEMORY_GUIDANCE.md、SOUL/USER 正文。应在程序启动时调用一次。"""
-        await asyncio.to_thread(self._load_sync)
-
     def refresh_from_disk_sync(self) -> None:
         """同步从磁盘刷新指引与 SOUL/USER（供 AgentSystem 启动等非 async 场景）。"""
         self._load_sync()
@@ -91,7 +77,6 @@ class LongTermMemory:
     def _load_sync(self) -> None:
         self._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._ensure_soul_user_files_sync()
-        self._ensure_log_state_file_sync()
         self._guidance_text = self._sync_read_guidance()
         self._soul_body = self._read_whole_body(self._MEMORY_DIR / "SOUL.md")
         self._user_body = self._read_whole_body(self._MEMORY_DIR / "USER.md")
@@ -104,13 +89,6 @@ class LongTermMemory:
                 continue
             title = "SOUL" if key == "soul" else "USER"
             path.write_text(f"# {title}\n\n", encoding="utf-8")
-
-    def _ensure_log_state_file_sync(self) -> None:
-        """若 log_sources_state.json 不存在，则创建默认 `{\"version\": 1, \"sources\": {}}`。"""
-        p = self._log_state_path()
-        if p.is_file():
-            return
-        self._save_log_state_sync({"version": 1, "sources": {}})
 
     @staticmethod
     def _read_whole_body(path: Path) -> str:
@@ -247,30 +225,6 @@ class LongTermMemory:
                 changed = True
         return changed
 
-    def _log_state_path(self) -> Path:
-        return self._MEMORY_DIR / self._LOG_STATE_FILE
-
-    def _load_log_state_sync(self) -> dict[str, Any]:
-        self._ensure_log_state_file_sync()
-        return load_json_state(self._log_state_path(), 1)
-
-    def _save_log_state_sync(self, state: dict[str, Any]) -> None:
-        self._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        save_locked_json(self._log_state_path(), state)
-
-    def _rel_log_key(self, path: Path, root: Path) -> str:
-        return rel_key(path, root)
-
-    def _merge_log_state_updates_sync(self, updates: dict[str, int]) -> None:
-        """合并已处理到的字节偏移（仅更新传入的键）。"""
-        if not updates:
-            return
-        state = self._load_log_state_sync()
-        sources = state.setdefault("sources", {})
-        for k, br in updates.items():
-            sources[k] = {"bytes_read": int(br)}
-        self._save_log_state_sync(state)
-
     async def _consolidation_chat_and_parse(
         self,
         template: str,
@@ -334,109 +288,6 @@ class LongTermMemory:
         raw = data["choices"][0]["message"]["content"]
 
         return self._parse_consolidation_response(raw)
-
-    async def consolidate_from_logs(
-        self,
-        log_root: Path | None = None,
-        *,
-        silent: bool = True,
-    ) -> None:
-        """
-        后台：扫描 logs 下全部 .log 的增量内容，调用模型提取 SOUL/USER；用 log_sources_state.json 记录已读字节，避免重复。
-        log_root 默认使用 logger.LOG_DIR（进程当前工作目录下的 logs）。
-        """
-        try:
-            root = (log_root if log_root is not None else logger.LOG_DIR).resolve()
-        except Exception:
-            if not silent:
-                raise
-            logger.warning("长期记忆（日志）：无法解析日志目录。")
-            return
-
-        async with self._logs_consolidate_lock:
-            try:
-                template = await asyncio.to_thread(self._load_consolidation_template_sync)
-                if not template.strip():
-                    return
-
-                state = await asyncio.to_thread(self._load_log_state_sync)
-                sources: dict[str, Any] = state.setdefault("sources", {})
-
-                log_files = sorted(
-                    [p for p in root.rglob("*.log") if p.is_file()],
-                    key=lambda p: str(p),
-                )
-                if not log_files:
-                    return
-
-                pending_state: dict[str, int] = {}
-
-                for fp in log_files:
-                    key = self._rel_log_key(fp, root)
-                    try:
-                        size = fp.stat().st_size
-                    except OSError:
-                        continue
-
-                    prev = 0
-                    ent = sources.get(key)
-                    if isinstance(ent, dict):
-                        try:
-                            prev = int(ent.get("bytes_read", 0))
-                        except (TypeError, ValueError):
-                            prev = 0
-                    if prev > size:
-                        prev = 0
-                    if prev >= size:
-                        continue
-
-                    pos = prev
-                    last_committed = prev
-                    try:
-                        while pos < size:
-                            ltm = long_term_memory_consolidation_params()
-                            log_chunk_b = int(ltm["log_read_chunk_bytes"])
-                            max_tc = int(ltm["max_transcript_chars"])
-                            to_read = min(log_chunk_b, size - pos)
-                            with fp.open("rb") as f:
-                                f.seek(pos)
-                                raw = f.read(to_read)
-                            if not raw:
-                                last_committed = size
-                                break
-                            text = raw.decode("utf-8", errors="replace")
-                            ci = 0
-                            maxc = max_tc
-                            while ci < len(text):
-                                piece = text[ci : ci + maxc]
-                                cj = ci + len(piece)
-                                header = (
-                                    f"=== FILE: {key} | file_bytes {pos}:{pos + len(raw)} / {size} "
-                                    f"| chunk_chars {ci}-{cj} ===\n"
-                                )
-                                parsed = await self._consolidation_chat_and_parse(
-                                    template,
-                                    header + piece,
-                                    truncate=False,
-                                )
-                                await self._apply_consolidation_parsed(parsed)
-                                ci = cj
-                            pos += len(raw)
-                            last_committed = pos
-
-                        pending_state[key] = last_committed
-                        await asyncio.to_thread(self._merge_log_state_updates_sync, dict(pending_state))
-
-                    except Exception:
-                        if last_committed > prev:
-                            pending_state[key] = last_committed
-                            await asyncio.to_thread(self._merge_log_state_updates_sync, dict(pending_state))
-                        raise
-
-            except Exception as e:
-                if not silent:
-                    raise
-                logger.warning(f"长期记忆（日志）合并失败（已忽略）: {e}")
 
     async def consolidate_from_messages(self, messages: list, *, silent: bool = True) -> None:
         """

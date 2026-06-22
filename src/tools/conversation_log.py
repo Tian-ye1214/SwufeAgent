@@ -35,6 +35,12 @@ def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any
     return messages, meta
 
 
+def dump_validated_model_messages(model_messages: list[Any]) -> list[dict[str, Any]]:
+    raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
+    ModelMessagesTypeAdapter.validate_python(raw)
+    return raw
+
+
 async def drain_pending_saves(timeout: float = 10.0) -> None:
     tasks = [t for t in list(_PENDING_SAVE_TASKS) if not t.done()]
     if not tasks:
@@ -99,7 +105,7 @@ class ConversationLog:
             pass
 
     def _write(self, base: Path, model_messages: list[Any], extra: dict[str, Any] | None) -> None:
-        raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
+        raw = dump_validated_model_messages(model_messages)
         saved_at = iso_utc_now()
         meta: dict[str, Any] = {"agent": self._name, "date": self._date, "topic": self._topic}
         if extra:

@@ -12,6 +12,7 @@ import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
+from tools.ImageGeneration import generate_image_from_flux
 from app_config import get_agent_run_policy, get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
@@ -62,19 +63,12 @@ class BasicToolkit:
         return self._skills_manager
 
     @property
-    def base_dir(self) -> Path:
-        return self._base_dir
-
-    @property
     def review_store(self) -> PendingReviewStore:
         return self._review_store
 
     def close(self) -> None:
         """进程退出时关闭 Playwright 等资源。"""
-        bs = getattr(self, "_browser_session", None)
-        if bs is not None:
-            bs.shutdown()
-            del self._browser_session
+        self._browser_session.shutdown()
 
     def set_task_directory(self, task_name: str) -> Path:
         """
@@ -111,6 +105,9 @@ class BasicToolkit:
     async def _run_blocking(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
 
+    def _resolve_path_candidate(self, name: str) -> Path:
+        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+
     def _safe_path(self, name: str) -> Path:
         path = self._resolve_path_candidate(name)
         root = self._WORK_DATABASE_ROOT.resolve()
@@ -119,13 +116,17 @@ class BasicToolkit:
         return path
 
     def _readable_path(self, name: str) -> Path:
-        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+        return self._resolve_path_candidate(name)
 
     def _browser_headless_from_env(self) -> bool:
         v = (get_env("BROWSER_HEADLESS", warn=False) or "").strip().lower()
         if v in ("0", "false", "no"):
             return False
         return True
+
+    async def _browser_call(self, fn, **kw) -> str:
+        h = self._browser_headless_from_env()
+        return await self._run_blocking(fn, headless=h, **kw)
 
     async def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """
@@ -139,9 +140,8 @@ class BasicToolkit:
             url: Full URL (https://...)
             wait_until: Load wait strategy; one of domcontentloaded, load, networkidle (default domcontentloaded)
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.navigate, url, headless=h, wait_until=wait_until
+        return await self._browser_call(
+            self._browser_session.navigate, url=url, wait_until=wait_until
         )
 
     async def browser_get_content(self) -> str:
@@ -149,8 +149,7 @@ class BasicToolkit:
         Return visible text from the current page (body innerText), for reading dynamically rendered content.
         Returns the full text with no length truncation.
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(self._browser_session.get_content, headless=h)
+        return await self._browser_call(self._browser_session.get_content)
 
     async def browser_screenshot(self, name: str, full_page: bool = False) -> str:
         """
@@ -161,15 +160,13 @@ class BasicToolkit:
             name: File path, e.g. page.png or an absolute path
             full_page: If True, capture the full scrollable page
         """
-        h = self._browser_headless_from_env()
         try:
             path = self._resolve_path_candidate(name)
             path.parent.mkdir(parents=True, exist_ok=True)
         except ValueError as e:
             return str(e)
-        return await self._run_blocking(
+        return await self._browser_call(
             self._browser_session.screenshot,
-            headless=h,
             filename=str(path),
             full_page=full_page,
         )
@@ -181,10 +178,7 @@ class BasicToolkit:
         Parameters:
             selector: e.g. #submit, text=Sign in
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.click, headless=h, selector=selector
-        )
+        return await self._browser_call(self._browser_session.click, selector=selector)
 
     async def browser_fill(self, selector: str, text: str) -> str:
         """
@@ -194,9 +188,8 @@ class BasicToolkit:
             selector: CSS or other Playwright selector for the input
             text: Text to enter
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.fill, headless=h, selector=selector, text=text
+        return await self._browser_call(
+            self._browser_session.fill, selector=selector, text=text
         )
 
     async def browser_press_key(self, key: str) -> str:
@@ -206,8 +199,7 @@ class BasicToolkit:
         Parameters:
             key: Playwright key name, e.g. Enter, ArrowDown
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(self._browser_session.press, headless=h, key=key)
+        return await self._browser_call(self._browser_session.press, key=key)
 
     async def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
         """
@@ -217,10 +209,8 @@ class BasicToolkit:
             selector: Playwright selector
             timeout_ms: Timeout in milliseconds
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
+        return await self._browser_call(
             self._browser_session.wait_for_selector,
-            headless=h,
             selector=selector,
             timeout_ms=timeout_ms,
         )
@@ -233,22 +223,14 @@ class BasicToolkit:
         Parameters:
             javascript_expression: A single-line expression to evaluate
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.run_javascript,
-            headless=h,
-            expression=javascript_expression,
+        return await self._browser_call(
+            self._browser_session.run_javascript, expression=javascript_expression
         )
 
     async def browser_close(self) -> str:
         """Close the Playwright browser process and release resources; the next action will start a new browser."""
         await self._run_blocking(self._browser_session.close)
         return "Browser closed"
-
-    def _resolve_path_candidate(self, name: str) -> Path:
-        """解析读/列路径，限制在 WorkDatabase 与 src/skills。"""
-        return self._readable_path(name)
-
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""
@@ -312,7 +294,7 @@ class BasicToolkit:
             name: File name/path
         """
         try:
-            file_path = self._resolve_path_candidate(name)
+            file_path = self._readable_path(name)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             return content if content else "File is empty"
@@ -329,7 +311,7 @@ class BasicToolkit:
         """
         try:
             target_dir = (
-                self._resolve_path_candidate(directory) if directory else self._base_dir
+                self._readable_path(directory) if directory else self._base_dir
             )
             if not target_dir.exists():
                 return f"Error: Directory '{directory}' does not exist"
@@ -361,23 +343,16 @@ class BasicToolkit:
             name: File name/path (relative to WorkDatabase directory)
             content: Content to write
         """
-        content_len = len(content) if content else 0
         try:
-            if not isinstance(content, str):
-                content = str(content)
-
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
             with self._file_lock:
-                try:
-                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-                except Exception:
-                    old_content = ""
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                file_path.write_text(content, encoding="utf-8")
             show_file_diff(old_content, content, path=name)
             self._review_store.register(file_path, name=name, baseline=old_content, snapshot=content)
+            content_len = len(content)
             return f"File '{name}' written successfully ({content_len} characters)"
         except ValueError as e:
             return f"Security error: {e}"
@@ -385,44 +360,6 @@ class BasicToolkit:
             return f"Permission error: Cannot write to '{name}' - {e}"
         except Exception as e:
             return f"Write error: {type(e).__name__} - {e}"
-
-    def append_to_file(self, name: str, content: str) -> str:
-        """
-        Append content to an existing file (or create new file if it doesn't exist).
-        Use this for writing large content in chunks.
-
-        Parameters:
-            name: File name/path (relative to WorkDatabase directory)
-            content: Content to append (keep each chunk under 5000 characters)
-        """
-        content_len = len(content) if content else 0
-        try:
-            if content is None:
-                return "Append error: content cannot be None"
-            if not isinstance(content, str):
-                content = str(content)
-
-            self._base_dir.mkdir(parents=True, exist_ok=True)
-            file_path = self._safe_path(name)
-            os.makedirs(file_path.parent, exist_ok=True)
-            with self._file_lock:
-                try:
-                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-                except Exception:
-                    old_content = ""
-                with open(file_path, "a", encoding="utf-8") as f:
-                    f.write(content)
-                total_size = file_path.stat().st_size
-            show_file_diff(old_content, old_content + content, path=name)
-            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=old_content + content)
-            return f"Content appended to '{name}' successfully ({content_len} chars added, total file size: {total_size} bytes)"
-        except ValueError as e:
-            return f"Security error: {e}"
-        except PermissionError as e:
-            return f"Permission error: Cannot append to '{name}' - {e}"
-        except Exception as e:
-            return f"Append error: {type(e).__name__} - {e}"
-
 
     def edit_file(self, name: str, old_string: str, new_string: str) -> str:
         """
@@ -461,21 +398,6 @@ class BasicToolkit:
             return f"Permission error: Cannot edit '{name}' - {e}"
         except Exception as e:
             return f"Edit error: {type(e).__name__} - {e}"
-
-    def create_directory(self, name: str) -> str:
-        """
-        Create a directory.
-        Parameters:
-            name: Directory name/path
-        """
-        try:
-            dir_path = self._resolve_path_candidate(name)
-            os.makedirs(dir_path, exist_ok=True)
-            return f"Directory '{name}' created successfully"
-        except ValueError as e:
-            return f"Security error: {e}"
-        except Exception as e:
-            return f"Error creating directory: {e}"
 
     def search_in_files(self, keyword: str, file_extension: str = None) -> str:
         """
@@ -533,45 +455,6 @@ class BasicToolkit:
         except Exception as e:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
-
-    async def execute_file(self, name: str, args: str = "") -> str:
-        """
-        Execute a file (supports Python, Shell scripts, etc.).
-        Parameters:
-            name: File name/path to execute
-            args: Optional, command-line arguments to pass to the script
-        """
-        try:
-            file_path = self._safe_path(name)
-            if not file_path.exists():
-                return f"Error: File '{name}' does not exist"
-
-            ext = file_path.suffix.lower()
-            executors = {
-                ".py": ["python"],
-                ".sh": ["bash"],
-                ".bat": ["cmd", "/c"],
-                ".ps1": ["powershell", "-File"],
-            }
-
-            if ext not in executors:
-                return f"Error: Unsupported file type '{ext}'. Supported: {', '.join(executors.keys())}"
-
-            cmd = executors[ext] + [str(file_path)]
-            if args:
-                cmd.extend(args.split())
-
-            stdout, stderr, return_code = await run_subprocess(
-                cmd, shell=False, cwd=str(self._base_dir), timeout=60
-            )
-            output = stdout + stderr
-            return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
-        except subprocess.TimeoutExpired:
-            return "Error: Execution timed out (60 seconds)"
-        except ValueError as e:
-            return f"Security error: {e}"
-        except Exception as e:
-            return f"Execution error: {e}"
 
     async def run_command(self, command: str, timeout: int = 60) -> str:
         """
@@ -701,15 +584,13 @@ class BasicToolkit:
             ],
             "file_mutation": [
                 self.write_file,
-                self.append_to_file,
                 self.edit_file,
-                self.create_directory,
             ],
             "execution": [
                 self.run_command,
-                self.execute_file,
             ],
             "media": [
+                generate_image_from_flux,
                 self.read_image,
                 extract_text,
             ],

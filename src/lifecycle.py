@@ -55,8 +55,6 @@ class AgentInstance:
     role: str
     session_key: str
     state: AgentInstanceState
-    created_at: float
-    last_active_at: float
     current_invocation_id: str | None = None
 
 
@@ -71,17 +69,8 @@ class AgentInvocation:
     state: AgentInvocationState
     started_at: float
     finished_at: float | None
-    error: str | None
     task_ref: asyncio.Task[Any] | None
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event)
-
-    @property
-    def run_id(self) -> str:
-        return self.invocation_id
-
-    @property
-    def parent_run_id(self) -> str | None:
-        return self.parent_invocation_id
 
 
 @dataclass
@@ -99,6 +88,13 @@ class AgentRegistry:
         self._history: dict[str, deque[AgentInvocation]] = {}
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _prefix_matches(keys, prefix: str) -> list[str]:
+        key = prefix.strip()
+        if key in keys:
+            return [key]
+        return [k for k in keys if k.startswith(key)]
+
     def _history_for(self, session_key: str) -> deque[AgentInvocation]:
         if session_key not in self._history:
             self._history[session_key] = deque(maxlen=_invocation_history_limit())
@@ -110,16 +106,11 @@ class AgentRegistry:
         agent_id = make_agent_id(session_key, role, suffix)
         async with self._lock:
             if agent_id not in self._agents:
-                now = time.monotonic()
                 self._agents[agent_id] = AgentInstance(
                     agent_id=agent_id, role=role, session_key=session_key,
-                    state=AgentInstanceState.IDLE, created_at=now, last_active_at=now,
+                    state=AgentInstanceState.IDLE,
                 )
         return agent_id
-
-    async def get_agent(self, agent_id: str) -> AgentInstance | None:
-        async with self._lock:
-            return self._agents.get(agent_id)
 
     async def list_agents(self, session_key: str | None = None) -> list[AgentInstance]:
         async with self._lock:
@@ -142,7 +133,6 @@ class AgentRegistry:
             if agent is not None:
                 agent.state = AgentInstanceState.RUNNING
                 agent.current_invocation_id = inv.invocation_id
-                agent.last_active_at = time.monotonic()
 
     def _coerce_terminal_state(self, inv: AgentInvocation) -> None:
         if inv.state not in (AgentInvocationState.RUNNING, AgentInvocationState.PENDING):
@@ -161,36 +151,29 @@ class AgentRegistry:
             if agent is not None and agent.current_invocation_id == invocation_id:
                 agent.current_invocation_id = None
                 agent.state = AgentInstanceState.IDLE
-                agent.last_active_at = time.monotonic()
                 if agent.role == "worker":
                     self._agents.pop(inv.agent_id, None)
 
-    async def get_invocation(self, invocation_id: str) -> AgentInvocation | None:
-        async with self._lock:
-            return self._invocations.get(invocation_id)
-
     async def resolve_active_invocation_id(self, id_or_prefix: str) -> str | None:
-        key = id_or_prefix.strip()
         async with self._lock:
-            if key in self._invocations:
-                return key
-            matches = [iid for iid in self._invocations if iid.startswith(key)]
+            matches = self._prefix_matches(self._invocations, id_or_prefix)
         if len(matches) == 1:
             return matches[0]
         return None
 
     async def count_active_invocation_prefix_matches(self, prefix: str) -> int:
-        key = prefix.strip()
         async with self._lock:
-            return sum(1 for iid in self._invocations if iid.startswith(key))
+            return len(self._prefix_matches(self._invocations, prefix))
 
     async def find_recent_invocation_by_prefix(
         self, session_key: str, prefix: str
     ) -> AgentInvocation | None:
-        key = prefix.strip()
         async with self._lock:
-            history = self._history.get(session_key, ())
-        matches = [i for i in history if i.invocation_id.startswith(key)]
+            history = list(self._history.get(session_key, ()))
+        matched_ids = set(
+            self._prefix_matches((i.invocation_id for i in history), prefix)
+        )
+        matches = [i for i in history if i.invocation_id in matched_ids]
         if len(matches) == 1:
             return matches[0]
         return None
@@ -216,17 +199,11 @@ class AgentRegistry:
         )
 
     async def cancel(self, invocation_id: str) -> bool:
-        key = invocation_id.strip()
         async with self._lock:
-            if key in self._invocations:
-                inv = self._invocations[key]
-            else:
-                matches = [iid for iid in self._invocations if iid.startswith(key)]
-                if len(matches) != 1:
-                    return False
-                inv = self._invocations[matches[0]]
-            if inv is None:
+            matches = self._prefix_matches(self._invocations, invocation_id)
+            if len(matches) != 1:
                 return False
+            inv = self._invocations[matches[0]]
         inv.cancel_requested.set()
         t = inv.task_ref
         if t is not None and not t.done():
@@ -379,7 +356,7 @@ async def run_coroutine_with_lifecycle(
         invocation_id=invocation_id, agent_id=agent_id, role=role,
         session_key=session_key, parent_invocation_id=parent,
         turn_id=turn_id, state=AgentInvocationState.PENDING,
-        started_at=now, finished_at=None, error=None, task_ref=None,
+        started_at=now, finished_at=None, task_ref=None,
     )
     token = _invocation_stack.set(stack + (invocation_id,))
     await registry.register_invocation(inv)
@@ -431,7 +408,6 @@ async def run_coroutine_with_lifecycle(
             out: T = inner.result()
         except BaseException as e:
             inv.finished_at = time.monotonic()
-            inv.error = str(e)
             inv.state = AgentInvocationState.FAILED
             TRACE_STORE.record(
                 turn_id, "invocation_failed",

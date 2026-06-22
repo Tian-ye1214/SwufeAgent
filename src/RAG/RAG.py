@@ -75,22 +75,6 @@ class RAG:
         vectors = await embed_texts(instruct_text)
         return vectors[0]
 
-    async def ingest_chunk_pairs(self, pairs: list[tuple[str, str]]) -> int:
-        """每条 (source, text) 单独取向量并入库，不做字符切分。"""
-        if not pairs:
-            return 0
-        await self._db.ensure_connected()
-        texts = [p[1] for p in pairs]
-        sources = [p[0] for p in pairs]
-        vectors = await embed_texts(texts)
-        rows = [
-            {"vector": vectors[i], "text": texts[i], "source": sources[i]}
-            for i in range(len(pairs))
-        ]
-        n = await self._db.add_vectors(rows)
-        logger.info("RAG ingest_chunk_pairs: rows=%d", n)
-        return n
-
     async def ingest_turn_rows(self, rows: list[dict[str, Any]]) -> int:
         """短期记忆：每条含 text、source、id，及可选 agent、session_key、created_at。"""
         if not rows:
@@ -151,7 +135,7 @@ class RAG:
                 return out
 
             texts = [c["text"] for c in candidates]
-            top_n = min(self.final_top_k, len(texts)) if self.final_top_k is not None else len(texts)
+            top_n = min(self.final_top_k, len(texts))
             ranked = await rerank_documents(query, texts, top_n=top_n)
 
             results: list[dict[str, Any]] = []

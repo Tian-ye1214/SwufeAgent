@@ -17,10 +17,14 @@ from textual.containers import Vertical, VerticalScroll
 from textual.suggester import Suggester
 from textual.widgets import Footer, Input, RichLog, Static
 
-from cli.completer import COMMANDS, _iter_file_completions
+from cli.completer import _iter_file_completions
+from cli.completion import (
+    completion_for_input,
+    iter_agent_role_completions,
+    iter_command_completions,
+)
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from cli.pending_review import compute_hunks
-from app_config import get_agent_roles
 
 READY_LABEL = "就绪"
 WORKING_LABEL = "工作中"
@@ -46,26 +50,21 @@ class AgentInputSuggester(Suggester):
     async def get_suggestion(self, value: str) -> str | None:
         if not value:
             return None
-        if value.startswith("/") and " " not in value:
-            return next((cmd for cmd in COMMANDS if cmd.startswith(value) and cmd != value), None)
-        if value.startswith("/agent "):
-            parts = value.split()
-            prefix = parts[-1] if len(parts) > 1 else ""
-            if len(parts) == 2:
-                for role in get_agent_roles():
-                    if role.startswith(prefix) and role != prefix:
-                        return value[: -len(prefix)] + role if prefix else value + role
+        ctx = completion_for_input(value)
+        if ctx is None:
             return None
-        for command in ("/cd ", "/load "):
-            if value.startswith(command):
-                fragment = value[len(command) :]
-                return _complete_path_value(value, fragment)
-        at_index = value.rfind("@")
-        if at_index != -1:
-            fragment = value[at_index + 1 :]
-            if " " in fragment:
-                return None
-            return _complete_path_value(value, fragment)
+        if ctx.kind == "command":
+            return next(
+                (cmd for cmd in iter_command_completions(value) if cmd != value),
+                None,
+            )
+        if ctx.kind == "agent_role":
+            for role in iter_agent_role_completions(ctx.prefix):
+                if role != ctx.prefix:
+                    return value[: -len(ctx.prefix)] + role if ctx.prefix else value + role
+            return None
+        if ctx.kind == "file_path":
+            return _complete_path_value(value, ctx.prefix)
         return None
 
 
@@ -356,7 +355,7 @@ class RedLotusTui(App[None]):
         )
         was_last = self._review_idx == len(self._review_items) - 1
         if was_last and self._all_decided():
-            self._finish_review_session()  # 顺序决定到最后一条且全部决定完 → 完成
+            self._exit_review()
             return
         self._review_idx = min(self._review_idx + 1, len(self._review_items) - 1)
         self._highlight_current()
@@ -367,9 +366,6 @@ class RedLotusTui(App[None]):
             hunk.index in self._rv_decided.get(key, set())
             for key, _name, hunk in self._review_items
         )
-
-    def _finish_review_session(self) -> None:
-        self._exit_review()
 
     def _finish_if_done(self, key: str) -> None:
         entry = self.system.review_store.get(key)
@@ -386,21 +382,12 @@ class RedLotusTui(App[None]):
         self._review_items = []
         self._review_idx = 0
         self._review_widgets = []
-        try:
-            view = self.query_one("#review-view", VerticalScroll)
-            view.remove_children()
-            view.display = False
-        except Exception:
-            pass
-        try:
-            self.query_one("#output", RichLog).display = True  # 还原输出区（内容原样保留）
-        except Exception:
-            pass
+        view = self.query_one("#review-view", VerticalScroll)
+        view.remove_children()
+        view.display = False
+        self.query_one("#output", RichLog).display = True  # 还原输出区（内容原样保留）
         self._pending_count = len(self._pending_hunks())
-        try:
-            self.query_one("#input", AgentInput).focus()
-        except Exception:
-            pass
+        self.query_one("#input", AgentInput).focus()
         self.refresh_status()
 
     def action_review_keep(self) -> None:

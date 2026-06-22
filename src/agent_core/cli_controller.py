@@ -41,7 +41,6 @@ class AgentCliController:
     """CLI/TUI orchestration for AgentSystem."""
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
-    RESET_COMMANDS = {"/clear", "新任务"}  # 备用：当前未在本类内引用
     BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/context", "/usage", "/skills"}
 
     def __init__(self, system: "AgentSystem") -> None:
@@ -171,7 +170,7 @@ class AgentCliController:
                 return "continue"
 
         await system._sync_skills_for_user_turn()
-        _consumed, first_override = await handle_slash_command(
+        first_override = await handle_slash_command(
             raw_input,
             system._skills_manager,
             coordinator_history=state.history,

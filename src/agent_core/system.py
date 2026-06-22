@@ -9,7 +9,7 @@ from tools.WorkerOrchestrator import WorkerOrchestrator
 from tools.memory import (
     ChatHistory,
 )
-from agent_core.input_messages import UserMessage, user_message_from_text
+from agent_core.input_messages import UserMessage
 
 from tools.conversation_log import SessionConversationLogs, drain_pending_saves
 from ModelGateway.ModelChecker import (
@@ -35,6 +35,7 @@ import time
 import asyncio
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, Coroutine, Tuple
 
 from pydantic_ai.exceptions import ModelHTTPError
@@ -73,13 +74,29 @@ def _messages_with_replaced_output(result: Any, output: str) -> list[Any]:
             part = new_parts[part_index]
             if getattr(part, "part_kind", None) != "text":
                 continue
-            if not hasattr(part, "model_copy"):
-                continue
-            new_parts[part_index] = part.model_copy(update={"content": output})
-            if hasattr(message, "model_copy"):
-                messages[message_index] = message.model_copy(update={"parts": new_parts})
+            new_parts[part_index] = replace(part, content=output)
+            messages[message_index] = replace(message, parts=new_parts)
             return messages
     return messages
+
+
+async def _maybe_auto_compress(
+    history: ChatHistory,
+    *,
+    role: str,
+    task_state: str | None,
+    log_suffix: str = "",
+) -> None:
+    try:
+        if await maybe_auto_compress_async(
+            history,
+            role=role,
+            task_state=task_state,
+        ):
+            suffix = f"（{log_suffix}）" if log_suffix else ""
+            logger.info("已自动压缩 %s 上下文%s（达到配置阈值）", role.capitalize(), suffix)
+    except Exception as ce:
+        logger.warning("%s 自动压缩失败: %s", role.capitalize(), ce)
 
 
 class AgentSystem:
@@ -94,7 +111,6 @@ class AgentSystem:
         self._manager_history = ChatHistory()
         self._current_attachments: list = []
         self._memory = MemoryRuntime()
-        self._long_term_memory = self._memory.long_term
         self._short_term_memory = self._memory.short_term
         self._toolkit = BasicToolkit(
             self._skills_manager,
@@ -158,14 +174,6 @@ class AgentSystem:
         if not self.has_current_goal_turn:
             return 0
         return int(self._current_turn.get("goal_iteration") or 0)
-
-    @property
-    def queued_cli_input_count(self) -> int:
-        return self._cli_controller.queued_input_count
-
-    @property
-    def has_queued_cli_input(self) -> bool:
-        return self._cli_controller.has_queued_input
 
     def new_cli_session_state(self) -> CliSessionState:
         return self._cli_controller.new_session_state()
@@ -277,18 +285,8 @@ class AgentSystem:
         task.add_done_callback(self._on_turn_task_done)
         return task
 
-    async def _run_user_turn(self, turn_id: str, message: UserMessage, history: ChatHistory) -> None:
-        try:
-            await self.run_agent_system(
-                message,
-                history,
-                conversation_log_hint=(message.text or "")[:40],
-                conversation_log_extra={"turn_id": turn_id},
-                turn_id=turn_id,
-            )
-        except asyncio.CancelledError:
-            logger.info("用户回合已取消 turn_id=%s", turn_id)
-        except ModelHTTPError as e:
+    def _handle_turn_error(self, e: Exception) -> None:
+        if isinstance(e, ModelHTTPError):
             body = e.body or {}
             code = body.get("code", "") if isinstance(body, dict) else ""
             if code == "data_inspection_failed":
@@ -300,10 +298,24 @@ class AgentSystem:
                 print_warning(f"模型请求错误 (HTTP {e.status_code}): {e}")
                 logger.error("详细信息:\n%s", traceback.format_exc())
                 self._task_manager.reset()
+            return
+        print_warning(f"未预期的系统错误: {e}")
+        logger.error("详细信息:\n%s", traceback.format_exc())
+        self._task_manager.reset()
+
+    async def _run_user_turn(self, turn_id: str, message: UserMessage, history: ChatHistory) -> None:
+        try:
+            await self.run_agent_system(
+                message,
+                history,
+                conversation_log_hint=(message.text or "")[:40],
+                conversation_log_extra={"turn_id": turn_id},
+                turn_id=turn_id,
+            )
+        except asyncio.CancelledError:
+            logger.info("用户回合已取消 turn_id=%s", turn_id)
         except Exception as e:
-            print_warning(f"未预期的系统错误: {e}")
-            logger.error("详细信息:\n%s", traceback.format_exc())
-            self._task_manager.reset()
+            self._handle_turn_error(e)
 
     async def _run_goal_turn(
         self,
@@ -331,22 +343,8 @@ class AgentSystem:
             )
         except asyncio.CancelledError:
             logger.info("目标模式回合已取消 turn_id=%s", turn_id)
-        except ModelHTTPError as e:
-            body = e.body or {}
-            code = body.get("code", "") if isinstance(body, dict) else ""
-            if code == "data_inspection_failed":
-                print_warning(
-                    "模型内容安全审查拦截：您的输入或上下文中包含被判定为不当的内容。"
-                    "请尝试换一种表达方式，或 /clear 清空上下文后重试。"
-                )
-            else:
-                print_warning(f"模型请求错误 (HTTP {e.status_code}): {e}")
-                logger.error("详细信息:\n%s", traceback.format_exc())
-                self._task_manager.reset()
         except Exception as e:
-            print_warning(f"未预期的系统错误: {e}")
-            logger.error("详细信息:\n%s", traceback.format_exc())
-            self._task_manager.reset()
+            self._handle_turn_error(e)
 
     def _injection_for_session(self) -> str:
         return self._memory.injection_for_session()
@@ -357,9 +355,6 @@ class AgentSystem:
 
     def set_ask_user_handler(self, handler):
         self._toolkit.set_ask_user_handler(handler)
-
-    async def ask_user(self, question: str) -> str:
-        return await self._toolkit.ask_user(question)
 
     @property
     def review_store(self):
@@ -409,10 +404,6 @@ class AgentSystem:
 
     def structured_task_status(self) -> str:
         return self._task_manager.structured_status()
-
-    async def reset_cli_interactive_session(self, history: ChatHistory) -> None:
-        """Reset the current interactive CLI session."""
-        await self._cli_controller.reset_session(history)
 
     async def _after_coordinator_turn(self, history: ChatHistory) -> None:
         """Schedule memory consolidation after a Coordinator turn."""
@@ -506,11 +497,11 @@ class AgentSystem:
             self._manager_history.messages,
             extra={"kind": "manager", "phase": "planning", "turn_id": tid},
         )
-        try:
-            if await maybe_auto_compress_async(self._manager_history, role="manager"):
-                logger.info("已自动压缩 Manager 上下文（达到配置阈值）")
-        except Exception as ce:
-            logger.warning("Manager 自动压缩失败: %s", ce)
+        await _maybe_auto_compress(
+            self._manager_history,
+            role="manager",
+            task_state=self.structured_task_status(),
+        )
         show_model_output(result.output, title="Manager 规划")
 
         print_phase("第二阶段: 多Worker并行执行任务")
@@ -546,11 +537,12 @@ class AgentSystem:
                 self._manager_history.messages,
                 extra={"kind": "manager", "phase": "summary", "turn_id": tid},
             )
-            try:
-                if await maybe_auto_compress_async(self._manager_history, role="manager"):
-                    logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
-            except Exception as ce:
-                logger.warning("Manager 自动压缩失败: %s", ce)
+            await _maybe_auto_compress(
+                self._manager_history,
+                role="manager",
+                task_state=self.structured_task_status(),
+                log_suffix="summary 后",
+            )
             return final_text
         except Exception as e:
             logger.warning(f"流式输出回退到普通模式: {e}")
@@ -570,11 +562,12 @@ class AgentSystem:
                     self._manager_history.messages,
                     extra={"kind": "manager", "phase": "summary", "turn_id": tid},
                 )
-                try:
-                    if await maybe_auto_compress_async(self._manager_history, role="manager"):
-                        logger.info("已自动压缩 Manager 上下文（summary 后，达到配置阈值）")
-                except Exception as ce:
-                    logger.warning("Manager 自动压缩失败: %s", ce)
+                await _maybe_auto_compress(
+                    self._manager_history,
+                    role="manager",
+                    task_state=self.structured_task_status(),
+                    log_suffix="summary 后",
+                )
                 show_model_output(final_result.output, title="最终报告")
                 return final_result.output
             except Exception:
@@ -643,8 +636,6 @@ class AgentSystem:
         Returns:
             tuple[ChatHistory, str]: (更新后的对话历史, Agent 输出)
         """
-        if isinstance(message, str):
-            message = user_message_from_text(message)
         self._current_attachments = message.attachments
 
         prev_cli_turn = self._cli_turn_id
@@ -678,9 +669,6 @@ class AgentSystem:
             self._context_prewarmed = True
 
         await self._sync_skills_for_user_turn()
-
-        if history is None:
-            history = ChatHistory()
 
         self._session_logs.ensure(conversation_log_hint or message.text or "")
         logger.info_file_only("[用户]\n%s", format_user_log_text(message))
@@ -736,11 +724,11 @@ class AgentSystem:
         if conversation_log_extra:
             extra.update(conversation_log_extra)
         self._session_logs.for_agent("coordinator").save(history.messages, extra=extra)
-        try:
-            if await maybe_auto_compress_async(history, role="coordinator"):
-                logger.info("已自动压缩 Coordinator 上下文（达到配置阈值）")
-        except Exception as ce:
-            logger.warning("Coordinator 自动压缩失败: %s", ce)
+        await _maybe_auto_compress(
+            history,
+            role="coordinator",
+            task_state=self.structured_task_status(),
+        )
         await self._after_coordinator_turn(history)
         return history, output
 

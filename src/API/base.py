@@ -4,15 +4,19 @@ import re
 import time
 import asyncio
 import contextvars
+import mimetypes
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_SRC = os.path.join(_REPO_ROOT, "src")
+from paths import repo_root
+
+_REPO_ROOT = repo_root()
+_SRC = _REPO_ROOT / "src"
 _API_DIR = os.path.dirname(os.path.abspath(__file__))
-for _p in (_SRC, _API_DIR):
+for _p in (str(_SRC), _API_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 os.chdir(_REPO_ROOT)
@@ -21,9 +25,8 @@ from app_config import get_env, settings
 from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
-from ModelGateway.model_factory import close_shared_http_client
-from RAG.embedding_function import close_http_client as close_rag_http_client
-from tools.memory.ltm import close_http_client as close_ltm_http_client
+from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
+from shared_http import close_all_clients
 import logger
 import tool_telemetry
 
@@ -35,7 +38,7 @@ class QueuedTurn:
     loop: asyncio.AbstractEventLoop
 
 
-class BotBase:
+class BotBase(ABC):
     """所有平台机器人的公共基类。
 
     子类需实现：
@@ -48,12 +51,12 @@ class BotBase:
     SESSION_GC_INTERVAL_S = 300.0        # 空闲会话清扫间隔
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
     END_TASK_COMMANDS = frozenset({"结束任务", "/结束任务", "结束当前任务", "/结束当前任务"})
+    _MIME_MAP: dict[str, str] = {}
 
     # 子类可覆盖（从环境变量读取超时）
     _ENV_AGENT_TIMEOUT: str = ""
     _ENV_SEND_TIMEOUT: str = ""
     _ENV_SESSION_IDLE_TTL: str = ""
-    _ENV_THREAD_WORKERS: str = ""
 
     def __init__(self):
         self._sessions: dict[str, ChatHistory] = {}
@@ -84,12 +87,14 @@ class BotBase:
                 self.SESSION_IDLE_TTL_S = float(s)
 
     @property
+    @abstractmethod
     def platform_tag(self) -> str:
-        raise NotImplementedError
+        ...
 
     @property
+    @abstractmethod
     def session_prefix(self) -> str:
-        raise NotImplementedError
+        ...
 
     def _agent_for_session(self, session_id: str) -> AgentSystem:
         if session_id not in self._agent_systems:
@@ -315,6 +320,57 @@ class BotBase:
         except Exception as e:
             logger.warning(f"[{self.platform_tag}] 发送消息失败: {e}")
 
+    async def _inline_pdf_bytes(
+        self,
+        text: str,
+        data: bytes,
+        *,
+        media_type: str = "",
+        filename: str = "",
+    ) -> tuple[str, bool]:
+        if not data or not is_pdf_content(data, media_type=media_type, filename=filename):
+            return text, False
+        block = await asyncio.to_thread(pdf_attachment_text_block, data, filename=filename or None)
+        if block.startswith("（"):
+            logger.warning(f"[{self.platform_tag}] PDF 解析失败，未注入文本")
+        return (f"{text}\n\n{block}".strip() if text else block), True
+
+    def guess_download_mime(
+        self,
+        *,
+        filename: str = "",
+        media_type_key: str = "",
+    ) -> str:
+        if filename:
+            mime, _ = mimetypes.guess_type(filename)
+            if mime:
+                return mime
+        return self._MIME_MAP.get((media_type_key or "").lower(), "application/octet-stream")
+
+    async def _partition_pdf_attachments(
+        self,
+        user_text: str,
+        attachments: list,
+        *,
+        filename_attr: str = "",
+    ) -> tuple[str, list]:
+        """Inline PDF BinaryContent as text; keep other attachments unchanged."""
+        out: list = []
+        text = user_text
+        for att in attachments:
+            data = getattr(att, "data", b"") or b""
+            media_type = getattr(att, "media_type", "") or ""
+            filename = getattr(att, filename_attr, "") if filename_attr else ""
+            text, consumed = await self._inline_pdf_bytes(
+                text,
+                data,
+                media_type=media_type,
+                filename=filename or None,
+            )
+            if not consumed:
+                out.append(att)
+        return text, out
+
     async def _end_task_and_consume_queue(self, session_id: str, send_reply: Callable[..., Awaitable[Any]]) -> None:
         drained = self._drain_queue(session_id)
         await self._reset_session(session_id)
@@ -478,6 +534,20 @@ class BotBase:
         self._ensure_consumer(session_id)
         self._ensure_session_gc()
 
+    async def dispatch_user_message(
+        self,
+        session_id: str,
+        message: UserMessage,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> None:
+        await self.dispatch_message(
+            session_id,
+            message.text,
+            message.attachments,
+            send_reply,
+            asyncio.get_running_loop(),
+        )
+
     async def release_all_resources_async(self) -> None:
         if self._released:
             return
@@ -515,9 +585,7 @@ class BotBase:
         self._consumer_tasks.clear()
         self._session_queues.clear()
         self._session_generation.clear()
-        await close_shared_http_client()
-        await close_rag_http_client()
-        await close_ltm_http_client()
+        await close_all_clients()
         logger.info(f"[{self.platform_tag}] 已释放全部会话与 Agent 资源（共 {n} 个 Agent 实例）")
 
     def release_all_resources(self) -> None:

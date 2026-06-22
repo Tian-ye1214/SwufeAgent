@@ -46,6 +46,6 @@ FAILED: akshare returned empty DataFrame for 600519.SH on 2026-05-04
 
 ## Reminders
 
-- **Workspace**: Unless the user explicitly asks otherwise, keep all file I/O, directory ops, and **`execute_file`** inside the **`WorkDatabase` tree** (relative paths from the current task directory). Do not edit or write outputs under `src/`, repo root, or other paths outside that sandbox.
+- **Workspace**: Unless the user explicitly asks otherwise, keep file I/O, directory ops, and **`run_command`** inside the **`WorkDatabase` tree** (relative paths from the current task directory). Do not edit or write outputs under `src/`, repo root, or other paths outside that sandbox.
 - Ask when uncertain: use `ask_user` for unclear or ambiguous requirements.
 - Read relevant context before acting; deliver complete solutions, not partial ones.

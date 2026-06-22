@@ -360,10 +360,7 @@ def extract_text(name: str) -> str:
         else:
             return f"Error: Unsupported file type '{ext}'"
 
-        if content is None:
-            return f"Error: Could not extract content from '{name}'"
-        if isinstance(content, str):
-            content = _clean_extracted_text(content)
+        content = _clean_extracted_text(content)
         return content if content else "File is empty"
     except ValueError as e:
         return f"Security error: {e}"

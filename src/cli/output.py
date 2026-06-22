@@ -97,10 +97,6 @@ def set_output_sink(sink: OutputSink | None) -> None:
     _sink = sink if sink is not None else LegacyOutputSink(_console)
 
 
-def current_output_sink() -> OutputSink:
-    return _sink
-
-
 def supports_model_stream() -> bool:
     value = getattr(_sink, "supports_model_stream", False)
     if callable(value):

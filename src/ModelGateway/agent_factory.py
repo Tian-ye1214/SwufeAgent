@@ -111,12 +111,10 @@ def create_worker_toolsets_and_capabilities(
 def create_agent(
     model_name: Any,
     parameter: dict | None,
-    tools: list | None = None,
     instructions: str | None = None,
     *,
     toolsets: list | None = None,
     capabilities: list | None = None,
-    system_prompt: str | None = None,
 ):
     if parameter is None:
         parameter = {
@@ -127,16 +125,10 @@ def create_agent(
         }
 
     model = create_model(model_name, parameter) if isinstance(model_name, str) else model_name
-    if instructions is None:
-        instructions = system_prompt or ""
-
-    agent_toolsets = list(toolsets) if toolsets is not None else None
-    if agent_toolsets is None and tools:
-        agent_toolsets = [create_function_toolset(list(tools), toolset_id="default")]
 
     return Agent(
         model,
-        toolsets=agent_toolsets,
+        toolsets=list(toolsets) if toolsets is not None else None,
         capabilities=capabilities,
-        instructions=instructions,
+        instructions=instructions or "",
     )

@@ -95,10 +95,6 @@ def _parse_file_refs(text: str) -> list[_ParsedFileRef]:
     return refs
 
 
-def extract_file_refs(text: str) -> list[str]:
-    return [ref.path for ref in _parse_file_refs(text)]
-
-
 def _resolve_ref_path(ref: str) -> Path:
     p = Path(ref).expanduser()
     if p.is_absolute():

@@ -120,10 +120,6 @@ class TextEventStreamHandler:
         self._chunks: list[str] = []
         self._started = False
 
-    @property
-    def text(self) -> str:
-        return "".join(self._chunks)
-
     async def __call__(self, _run_ctx: Any, event_stream: Any) -> None:
         try:
             async for event in event_stream:

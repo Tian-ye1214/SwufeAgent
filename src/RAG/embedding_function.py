@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any
 
 import httpx
 import logger
+from app_config import get_env, settings
+from shared_http import close_client, get_client
 
-try:
-    from app_config import get_env, settings
-except ModuleNotFoundError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from app_config import get_env, settings
+_HTTP_KEY = "rag"
 
 def _require_rag_model(role: str) -> str:
     m = settings().get("RAG_models")
@@ -33,26 +29,14 @@ def _client_kwargs(timeout: float) -> dict[str, Any]:
     }
 
 
-_shared_client: httpx.AsyncClient | None = None
-
-
 def _get_shared_client() -> httpx.AsyncClient:
     """进程级共享 embedding/rerank 客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
-    global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.AsyncClient(**_client_kwargs(60.0))
-    return _shared_client
+    return get_client(_HTTP_KEY, lambda: httpx.AsyncClient(**_client_kwargs(60.0)))
 
 
 async def close_http_client() -> None:
     """进程退出时关闭共享客户端（仅在真正退出时调用，勿在单会话 shutdown 调用——会误伤并发会话）。"""
-    global _shared_client
-    client, _shared_client = _shared_client, None
-    if client is not None and not client.is_closed:
-        try:
-            await client.aclose()
-        except Exception as e:
-            logger.debug("关闭 RAG HTTP 客户端时忽略异常: %s", e)
+    await close_client(_HTTP_KEY)
 
 
 async def embed_texts(
@@ -135,16 +119,3 @@ async def rerank_documents(
             }
         )
     return out
-
-if __name__ == "__main__":
-    async def _demo() -> None:
-        text = "Silicon flow embedding online: fast, affordable, and high-quality embedding services. come try it out!"
-        embedding = await embed_texts(text)
-        print(embedding)
-
-        query = "Apple"
-        documents = ["apple", "banana", "fruit", "vegetable"]
-        result = await rerank_documents(query, documents)
-        print(result)
-
-    asyncio.run(_demo())
