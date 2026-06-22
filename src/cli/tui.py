@@ -24,7 +24,9 @@ from cli.completion import (
     iter_command_completions,
 )
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
+from cli.panel import PanelSnapshotCache, build_panel_snapshot, render_panel
 from cli.pending_review import compute_hunks
+import logger
 
 READY_LABEL = "就绪"
 WORKING_LABEL = "工作中"
@@ -141,6 +143,7 @@ class RedLotusTui(App[None]):
     Screen { layout: vertical; }
     #output { height: 1fr; border: round $accent; }
     #review-view { display: none; height: 1fr; border: round $warning; padding: 0 1; }
+    #panel-view { display: none; height: 1fr; border: round $success; padding: 0 1; }
     .hunk-view { height: auto; padding: 0 0 1 0; }
     .hunk-view.-current { background: $boost; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
@@ -159,7 +162,7 @@ class RedLotusTui(App[None]):
         Binding("n", "review_undo", "撤销", show=False),
         Binding("up", "review_prev", "上一处", show=False),
         Binding("down", "review_next", "下一处", show=False),
-        Binding("escape", "review_exit", "退出审查", show=False),
+        Binding("escape", "escape", "退出面板/审查", show=False),
     ]
 
     def __init__(self, system: Any, stop_event: asyncio.Event | None = None) -> None:
@@ -184,11 +187,17 @@ class RedLotusTui(App[None]):
         self._rv_snapshots: dict[str, str] = {}
         self._rv_decided: dict[str, set[int]] = {}
         self._rv_rejected: dict[str, set[int]] = {}
+        self._panel_mode = False
+        self._panel_include_all = False
+        self._panel_cache = PanelSnapshotCache()
+        self._panel_timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RichLog(id="output", wrap=True, markup=False, highlight=False)
             yield VerticalScroll(id="review-view")
+            with VerticalScroll(id="panel-view"):
+                yield Static("", id="panel-content")
             yield Static("", id="context-usage")
             yield Static("", id="stream-preview")
             yield Static(READY_LABEL, id="status")
@@ -390,6 +399,62 @@ class RedLotusTui(App[None]):
         self.query_one("#input", AgentInput).focus()
         self.refresh_status()
 
+    async def open_panel(self, *, include_all: bool = False) -> None:
+        if self._review_mode:
+            self._exit_review()
+        self._panel_mode = True
+        self._panel_include_all = include_all
+        self.query_one("#output", RichLog).display = False
+        panel_view = self.query_one("#panel-view", VerticalScroll)
+        panel_view.border_title = "工作区总览 · 每 3 秒刷新 · Esc 退出"
+        panel_view.display = True
+        await self._refresh_panel()
+        self._ensure_panel_timer()
+        self.query_one("#input", AgentInput).focus()
+        self.refresh_status()
+
+    async def _refresh_panel(self) -> None:
+        if not self._panel_mode:
+            return
+        snapshot = await build_panel_snapshot(
+            log_root=logger.LOG_DIR,
+            system=self.system,
+            coordinator_history=self.state.history,
+            manager_history=getattr(self.system, "_manager_history", None),
+            include_all=self._panel_include_all,
+            cache=self._panel_cache,
+        )
+        self.query_one("#panel-content", Static).update(render_panel(snapshot))
+
+    def _ensure_panel_timer(self) -> None:
+        if self._panel_timer is not None:
+            return
+
+        def _tick() -> None:
+            if self._panel_mode:
+                asyncio.create_task(self._refresh_panel())
+
+        self._panel_timer = self.set_interval(3.0, _tick)
+
+    def _stop_panel_timer(self) -> None:
+        timer = self._panel_timer
+        self._panel_timer = None
+        if timer is None:
+            return
+        stop = getattr(timer, "stop", None)
+        if callable(stop):
+            stop()
+
+    def _exit_panel(self) -> None:
+        if not self._panel_mode:
+            return
+        self._panel_mode = False
+        self._stop_panel_timer()
+        self.query_one("#panel-view", VerticalScroll).display = False
+        self.query_one("#output", RichLog).display = True
+        self.query_one("#input", AgentInput).focus()
+        self.refresh_status()
+
     def action_review_keep(self) -> None:
         if self._review_mode:
             self._decide_current(False)
@@ -411,14 +476,17 @@ class RedLotusTui(App[None]):
             self._highlight_current()
             self.refresh_status()
 
-    def action_review_exit(self) -> None:
+    def action_escape(self) -> None:
+        if self._panel_mode:
+            self._exit_panel()
+            return
         if self._review_mode:
             self._exit_review()
 
     def action_toggle_mode(self) -> None:
         """Shift+Tab：审查模式 -> 放行模式 -> 目标模式 -> 审查模式。"""
-        if self._review_mode:
-            return  # 审查浮层中不切换全局模式
+        if self._review_mode or self._panel_mode:
+            return  # 浮层中不切换全局模式
         if self.system.has_current_goal_turn:
             return
         self._run_mode = self._run_mode.next()
@@ -484,6 +552,8 @@ class RedLotusTui(App[None]):
         return Text(" ◎ 目标模式 ", style="bold black on yellow")
 
     def _status_text(self) -> Any:
+        if self._panel_mode:
+            return Text("Panel 总览    ·    每 3 秒刷新    ·    Esc 退出", style="bold")
         if self._review_mode:
             return Text("审查改动中    ·    y 保留    ·    n 撤销    ·    ↑↓ 切换    ·    Esc 退出", style="bold")
         if not self._is_working():
@@ -627,6 +697,13 @@ class RedLotusTui(App[None]):
             self._write_user_reply(value)
             self._ask_future.set_result(value)
             return
+        parts = value.split()
+        if parts and parts[0].lower() == "/panel":
+            include_all = any(part.lower() == "--all" for part in parts[1:])
+            await self.open_panel(include_all=include_all)
+            return
+        if self._panel_mode:
+            self._exit_panel()
         if value.lower() == "/api":
             from cli.render import print_warning
             print_warning("TUI does not support interactive /api changes; use the legacy CLI or config file.")
@@ -677,6 +754,7 @@ async def run_textual_tui(system: Any, *, stop_event: asyncio.Event | None = Non
     try:
         await app.run_async()
     finally:
+        app._stop_panel_timer()
         app._cancel_pending_ask()
         set_output_sink(None)
         system.set_ask_user_handler(None)

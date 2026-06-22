@@ -41,7 +41,7 @@ class AgentCliController:
     """CLI/TUI orchestration for AgentSystem."""
 
     EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "退出"}
-    BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/context", "/usage", "/skills"}
+    BUSY_SAFE_COMMANDS = {"/stop", "/status", "/cancel", "/help", "/trace", "/tasks", "/pwd", "/config", "/context", "/usage", "/panel", "/skills"}
 
     def __init__(self, system: "AgentSystem") -> None:
         self.system = system

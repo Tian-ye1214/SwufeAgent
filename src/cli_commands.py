@@ -33,6 +33,7 @@ from skills.SkillsManager import SkillsManager
 from tools.memory import ChatHistory
 from tools.conversation_log import drain_pending_saves, read_saved_model_messages_file
 from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
+from cli.panel import build_panel_snapshot, render_panel
 import logger
 
 
@@ -92,6 +93,7 @@ def print_cli_help() -> None:
 | `/cd <path>` | 切换工作目录 |
 | `/config` | 查看配置摘要 |
 | `/context` | 查看上下文 token 用量分解 |
+| `/panel` | 查看当前工作区运行与历史总览 |
 | `/skills` | 查看已加载 Skills |
 | `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
 | `/api` | 修改 BASE_URL 与 API_KEY |
@@ -436,6 +438,20 @@ async def _cmd_usage(ctx: SlashCommandContext) -> bool | None:
     return None
 
 
+async def _cmd_panel(ctx: SlashCommandContext) -> bool | None:
+    await drain_pending_saves()
+    include_all = any(part.strip().lower() == "--all" for part in ctx.parts[1:])
+    snapshot = await build_panel_snapshot(
+        log_root=logger.LOG_DIR,
+        system=ctx.system,
+        coordinator_history=ctx.coordinator_history,
+        manager_history=ctx.manager_history,
+        include_all=include_all,
+    )
+    console.print(render_panel(snapshot))
+    return None
+
+
 async def _cmd_pwd(ctx: SlashCommandContext) -> bool | None:
     print_success(str(Path.cwd()))
     return None
@@ -637,6 +653,7 @@ SLASH_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "/config": _cmd_config,
     "/context": _cmd_context,
     "/usage": _cmd_usage,
+    "/panel": _cmd_panel,
     "/pwd": _cmd_pwd,
     "/cd": _cmd_cd,
     "/status": _cmd_status,

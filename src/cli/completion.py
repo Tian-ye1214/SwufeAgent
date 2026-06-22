@@ -15,6 +15,7 @@ COMMANDS: tuple[str, ...] = (
     "/status",
     "/config",
     "/usage",
+    "/panel",
     "/pwd",
     "/cd",
     "/skills",

@@ -17,4 +17,4 @@ data/
 .cursor/
 .claude/
 .codegraph/
-tests
+tests/*
