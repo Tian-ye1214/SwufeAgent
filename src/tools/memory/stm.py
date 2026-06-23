@@ -463,7 +463,10 @@ class ShortTermMemory:
             return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
         async with self._lock:
             if self._reconcile_on_query:
-                await self._reconcile_from_logs(flush=False)
+                try:
+                    await self._reconcile_from_logs(flush=False)
+                except Exception as e:
+                    logger.warning("STM on-query reconcile 失败，降级为直接检索: %s", e)
             rag = self._get_rag()
             await rag.connect()
             hits = await rag.retrieve(q)

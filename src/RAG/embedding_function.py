@@ -49,24 +49,29 @@ async def _rag_api_post(endpoint: str, body: dict[str, Any], *, timeout: float) 
     return response.json()
 
 
+_EMBED_MAX_BATCH = 32
+
+
 async def embed_texts(
     texts: str | list[str],
     *,
     timeout: float = 60.0,
 ) -> list[list[float]]:
-    """异步获取文本向量；支持单条字符串或多条批量。"""
+    """异步获取文本向量；支持单条字符串或多条批量，超过上限自动分批请求。"""
     if isinstance(texts, str):
-       texts = [texts]
+        texts = [texts]
     logger.debug("RAG embed: batch_size=%d", len(texts))
     model = _require_rag_model("embedding")
-    body = {"model": model, "input": texts}
-    data = await _rag_api_post("/embeddings", body, timeout=timeout)
-
-    items = data.get("data") or []
-    n = len(items)
-    if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
-        items = sorted(items, key=lambda x: x.get("index", 0))
-    return [row["embedding"] for row in items]
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_MAX_BATCH):
+        body = {"model": model, "input": texts[start:start + _EMBED_MAX_BATCH]}
+        data = await _rag_api_post("/embeddings", body, timeout=timeout)
+        items = data.get("data") or []
+        n = len(items)
+        if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
+            items = sorted(items, key=lambda x: x.get("index", 0))
+        vectors.extend(row["embedding"] for row in items)
+    return vectors
 
 
 async def rerank_documents(
