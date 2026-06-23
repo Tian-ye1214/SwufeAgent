@@ -16,6 +16,8 @@ COMMANDS: tuple[str, ...] = (
     "/config",
     "/usage",
     "/panel",
+    "/LTM",
+    "/STM",
     "/pwd",
     "/cd",
     "/skills",
@@ -69,8 +71,9 @@ def completion_for_input(text: str) -> InputCompletion | None:
 
 def iter_command_completions(prefix: str):
     """Yield command strings matching *prefix*."""
+    folded = prefix.lower()
     for cmd in COMMANDS:
-        if cmd.startswith(prefix):
+        if cmd.lower().startswith(folded):
             yield cmd
 
 

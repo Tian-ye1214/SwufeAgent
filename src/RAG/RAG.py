@@ -53,6 +53,12 @@ class RAG:
     async def close(self) -> None:
         await self._db.close()
 
+    async def row_count(self) -> int:
+        return await self._db.row_count()
+
+    async def clear_table(self) -> None:
+        await self._db.drop_table()
+
     def format_instruction(
         self,
         instruction: str | None,

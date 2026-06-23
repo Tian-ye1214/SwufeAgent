@@ -38,6 +38,19 @@ class MemoryRuntime:
     def reset_injection_snapshot(self) -> None:
         self._injection_snapshot = None
 
+    async def long_term_snapshot(self) -> dict[str, dict[str, Any]]:
+        return await self.long_term.snapshot()
+
+    async def short_term_snapshot(self) -> dict[str, Any]:
+        return await self.short_term.snapshot()
+
+    async def clear_long_term(self) -> None:
+        await self.long_term.clear_all()
+        self.reset_injection_snapshot()
+
+    async def clear_short_term(self) -> None:
+        await self.short_term.clear_index_state()
+
     def schedule_after_coordinator_turn(
         self,
         history: ChatHistory,

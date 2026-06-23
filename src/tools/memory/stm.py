@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 from contextlib import nullcontext
 from pathlib import Path
@@ -12,7 +13,7 @@ from app_config import get_env
 from persist_utils import iso_utc_now, load_json_state, rel_key, save_locked_json
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
-from tools.memory.message_text import turn_texts_from_messages
+from tools.memory.message_text import TurnMemoryEntry, turn_entries_from_messages
 
 
 def _stm_rag_from_config(cfg: dict[str, Any]) -> Any:
@@ -48,7 +49,7 @@ class _AsyncThreadLock:
 
 
 class ShortTermMemory:
-    """短期记忆：每轮 user→agent（含工具）单向量；回合结束后后台线程异步入库，供 Worker 检索。"""
+    """Short-term memory for complete user turns, split into chunk rows when needed."""
 
     def __init__(
         self,
@@ -63,7 +64,9 @@ class ShortTermMemory:
         self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._reconcile_on_query = bool(self._cfg["reconcile_on_query"])
-        self._embed_batch = max(1, int(self._cfg.get("embed_batch_turns", 64)))
+        self._turn_token_limit = max(1, int(self._cfg.get("turn_token_limit", 8192)))
+        overlap = max(0, int(self._cfg.get("turn_chunk_overlap_tokens", 512)))
+        self._turn_chunk_overlap = min(overlap, max(0, self._turn_token_limit - 1))
 
     def _get_rag(self) -> Any:
         if self._rag is None:
@@ -123,10 +126,69 @@ class ShortTermMemory:
         with p.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def _snap_chunk_boundary(self, text: str, pos: int) -> int:
+        if pos <= 0 or pos >= len(text):
+            return max(0, min(len(text), pos))
+        radius = max(20, min(240, len(text) // 80))
+        lo = max(1, pos - radius)
+        hi = min(len(text) - 1, pos + radius)
+        for sep in ("\n\n", "\n", " "):
+            best = -1
+            best_dist = radius + 1
+            idx = text.find(sep, lo, hi)
+            while idx != -1:
+                boundary = idx + len(sep)
+                dist = abs(boundary - pos)
+                if dist < best_dist:
+                    best = boundary
+                    best_dist = dist
+                idx = text.find(sep, idx + 1, hi)
+            if best != -1:
+                return best
+        return pos
+
+    def _split_turn_text(self, text: str, token_reference: int) -> list[str]:
+        text = text.strip()
+        if not text:
+            return []
+        ref = max(0, int(token_reference or 0))
+        limit = self._turn_token_limit
+        overlap = self._turn_chunk_overlap
+        if ref <= limit or ref <= 0:
+            return [text]
+
+        stride = max(1, limit - overlap)
+        chunk_count = max(1, math.ceil((ref - overlap) / stride))
+        if chunk_count <= 1:
+            return [text]
+
+        side_overlap = overlap / 2
+        text_len = len(text)
+
+        def token_to_char(token_pos: float) -> int:
+            return max(0, min(text_len, round((token_pos / ref) * text_len)))
+
+        chunks: list[str] = []
+        for chunk_index in range(chunk_count):
+            core_start = (ref * chunk_index) / chunk_count
+            core_end = (ref * (chunk_index + 1)) / chunk_count
+            start_token = 0 if chunk_index == 0 else max(0, core_start - side_overlap)
+            end_token = ref if chunk_index == chunk_count - 1 else min(ref, core_end + side_overlap)
+            raw_start = token_to_char(start_token)
+            raw_end = token_to_char(end_token)
+            start = self._snap_chunk_boundary(text, raw_start)
+            end = self._snap_chunk_boundary(text, raw_end)
+            if start >= end:
+                start, end = raw_start, raw_end
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+        return chunks or [text]
+
     def _collect_pending_turn_rows(
         self,
         log_key: str,
-        turn_texts: list[str],
+        turn_entries: list[TurnMemoryEntry],
         turns_done: int,
         agent: str,
         session_key: str,
@@ -135,48 +197,44 @@ class ShortTermMemory:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         now = iso_utc_now()
-        stop = len(turn_texts) if end is None else end
+        stop = len(turn_entries) if end is None else end
         for i in range(turns_done, stop):
-            text = turn_texts[i].strip()
-            if not text:
-                continue
-            source = f"{log_key}#t{i}"
-            rows.append(
-                {
-                    "id": source,
-                    "source": source,
-                    "text": text,
-                    "agent": agent,
-                    "session_key": session_key,
-                    "created_at": now,
-                }
-            )
+            entry = turn_entries[i]
+            chunks = self._split_turn_text(entry.text, entry.token_reference)
+            for chunk_index, chunk in enumerate(chunks):
+                source = (
+                    f"{log_key}#t{i}"
+                    if len(chunks) == 1
+                    else f"{log_key}#t{i}#c{chunk_index}"
+                )
+                rows.append(
+                    {
+                        "id": source,
+                        "source": source,
+                        "text": chunk,
+                        "agent": agent,
+                        "session_key": session_key,
+                        "created_at": now,
+                    }
+                )
         return rows
 
-    async def _ingest_in_batches(
+    async def _ingest_pending_turns(
         self,
         log_key: str,
-        turn_texts: list[str],
+        turn_entries: list[TurnMemoryEntry],
         turns_done: int,
         agent: str,
         session_key: str,
         rag: Any,
-        *,
-        flush: bool,
     ) -> None:
-        """按 embed_batch 切窗入库：每批至多 batch 轮，逐批推进并持久化游标。
-
-        非 flush 时只处理完整批，剩余尾批（< batch）延后；flush 时连尾批一并入库。
-        每批落盘游标，因此已嵌入的轮永不重嵌，中途崩溃也不丢已完成批。
-        """
-        total = len(turn_texts)
-        batch = self._embed_batch
-        end = total if flush else turns_done + ((total - turns_done) // batch) * batch
+        """Ingest pending complete user turns and advance the cursor per turn."""
+        end = len(turn_entries)
         a = turns_done
         while a < end:
-            b = min(a + batch, end)
+            b = a + 1
             rows = self._collect_pending_turn_rows(
-                log_key, turn_texts, a, agent, session_key, end=b
+                log_key, turn_entries, a, agent, session_key, end=b
             )
             if rows:
                 try:
@@ -207,25 +265,24 @@ class ShortTermMemory:
         agent: str,
         session_key: str,
     ) -> None:
-        """回合结束后异步入库自上次 turns_done 起的新轮（仅完整批，尾批延后）。"""
+        """Ingest complete user turns saved since the last STM cursor."""
         if not log_key or not messages:
             return
         with self._ingest_log_context():
             async with self._lock:
-                turn_texts = turn_texts_from_messages(messages)
+                turn_entries = turn_entries_from_messages(messages)
                 state = await asyncio.to_thread(self._load_stm_state_sync)
                 sources = state.setdefault("sources", {})
                 done = self._turns_done_for_key(sources, log_key)
-                if len(turn_texts) < done:
+                if len(turn_entries) < done:
                     done = 0
-                # 不足一个完整批：延后（不建 RAG，避免每轮连/关抖动）。
-                if len(turn_texts) - done < self._embed_batch:
+                if len(turn_entries) <= done:
                     return
                 rag = _stm_rag_from_config(self._cfg)
                 try:
                     await rag.connect()
-                    await self._ingest_in_batches(
-                        log_key, turn_texts, done, agent, session_key, rag, flush=False
+                    await self._ingest_pending_turns(
+                        log_key, turn_entries, done, agent, session_key, rag
                     )
                 finally:
                     await rag.close()
@@ -266,34 +323,84 @@ class ShortTermMemory:
         task.add_done_callback(self._pending_tasks.discard)
 
     async def drain(self, *, timeout: float = 60.0) -> None:
+        ok = await self.wait_idle(timeout=timeout)
+        if not ok:
+            logger.warning("STM ingest task 未在 %.0fs 内结束，继续 shutdown", timeout)
+
+    async def wait_idle(self, *, timeout: float = 60.0) -> bool:
         tasks = [t for t in self._pending_tasks if not t.done()]
         if not tasks:
-            return
+            return True
         try:
             await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=True),
                 timeout=timeout,
             )
+            return True
         except asyncio.TimeoutError:
-            logger.warning("STM ingest task 未在 %.0fs 内结束，继续 shutdown", timeout)
+            return False
 
     async def close(self) -> None:
         if self._rag is not None:
             await self._rag.close()
+
+    async def snapshot(self) -> dict[str, Any]:
+        rag = self._get_rag()
+        await rag.connect()
+        row_count = await rag.row_count()
+        rag_db = getattr(getattr(rag, "_db", None), "db_path", None)
+        db_path = Path(str(getattr(rag, "db_path", rag_db or self._db_dir())))
+        state_path = self._stm_state_path()
+        failures_path = self._failures_path()
+        return {
+            "db_path": db_path,
+            "table_name": str(self._cfg["table_name"]),
+            "row_count": row_count,
+            "state_path": state_path,
+            "state_exists": state_path.exists(),
+            "failures_path": failures_path,
+            "failures_exists": failures_path.exists(),
+            "use_rerank": bool(self._cfg["use_rerank"]),
+            "reconcile_on_query": bool(self._cfg["reconcile_on_query"]),
+        }
+
+    async def clear_index_state(self) -> None:
+        async with self._lock:
+            state = await asyncio.to_thread(self._current_log_sources_state_sync)
+            rag = self._get_rag()
+            try:
+                await rag.connect()
+                await rag.clear_table()
+            finally:
+                await rag.close()
+                self._rag = None
+            await asyncio.to_thread(self._save_stm_state_sync, state)
+
+    def _current_log_sources_state_sync(self) -> dict[str, Any]:
+        root = self._log_root_resolved()
+        sources: dict[str, Any] = {}
+        conv = root / "conversations"
+        if conv.is_dir():
+            for fp in sorted(conv.rglob("messages_*.model_messages.json"), key=str):
+                messages, _ = read_saved_model_messages_file(fp)
+                sources[self._rel_log_key(fp, root)] = {
+                    "turns_done": len(turn_entries_from_messages(messages))
+                }
+        return {"version": 2, "sources": sources}
 
     def _sync_reconcile_file(
         self,
         fp: Path,
         root: Path,
         state: dict[str, Any],
-    ) -> tuple[list[str], str, int, str, str]:
-        """从单个日志文件解析出入库所需上下文（不构造 rows，留给批量入库逐窗构造）。"""
+    ) -> tuple[list[TurnMemoryEntry], str, int, str, str]:
+        """Read one saved model_messages log and return STM cursor context."""
         sources = state.setdefault("sources", {})
         log_key = self._rel_log_key(fp, root)
         messages, meta = read_saved_model_messages_file(fp)
-        turn_texts = turn_texts_from_messages(messages)
+        turn_entries = turn_entries_from_messages(messages)
         done = self._turns_done_for_key(sources, log_key)
-        if len(turn_texts) < done:
+        if len(turn_entries) < done:
             done = 0
         agent = str(meta.get("agent", "") or "")
         if not agent and "conversations/" in log_key:
@@ -303,7 +410,7 @@ class ShortTermMemory:
         date = str(meta.get("date", "") or "")
         topic = str(meta.get("topic", "") or "")
         session_key = f"{date}/{topic}" if date and topic else ""
-        return turn_texts, log_key, done, agent, session_key
+        return turn_entries, log_key, done, agent, session_key
 
     async def _reconcile_from_logs(self, *, flush: bool = False) -> None:
         root = self._log_root_resolved()
@@ -317,20 +424,17 @@ class ShortTermMemory:
         rag: Any | None = None
         for fp in files:
             state = await asyncio.to_thread(self._load_stm_state_sync)
-            turn_texts, log_key, done, agent, session_key = await asyncio.to_thread(
+            turn_entries, log_key, done, agent, session_key = await asyncio.to_thread(
                 self._sync_reconcile_file, fp, root, state
             )
-            pending = len(turn_texts) - done
+            pending = len(turn_entries) - done
             if pending <= 0:
-                continue
-            # 非 flush 且不足一个完整批：延后尾批。
-            if not flush and pending < self._embed_batch:
                 continue
             if rag is None:
                 rag = self._get_rag()
                 await rag.connect()
-            await self._ingest_in_batches(
-                log_key, turn_texts, done, agent, session_key, rag, flush=flush
+            await self._ingest_pending_turns(
+                log_key, turn_entries, done, agent, session_key, rag
             )
 
     async def _flush_inner(self) -> None:
@@ -338,11 +442,11 @@ class ShortTermMemory:
             await self._reconcile_from_logs(flush=True)
 
     async def flush(self, *, timeout: float = 30.0) -> None:
-        """关闭前尽力收尾：把所有未入库的轮（含不足一批的尾批）批量嵌入并落盘游标。"""
+        """Best-effort shutdown flush for saved complete user turns."""
         try:
             await asyncio.wait_for(self._flush_inner(), timeout)
         except asyncio.TimeoutError:
-            logger.warning("STM flush 未在 %.0fs 内完成，跳过剩余尾批", timeout)
+            logger.warning("STM flush 未在 %.0fs 内完成，跳过剩余 user turn", timeout)
         except Exception as e:
             logger.warning("STM flush 失败: %s", e)
 

@@ -164,6 +164,29 @@ class LongTermMemory:
             parts.append(f"## User Preferences\n\n{u}")
         return "\n\n".join(parts)
 
+    async def snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return the current user-visible long-term memory bodies."""
+        await asyncio.to_thread(self._load_sync)
+        out: dict[str, dict[str, Any]] = {}
+        for key, filename in self._TARGETS.items():
+            body = (self._get_body(key) or "").strip()
+            out[key] = {
+                "path": self._MEMORY_DIR / filename,
+                "body": body,
+                "chars": len(body),
+                "empty": not bool(body),
+            }
+        return out
+
+    async def clear_all(self) -> None:
+        """Clear SOUL/USER bodies while keeping valid empty Markdown files."""
+        async with type(self)._GLOBAL_WRITE_LOCK:
+            await asyncio.to_thread(self._load_sync)
+            self._set_body("soul", "")
+            self._set_body("user", "")
+            await asyncio.to_thread(self._save_sync, "soul")
+            await asyncio.to_thread(self._save_sync, "user")
+
     def _load_consolidation_template_sync(self) -> str:
         path = self._MEMORY_DIR / self._CONSOLIDATION_TEMPLATE_FILE
         if not path.is_file():

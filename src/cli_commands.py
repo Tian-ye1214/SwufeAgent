@@ -103,6 +103,8 @@ def print_cli_help() -> None:
 | `/context` | 查看上下文 token 用量分解 |
 | `/panel` | 查看当前工作区运行与历史总览 |
 | `/skills` | 查看已加载 Skills |
+| `/LTM show` / `/LTM clear` | 查看或清空长期记忆 |
+| `/STM show` / `/STM clear` | 查看或清空短期 RAG 记忆 |
 | `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
 | `/api` | 修改 BASE_URL 与 API_KEY |
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
@@ -423,6 +425,57 @@ class SlashCommandContext:
     system: Any
 
 
+def _format_ltm_snapshot(snapshot: dict[str, dict[str, Any]]) -> str:
+    lines = ["## Long-term memory (LTM)"]
+    for key, label in (("soul", "SOUL"), ("user", "USER")):
+        item = snapshot.get(key, {})
+        body = str(item.get("body") or "").strip()
+        lines.extend(
+            [
+                "",
+                f"### {label}",
+                f"- path: `{item.get('path', 'unknown')}`",
+                f"- chars: {item.get('chars', 0)}",
+                f"- empty: {item.get('empty', True)}",
+                "",
+                body if body else "(empty)",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _format_stm_snapshot(snapshot: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "## Short-term memory (STM/RAG)",
+            "",
+            f"- db_path: `{snapshot.get('db_path', 'unknown')}`",
+            f"- table_name: `{snapshot.get('table_name', 'unknown')}`",
+            f"- row_count: {snapshot.get('row_count', 'unknown')}",
+            f"- state_path: `{snapshot.get('state_path', 'unknown')}`",
+            f"- state_exists: {snapshot.get('state_exists', False)}",
+            f"- failures_path: `{snapshot.get('failures_path', 'unknown')}`",
+            f"- failures_exists: {snapshot.get('failures_exists', False)}",
+            f"- use_rerank: {snapshot.get('use_rerank', False)}",
+            f"- reconcile_on_query: {snapshot.get('reconcile_on_query', False)}",
+        ]
+    )
+
+
+async def _confirm_memory_clear(ctx: SlashCommandContext, phrase: str, target: str) -> bool:
+    answer = await ctx.system.ask_user(
+        f"Type {phrase} to clear {target}. This cannot be undone."
+    )
+    return answer.strip() == phrase
+
+
+async def _wait_memory_quiescent(ctx: SlashCommandContext) -> bool:
+    ok = await ctx.system.wait_for_memory_quiescent(timeout=15.0)
+    if not ok:
+        print_error("Memory is still busy; clear was cancelled.")
+    return ok
+
+
 async def _cmd_help(ctx: SlashCommandContext) -> bool | None:
     print_cli_help()
     return None
@@ -541,6 +594,56 @@ async def _cmd_cancel(ctx: SlashCommandContext) -> bool | None:
 
 async def _cmd_skills(ctx: SlashCommandContext) -> bool | None:
     print_loaded_skills(ctx.skills_manager)
+    return None
+
+
+async def _cmd_ltm(ctx: SlashCommandContext) -> bool | None:
+    action = ctx.parts[1].lower() if len(ctx.parts) > 1 else "show"
+    if action == "show":
+        snapshot = await ctx.system.long_term_memory_snapshot()
+        print_markdown_panel(_format_ltm_snapshot(snapshot), title="LTM")
+        return None
+    if action == "clear":
+        if not await _wait_memory_quiescent(ctx):
+            return None
+        snapshot = await ctx.system.long_term_memory_snapshot()
+        print_markdown_panel(
+            _format_ltm_snapshot(snapshot)
+            + "\n\nThis will clear only SOUL.md and USER.md. STM/RAG and logs are kept.",
+            title="Clear LTM",
+        )
+        if not await _confirm_memory_clear(ctx, "CLEAR LTM", "LTM"):
+            print_warning("LTM clear cancelled.")
+            return None
+        await ctx.system.clear_long_term_memory()
+        print_success("LTM cleared.")
+        return None
+    print_error("Usage: /LTM show | /LTM clear")
+    return None
+
+
+async def _cmd_stm(ctx: SlashCommandContext) -> bool | None:
+    action = ctx.parts[1].lower() if len(ctx.parts) > 1 else "show"
+    if action == "show":
+        snapshot = await ctx.system.short_term_memory_snapshot()
+        print_markdown_panel(_format_stm_snapshot(snapshot), title="STM")
+        return None
+    if action == "clear":
+        if not await _wait_memory_quiescent(ctx):
+            return None
+        snapshot = await ctx.system.short_term_memory_snapshot()
+        print_markdown_panel(
+            _format_stm_snapshot(snapshot)
+            + "\n\nThis will clear the STM/RAG table and mark existing model_messages logs as already processed. Old logs will not restore STM automatically; model_messages logs and failure logs are kept.",
+            title="Clear STM",
+        )
+        if not await _confirm_memory_clear(ctx, "CLEAR STM", "STM/RAG"):
+            print_warning("STM clear cancelled.")
+            return None
+        await ctx.system.clear_short_term_memory()
+        print_success("STM cleared.")
+        return None
+    print_error("Usage: /STM show | /STM clear")
     return None
 
 
@@ -663,6 +766,8 @@ SLASH_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "/stop": _cmd_stop,
     "/cancel": _cmd_cancel,
     "/skills": _cmd_skills,
+    "/ltm": _cmd_ltm,
+    "/stm": _cmd_stm,
     "/agent": _cmd_agent,
     "/api": _cmd_api,
     "/load": _cmd_load,

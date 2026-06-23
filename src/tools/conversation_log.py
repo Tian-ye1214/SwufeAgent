@@ -41,17 +41,19 @@ def dump_validated_model_messages(model_messages: list[Any]) -> list[dict[str, A
     return raw
 
 
-async def drain_pending_saves(timeout: float = 10.0) -> None:
+async def drain_pending_saves(timeout: float = 10.0) -> bool:
     tasks = [t for t in list(_PENDING_SAVE_TASKS) if not t.done()]
     if not tasks:
-        return
+        return True
     try:
         await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True),
             timeout=timeout,
         )
+        return True
     except asyncio.TimeoutError:
         logger.warning("conversation_log drain timed out after %.1fs", timeout)
+        return False
 
 
 class ConversationLog:

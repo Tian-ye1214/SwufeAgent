@@ -377,6 +377,65 @@ class AgentSystem:
     def _injection_for_session(self) -> str:
         return self._memory.injection_for_session()
 
+    async def ask_user(self, question: str) -> str:
+        return await self._toolkit.ask_user(question)
+
+    async def wait_for_memory_quiescent(self, timeout: float = 15.0) -> bool:
+        deadline = time.monotonic() + timeout
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        current = self._current_turn
+        if current is not None:
+            task = current.get("task")
+            if task is not None and not task.done():
+                left = remaining()
+                if left <= 0:
+                    return False
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=left)
+                except asyncio.TimeoutError:
+                    return False
+                except asyncio.CancelledError:
+                    pass
+
+        pending = [t for t in self._background_tasks if not t.done()]
+        if pending:
+            left = remaining()
+            if left <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=left,
+                )
+            except asyncio.TimeoutError:
+                return False
+
+        left = remaining()
+        if left <= 0:
+            return False
+        if not await drain_pending_saves(timeout=left):
+            return False
+
+        left = remaining()
+        if left <= 0:
+            return False
+        return await self._memory.short_term.wait_idle(timeout=left)
+
+    async def long_term_memory_snapshot(self) -> dict[str, dict[str, Any]]:
+        return await self._memory.long_term_snapshot()
+
+    async def short_term_memory_snapshot(self) -> dict[str, Any]:
+        return await self._memory.short_term_snapshot()
+
+    async def clear_long_term_memory(self) -> None:
+        await self._memory.clear_long_term()
+
+    async def clear_short_term_memory(self) -> None:
+        await self._memory.clear_short_term()
+
     async def _sync_skills_for_user_turn(self) -> None:
         """每次用户输入：在同一实例上重新扫描 skills（静默），避免磁盘 I/O 阻塞事件循环。"""
         await asyncio.to_thread(self._skills_manager.refresh)

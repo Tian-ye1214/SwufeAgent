@@ -18,3 +18,6 @@ data/
 .claude/
 .codegraph/
 tests/*
+src/prompts/LongTermMemory/SOUL.md
+src/prompts/LongTermMemory/USER.md
+src/prompts/LongTermMemory/log_sources_state.json

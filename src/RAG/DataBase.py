@@ -63,13 +63,20 @@ class EmbedDataBase:
     def _table_lance_dir(self) -> Path:
         return Path(self.db_path) / f"{self.table_name}.lance"
 
+    def _table_names_sync(self, db) -> list[str]:
+        if hasattr(db, "list_tables"):
+            raw = db.list_tables()
+            tables = getattr(raw, "tables", raw)
+            return [str(name) for name in tables]
+        return list(db.table_names())
+
     def _remove_orphan_table_dir_sync(self) -> None:
         d = self._table_lance_dir()
         if d.is_dir():
             shutil.rmtree(d)
 
     def _open_table_sync(self, db) -> Any | None:
-        names = db.table_names()
+        names = self._table_names_sync(db)
         if self.table_name not in names:
             if self._table_lance_dir().is_dir():
                 self._remove_orphan_table_dir_sync()
@@ -170,6 +177,22 @@ class EmbedDataBase:
             return int(self._table.count_rows())
 
         return await asyncio.to_thread(_count)
+
+    async def drop_table(self) -> None:
+        """Drop the configured table and clear any orphaned Lance directory."""
+        await self.ensure_connected()
+
+        def _drop() -> None:
+            db = self._require_db()
+            try:
+                if self.table_name in self._table_names_sync(db):
+                    db.drop_table(self.table_name)
+            finally:
+                self._table = None
+                self._rows_since_index = 0
+                self._remove_orphan_table_dir_sync()
+
+        await asyncio.to_thread(_drop)
 
     async def ensure_vector_index(self) -> bool:
         """达阈值后创建 IVF_PQ 索引；返回是否触发了建索引。"""

@@ -84,6 +84,8 @@
     "final_top_k": 8,
     "use_rerank": false,
     "reconcile_on_query": true,
+    "turn_token_limit": 8192,
+    "turn_chunk_overlap_tokens": 512,
     "index": {
       "min_rows": 256,
       "metric": "cosine",
