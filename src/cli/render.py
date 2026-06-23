@@ -18,6 +18,7 @@ from cli.output import (
     emit_renderable,
     emit_rule,
     status_message,
+    supports_model_stream,
 )
 from cli.diff_view import compute_line_diff, diff_stats, format_diff_text, render_diff
 
@@ -166,16 +167,33 @@ async def consume_stream_markdown(
     title: str = "模型",
 ) -> str:
     """
-    流式接收模型输出：生成中显示 spinner，完成后一次性 Markdown 渲染。
+    流式接收模型输出：TUI 下走实时预览（边收边显），完成后一次性 Markdown 渲染；
+    Legacy/非 TTY 下仅显示 spinner，完成后一次性渲染。
     不使用 Live（避免 Windows 下光标控制序列乱码）。
     """
     chunks: list[str] = []
-    with model_generating_indicator():
-        async for chunk in stream.stream_text(delta=True):
-            if chunk:
-                chunks.append(chunk)
-    final_text = "".join(chunks)
-    if final_text.strip():
-        show_model_output(final_text, title=title)
+    if supports_model_stream():
+        begin_model_stream(title)
+        try:
+            async for chunk in stream.stream_text(delta=True):
+                if chunk:
+                    chunks.append(chunk)
+                    append_model_stream_delta(chunk)
+        except BaseException:
+            clear_model_stream()
+            raise
+        final_text = "".join(chunks)
+        if final_text.strip():
+            finish_model_stream(final_text, title=title)
+        else:
+            clear_model_stream()
+    else:
+        with model_generating_indicator():
+            async for chunk in stream.stream_text(delta=True):
+                if chunk:
+                    chunks.append(chunk)
+        final_text = "".join(chunks)
+        if final_text.strip():
+            show_model_output(final_text, title=title)
     history.update(stream)
     return final_text

@@ -13,9 +13,9 @@ from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import Suggester
-from textual.widgets import Footer, Input, RichLog, Static
+from textual.widgets import Footer, Input, Label, ProgressBar, RichLog, Sparkline, Static
 
 from cli.completer import _iter_file_completions
 from cli.completion import (
@@ -144,6 +144,13 @@ class RedLotusTui(App[None]):
     #output { height: 1fr; border: round $accent; }
     #review-view { display: none; height: 1fr; border: round $warning; padding: 0 1; }
     #panel-view { display: none; height: 1fr; border: round $success; padding: 0 1; }
+    .panel-chart-title { color: $text-muted; text-style: bold; margin-top: 1; }
+    #panel-trend { height: 3; }
+    .panel-bar-row { height: 1; width: 1fr; }
+    .panel-bar-label { width: 12; }
+    .panel-bar-row ProgressBar { width: 1fr; }
+    #panel-task-progress { width: 1fr; }
+    #panel-task-counts { height: 1; }
     .hunk-view { height: auto; padding: 0 0 1 0; }
     .hunk-view.-current { background: $boost; }
     #context-usage { display: none; height: 1; padding: 0 1; color: $text-muted; }
@@ -199,6 +206,21 @@ class RedLotusTui(App[None]):
             yield VerticalScroll(id="review-view")
             with VerticalScroll(id="panel-view"):
                 yield Static("", id="panel-content")
+                yield Label("Token 趋势（按会话 旧→新）", classes="panel-chart-title")
+                yield Sparkline(id="panel-trend")
+                yield Label("Token 占比（Input / Output / Reasoning）", classes="panel-chart-title")
+                with Horizontal(classes="panel-bar-row"):
+                    yield Label("Input", classes="panel-bar-label")
+                    yield ProgressBar(id="panel-comp-input", show_eta=False)
+                with Horizontal(classes="panel-bar-row"):
+                    yield Label("Output", classes="panel-bar-label")
+                    yield ProgressBar(id="panel-comp-output", show_eta=False)
+                with Horizontal(classes="panel-bar-row"):
+                    yield Label("Reasoning", classes="panel-bar-label")
+                    yield ProgressBar(id="panel-comp-reasoning", show_eta=False)
+                yield Label("任务进度", classes="panel-chart-title")
+                yield ProgressBar(id="panel-task-progress", show_eta=False)
+                yield Static("", id="panel-task-counts")
             yield Static("", id="context-usage")
             yield Static("", id="stream-preview")
             yield Static(READY_LABEL, id="status")
@@ -427,8 +449,42 @@ class RedLotusTui(App[None]):
                 cache=self._panel_cache,
             )
             self.query_one("#panel-content", Static).update(render_panel(snapshot))
+            self._update_panel_charts(snapshot)
         except Exception as e:
             logger.error(f"刷新工作区面板失败: {type(e).__name__}: {e}", exc_info=True)
+
+    def _update_panel_charts(self, snapshot: Any) -> None:
+        """就地更新面板内的原生图表控件（趋势 Sparkline、占比与任务 ProgressBar），避免重建。"""
+        trend = self.query_one("#panel-trend", Sparkline)
+        series = [float(v) for v in (snapshot.token_trend or [])]
+        if series and any(series):
+            trend.data = series
+            trend.display = True
+        else:
+            trend.data = []
+            trend.display = False
+        history = snapshot.history
+        total = (history.input_tokens or 0) + (history.output_tokens or 0) + (history.reasoning_tokens or 0)
+        for widget_id, value in (
+            ("#panel-comp-input", history.input_tokens or 0),
+            ("#panel-comp-output", history.output_tokens or 0),
+            ("#panel-comp-reasoning", history.reasoning_tokens or 0),
+        ):
+            self.query_one(widget_id, ProgressBar).update(total=total or 1, progress=value)
+        tasks = snapshot.runtime.tasks
+        task_total = tasks.total or 0
+        self.query_one("#panel-task-progress", ProgressBar).update(
+            total=task_total or 1, progress=tasks.completed or 0
+        )
+        counts = Text()
+        counts.append(f"✓ Completed {tasks.completed}/{task_total}", style="green")
+        counts.append("   ")
+        counts.append(f"⟳ Running {tasks.running}", style="cyan")
+        counts.append("   ")
+        counts.append(f"✗ Failed {tasks.failed}", style="red")
+        counts.append("   ")
+        counts.append(f"… Pending {tasks.pending}", style="yellow")
+        self.query_one("#panel-task-counts", Static).update(counts)
 
     def _schedule_panel_refresh(self) -> None:
         if not self._panel_mode:

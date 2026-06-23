@@ -125,6 +125,8 @@ class PanelSnapshot:
     history: PanelHistoryStats
     visible_sessions: list[PanelSessionSummary]
     include_all: bool = False
+    # 可见会话按时间从旧到新排列的每会话总 token 数（供 Sparkline 趋势图使用）
+    token_trend: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -195,23 +197,22 @@ async def build_panel_snapshot(
     history, sessions = await asyncio.to_thread(_collect_history, root, cache or PanelSnapshotCache())
     visible_sessions = sessions if include_all else sessions[:RECENT_SESSION_LIMIT]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
+    token_trend = [_session_total_tokens(s) for s in reversed(visible_sessions)]
     return PanelSnapshot(
         runtime=runtime,
         history=history,
         visible_sessions=visible_sessions,
         include_all=include_all,
+        token_trend=token_trend,
     )
 
 
 def render_panel(snapshot: PanelSnapshot) -> Panel:
     history = snapshot.history
     runtime = snapshot.runtime
-    # TODO(panel): 当前终端条形图视觉效果较弱且信息价值有限；后续应重设计为更有意义的趋势、占比、异常提示展示。
     parts = [
         _render_kpis(snapshot),
         _render_runtime(runtime),
-        _render_token_chart(history),
-        _render_task_chart(runtime.tasks),
         _render_distribution(history),
         _render_sessions(snapshot.visible_sessions, include_all=snapshot.include_all),
     ]
@@ -354,45 +355,13 @@ def _render_runtime(runtime: RuntimePanelStats) -> Table:
     return table
 
 
-def _render_token_chart(history: Any) -> Table:
-    table = Table(title="Token 用量", expand=True)
-    table.add_column("类型")
-    table.add_column("数量", justify="right")
-    table.add_column("图表")
-    values = [
-        ("Input", int(getattr(history, "input_tokens", 0) or 0)),
-        ("Output", int(getattr(history, "output_tokens", 0) or 0)),
-        ("Reasoning", int(getattr(history, "reasoning_tokens", 0) or 0)),
-    ]
-    max_value = max([v for _, v in values] + [1])
-    for label, value in values:
-        table.add_row(label, _fmt_int(value), _bar(value, max_value))
-    return table
-
-
-def _render_task_chart(tasks: Any) -> Table:
-    total = int(getattr(tasks, "total", 0) or 0)
-    completed = int(getattr(tasks, "completed", 0) or 0)
-    running = int(getattr(tasks, "running", 0) or 0)
-    failed = int(getattr(tasks, "failed", 0) or 0)
-    pending = int(getattr(tasks, "pending", 0) or 0)
-    table = Table(title="任务", expand=True)
-    table.add_column("状态")
-    table.add_column("数量", justify="right")
-    table.add_column("进度")
-    table.add_row("Completed", f"{completed}/{total}", _bar(completed, total or 1))
-    table.add_row("Running", str(running), _bar(running, total or 1))
-    table.add_row("Failed", str(failed), _bar(failed, total or 1))
-    table.add_row("Pending", str(pending), _bar(pending, total or 1))
-    return table
-
-
 def _render_distribution(history: PanelHistoryStats) -> Table:
     table = Table(title="分布", expand=True)
     table.add_column("类型")
     table.add_column("名称")
     table.add_column("Responses", justify="right")
     table.add_column("Tokens", justify="right")
+    table.add_column("占比")
     rows: list[tuple[str, str, TokenBucket]] = []
     rows.extend(("Agent", name, bucket) for name, bucket in history.by_agent.items())
     rows.extend(("Model", name, bucket) for name, bucket in history.by_model.items())
@@ -405,12 +374,22 @@ def _render_distribution(history: PanelHistoryStats) -> Table:
         reverse=True,
     )
     if not rows:
-        table.add_row("-", "暂无分布数据", "0", "0")
+        table.add_row("-", "暂无分布数据", "0", "0", "")
         return table
-    for kind, name, bucket in rows[:12]:
+    top = rows[:12]
+    max_tokens = max(
+        (b.input_tokens + b.output_tokens + b.reasoning_tokens for _, _, b in top),
+        default=0,
+    )
+    for kind, name, bucket in top:
         tokens = bucket.input_tokens + bucket.output_tokens + bucket.reasoning_tokens
-        table.add_row(kind, name, str(bucket.response_count), _fmt_int(tokens))
+        bar = Text(_block_bar(tokens, max_tokens), style="cyan" if kind == "Agent" else "magenta")
+        table.add_row(kind, name, str(bucket.response_count), _fmt_int(tokens), bar)
     return table
+
+
+def _session_total_tokens(session: PanelSessionSummary) -> int:
+    return session.input_tokens + session.output_tokens + session.reasoning_tokens
 
 
 def _render_sessions(sessions: list[PanelSessionSummary], *, include_all: bool) -> Table:
@@ -426,7 +405,7 @@ def _render_sessions(sessions: list[PanelSessionSummary], *, include_all: bool) 
         return table
     for session in sessions:
         agents = ",".join(sorted(session.agents))
-        tokens = session.input_tokens + session.output_tokens + session.reasoning_tokens
+        tokens = _session_total_tokens(session)
         table.add_row(
             session.saved_at or session.date,
             session.topic,
@@ -445,13 +424,18 @@ def _render_skipped(history: PanelHistoryStats) -> Text:
     return text
 
 
-def _bar(value: int, max_value: int, *, width: int = 20) -> str:
-    if max_value <= 0:
-        filled = 0
-    else:
-        filled = round(width * max(0, value) / max_value)
-    filled = max(0, min(width, filled))
-    return "[" + "=" * filled + "." * (width - filled) + "]"
+_BLOCK_EIGHTHS = " ▏▎▍▌▋▊▉█"
+
+
+def _block_bar(value: int, max_value: int, *, width: int = 12) -> str:
+    if max_value <= 0 or value <= 0:
+        return ""
+    eighths = round(width * 8 * min(value, max_value) / max_value)
+    full, rem = divmod(eighths, 8)
+    bar = "█" * full
+    if rem:
+        bar += _BLOCK_EIGHTHS[rem]
+    return bar or _BLOCK_EIGHTHS[1]
 
 
 def _fmt_int(value: int) -> str:

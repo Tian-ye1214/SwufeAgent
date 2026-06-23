@@ -289,6 +289,7 @@ class BotBase(ABC):
                     try:
                         reply = await asyncio.wait_for(run_coro, timeout=self.AGENT_RUN_TIMEOUT_S)
                     except asyncio.TimeoutError:
+                        still_current = run_gen == self._current_generation(session_id)
                         self._bump_generation(session_id)
                         ag = self._agent_systems.get(session_id)
                         if ag is not None:
@@ -296,6 +297,12 @@ class BotBase(ABC):
                         logger.error(
                             f"[{self.platform_tag}] {session_id} Agent 超时（{self.AGENT_RUN_TIMEOUT_S:.0f}s），已作废本轮"
                         )
+                        if still_current:
+                            mins = max(1, round(self.AGENT_RUN_TIMEOUT_S / 60))
+                            await self._safe_send(
+                                merged.send_reply,
+                                f"⏳ 任务超时（已运行约 {mins} 分钟），本轮已取消，可重试或换个问法。",
+                            )
                         reply = None
                     if run_gen != self._current_generation(session_id):
                         logger.info(f"[{self.platform_tag}] {session_id} 本轮 Agent 已过期，不发送回复")
@@ -316,7 +323,11 @@ class BotBase(ABC):
         try:
             await asyncio.wait_for(send_reply(text), timeout=self.SEND_REPLY_TIMEOUT_S)
         except asyncio.TimeoutError:
-            logger.warning(f"[{self.platform_tag}] 发送回复超时（{self.SEND_REPLY_TIMEOUT_S:.0f}s），已放弃")
+            logger.warning(f"[{self.platform_tag}] 发送回复超时（{self.SEND_REPLY_TIMEOUT_S:.0f}s），重试一次")
+            try:
+                await asyncio.wait_for(send_reply(text), timeout=self.SEND_REPLY_TIMEOUT_S)
+            except Exception as e:
+                logger.warning(f"[{self.platform_tag}] 发送回复重试仍失败: {e}")
         except Exception as e:
             logger.warning(f"[{self.platform_tag}] 发送消息失败: {e}")
 
@@ -530,6 +541,7 @@ class BotBase(ABC):
         if (n := q.qsize()):
             logger.info(f"[{self.platform_tag}] {session_id} 入队（前方还有 {n} 条待处理）")
         await q.put(QueuedTurn(msg, send_reply, loop))
+        await self._safe_send(send_reply, "✓ 收到，正在处理…")
         self._touch(session_id)
         self._ensure_consumer(session_id)
         self._ensure_session_gc()
