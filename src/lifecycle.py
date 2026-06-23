@@ -384,7 +384,7 @@ async def run_coroutine_with_lifecycle(
             {inner, wait_cancel}, return_when=asyncio.FIRST_COMPLETED,
         )
 
-        if wait_cancel in done:
+        if wait_cancel in done and inner not in done:
             inner.cancel()
             try:
                 await inner

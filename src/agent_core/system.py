@@ -243,7 +243,8 @@ class AgentSystem:
             if not t.done():
                 self._background_tasks.add(t)
                 t.add_done_callback(self._background_tasks.discard)
-                logger.warning("[lifecycle] 任务取消超时，转交 shutdown 收口")
+                logger.warning("[lifecycle] 任务取消超时，转交后台收尾（门控保持关闭直至其结束）")
+                return "已请求停止；任务仍在后台收尾，结束前暂不接受新任务。"
         except asyncio.CancelledError:
             pass
         self._current_turn = None
@@ -305,11 +306,9 @@ class AgentSystem:
             else:
                 print_warning(f"模型请求错误 (HTTP {e.status_code}): {e}")
                 logger.error("详细信息:\n%s", traceback.format_exc())
-                self._task_manager.reset()
             return
         print_warning(f"未预期的系统错误: {e}")
         logger.error("详细信息:\n%s", traceback.format_exc())
-        self._task_manager.reset()
 
     async def _run_user_turn(self, turn_id: str, message: UserMessage, history: ChatHistory) -> None:
         try:

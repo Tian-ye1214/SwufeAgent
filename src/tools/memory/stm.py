@@ -63,6 +63,7 @@ class ShortTermMemory:
         self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._reconcile_on_query = bool(self._cfg["reconcile_on_query"])
+        self._embed_batch = max(1, int(self._cfg.get("embed_batch_turns", 64)))
 
     def _get_rag(self) -> Any:
         if self._rag is None:
@@ -129,10 +130,13 @@ class ShortTermMemory:
         turns_done: int,
         agent: str,
         session_key: str,
+        *,
+        end: int | None = None,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         now = iso_utc_now()
-        for i in range(turns_done, len(turn_texts)):
+        stop = len(turn_texts) if end is None else end
+        for i in range(turns_done, stop):
             text = turn_texts[i].strip()
             if not text:
                 continue
@@ -149,35 +153,52 @@ class ShortTermMemory:
             )
         return rows
 
-    async def _ingest_rows_unlocked(
+    async def _ingest_in_batches(
         self,
         log_key: str,
-        rows: list[dict[str, Any]],
-        new_turns_done: int,
+        turn_texts: list[str],
+        turns_done: int,
+        agent: str,
+        session_key: str,
         rag: Any,
+        *,
+        flush: bool,
     ) -> None:
-        if not rows:
-            return
-        await rag.connect()
-        try:
-            await rag.ingest_turn_rows(rows)
-        except Exception as e:
-            for r in rows:
-                await asyncio.to_thread(
-                    self._append_failure_sync, r.get("source", log_key), str(e)
-                )
-            raise
-        state = await asyncio.to_thread(self._load_stm_state_sync)
-        sources = state.setdefault("sources", {})
-        sources[log_key] = {"turns_done": new_turns_done}
-        await asyncio.to_thread(self._save_stm_state_sync, state)
-        if self._verbose_ingest:
-            logger.info(
-                "STM ingest: log_key=%s turns=%d new_rows=%d",
-                log_key,
-                new_turns_done,
-                len(rows),
+        """按 embed_batch 切窗入库：每批至多 batch 轮，逐批推进并持久化游标。
+
+        非 flush 时只处理完整批，剩余尾批（< batch）延后；flush 时连尾批一并入库。
+        每批落盘游标，因此已嵌入的轮永不重嵌，中途崩溃也不丢已完成批。
+        """
+        total = len(turn_texts)
+        batch = self._embed_batch
+        end = total if flush else turns_done + ((total - turns_done) // batch) * batch
+        a = turns_done
+        while a < end:
+            b = min(a + batch, end)
+            rows = self._collect_pending_turn_rows(
+                log_key, turn_texts, a, agent, session_key, end=b
             )
+            if rows:
+                try:
+                    await rag.ingest_turn_rows(rows)
+                except Exception as e:
+                    for r in rows:
+                        await asyncio.to_thread(
+                            self._append_failure_sync, r.get("source", log_key), str(e)
+                        )
+                    raise
+            state = await asyncio.to_thread(self._load_stm_state_sync)
+            sources = state.setdefault("sources", {})
+            sources[log_key] = {"turns_done": b}
+            await asyncio.to_thread(self._save_stm_state_sync, state)
+            if self._verbose_ingest:
+                logger.info(
+                    "STM ingest: log_key=%s turns=%d new_rows=%d",
+                    log_key,
+                    b,
+                    len(rows),
+                )
+            a = b
 
     async def ingest_after_turn(
         self,
@@ -186,7 +207,7 @@ class ShortTermMemory:
         agent: str,
         session_key: str,
     ) -> None:
-        """回合结束后异步入库自上次 turns_done 起的新轮。"""
+        """回合结束后异步入库自上次 turns_done 起的新轮（仅完整批，尾批延后）。"""
         if not log_key or not messages:
             return
         with self._ingest_log_context():
@@ -197,15 +218,14 @@ class ShortTermMemory:
                 done = self._turns_done_for_key(sources, log_key)
                 if len(turn_texts) < done:
                     done = 0
-                rows = self._collect_pending_turn_rows(
-                    log_key, turn_texts, done, agent, session_key
-                )
-                if not rows:
+                # 不足一个完整批：延后（不建 RAG，避免每轮连/关抖动）。
+                if len(turn_texts) - done < self._embed_batch:
                     return
                 rag = _stm_rag_from_config(self._cfg)
                 try:
-                    await self._ingest_rows_unlocked(
-                        log_key, rows, len(turn_texts), rag
+                    await rag.connect()
+                    await self._ingest_in_batches(
+                        log_key, turn_texts, done, agent, session_key, rag, flush=False
                     )
                 finally:
                     await rag.close()
@@ -266,7 +286,8 @@ class ShortTermMemory:
         fp: Path,
         root: Path,
         state: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], str, int]:
+    ) -> tuple[list[str], str, int, str, str]:
+        """从单个日志文件解析出入库所需上下文（不构造 rows，留给批量入库逐窗构造）。"""
         sources = state.setdefault("sources", {})
         log_key = self._rel_log_key(fp, root)
         messages, meta = read_saved_model_messages_file(fp)
@@ -282,12 +303,9 @@ class ShortTermMemory:
         date = str(meta.get("date", "") or "")
         topic = str(meta.get("topic", "") or "")
         session_key = f"{date}/{topic}" if date and topic else ""
-        rows = self._collect_pending_turn_rows(
-            log_key, turn_texts, done, agent, session_key
-        )
-        return rows, log_key, len(turn_texts)
+        return turn_texts, log_key, done, agent, session_key
 
-    async def _reconcile_from_logs(self) -> None:
+    async def _reconcile_from_logs(self, *, flush: bool = False) -> None:
         root = self._log_root_resolved()
         if not root.is_dir():
             return
@@ -295,32 +313,38 @@ class ShortTermMemory:
         if not conv.is_dir():
             return
 
-        def _scan() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            state = self._load_stm_state_sync()
-            all_rows: list[dict[str, Any]] = []
-            sources = state.setdefault("sources", {})
-            for fp in sorted(conv.rglob("messages_*.model_messages.json"), key=str):
-                rows, log_key, new_done = self._sync_reconcile_file(fp, root, state)
-                all_rows.extend(rows)
-                if rows:
-                    sources[log_key] = {"turns_done": new_done}
-            return state, all_rows
+        files = sorted(conv.rglob("messages_*.model_messages.json"), key=str)
+        rag: Any | None = None
+        for fp in files:
+            state = await asyncio.to_thread(self._load_stm_state_sync)
+            turn_texts, log_key, done, agent, session_key = await asyncio.to_thread(
+                self._sync_reconcile_file, fp, root, state
+            )
+            pending = len(turn_texts) - done
+            if pending <= 0:
+                continue
+            # 非 flush 且不足一个完整批：延后尾批。
+            if not flush and pending < self._embed_batch:
+                continue
+            if rag is None:
+                rag = self._get_rag()
+                await rag.connect()
+            await self._ingest_in_batches(
+                log_key, turn_texts, done, agent, session_key, rag, flush=flush
+            )
 
-        final_state, all_rows = await asyncio.to_thread(_scan)
-        if not all_rows:
-            return
-        rag = self._get_rag()
-        await rag.connect()
+    async def _flush_inner(self) -> None:
+        async with self._lock:
+            await self._reconcile_from_logs(flush=True)
+
+    async def flush(self, *, timeout: float = 30.0) -> None:
+        """关闭前尽力收尾：把所有未入库的轮（含不足一批的尾批）批量嵌入并落盘游标。"""
         try:
-            await rag.ingest_turn_rows(all_rows)
-            await asyncio.to_thread(self._save_stm_state_sync, final_state)
+            await asyncio.wait_for(self._flush_inner(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("STM flush 未在 %.0fs 内完成，跳过剩余尾批", timeout)
         except Exception as e:
-            for r in all_rows:
-                await asyncio.to_thread(
-                    self._append_failure_sync,
-                    r.get("source", ""),
-                    str(e),
-                )
+            logger.warning("STM flush 失败: %s", e)
 
     async def query_short_term_memory(self, query: str) -> str:
         """
@@ -335,7 +359,7 @@ class ShortTermMemory:
             return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
         async with self._lock:
             if self._reconcile_on_query:
-                await self._reconcile_from_logs()
+                await self._reconcile_from_logs(flush=False)
             rag = self._get_rag()
             await rag.connect()
             hits = await rag.retrieve(q)
