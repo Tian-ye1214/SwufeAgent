@@ -153,5 +153,5 @@ class RAG:
             logger.info("RAG retrieve: rerank 后返回条数=%d", len(results))
             return results
         except Exception as e:
-            logger.error("RAG retrieve 失败: %s", e, exc_info=True)
+            logger.warning("RAG retrieve 失败: %s", e, exc_info=True)
             raise

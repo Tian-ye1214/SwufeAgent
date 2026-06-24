@@ -287,18 +287,6 @@ class ShortTermMemory:
                 finally:
                     await rag.close()
 
-    async def _ingest_background(
-        self,
-        messages: list,
-        log_key: str,
-        agent: str,
-        session_key: str,
-    ) -> None:
-        try:
-            await self.ingest_after_turn(messages, log_key, agent, session_key)
-        except Exception as e:
-            logger.warning("STM ingest 后台失败: %s", e)
-
     def schedule_ingest_after_turn(
         self,
         messages: list,
@@ -309,13 +297,13 @@ class ShortTermMemory:
         if not log_key or not messages:
             return
         msgs = list(messages)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning("STM ingest 后台失败: no running event loop")
-            return
+        loop = asyncio.get_running_loop()
         task = loop.create_task(
-            self._ingest_background(msgs, log_key, agent, session_key),
+            asyncio.to_thread(
+                lambda: asyncio.run(
+                    self.ingest_after_turn(msgs, log_key, agent, session_key)
+                )
+            ),
             name="stm-ingest",
         )
         self._pending_tasks = {t for t in self._pending_tasks if not t.done()}
