@@ -154,7 +154,7 @@ def print_phase(title: str) -> None:
 def print_repl_welcome() -> None:
     print_panel(
         "输入 /help 查看斜杠命令；@文件路径 引用文本\n"
-        "新任务 或 /clear 清除上下文 · /exit 或 quit 退出\n"
+        "新任务 或 /clear 开启新对话 · /exit 或 quit 退出\n"
         "任务执行中按 Ctrl+C 中断",
         title="RedLotus CLI",
     )

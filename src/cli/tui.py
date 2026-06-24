@@ -88,18 +88,52 @@ class AgentInput(Input):
 class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
     BINDINGS = [Binding("escape", "cancel", "取消", show=False)]
 
+    DEFAULT_CSS = """
+    SnapshotPickScreen {
+        align: center middle;
+    }
+    #snapshot-dialog {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #snapshot-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    .snapshot-hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    #snapshot-list {
+        height: auto;
+        max-height: 24;
+        min-height: 5;
+    }
+    """
+
     def __init__(self, snapshots: list[WorkspaceSnapshot]) -> None:
         super().__init__()
         self._snapshots = snapshots
 
     def compose(self) -> ComposeResult:
-        yield OptionList(
-            *[
-                Option(snapshot.label, id=str(index))
-                for index, snapshot in enumerate(self._snapshots)
-            ],
-            id="snapshot-list",
-        )
+        with Vertical(id="snapshot-dialog"):
+            yield Static("选择要加载的对话快照", id="snapshot-title")
+            yield Static("↑↓ 选择 · Enter 确认 · Esc 取消", classes="snapshot-hint")
+            yield OptionList(
+                *[
+                    Option(snapshot.label, id=str(index))
+                    for index, snapshot in enumerate(self._snapshots)
+                ],
+                id="snapshot-list",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#snapshot-list", OptionList).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id
@@ -275,11 +309,17 @@ class RedLotusTui(App[None]):
         controller = self.system._cli_controller
         controller._active_session_state = self.state
         controller.set_snapshot_picker(self.pick_snapshot)
-        loaded = await controller.enter_current_workspace()
-        if loaded:
-            self.state.is_first_input = False
         if self.stop_event is not None:
             asyncio.create_task(self._watch_stop_event())
+        self.call_after_refresh(self._schedule_workspace_enter)
+
+    def _schedule_workspace_enter(self) -> None:
+        self.run_worker(self._enter_workspace_after_mount, exclusive=True)
+
+    async def _enter_workspace_after_mount(self) -> None:
+        loaded = await self.system._cli_controller.enter_current_workspace()
+        if loaded:
+            self.state.is_first_input = False
 
     async def pick_snapshot(
         self,
@@ -289,7 +329,17 @@ class RedLotusTui(App[None]):
             return None
         if len(snapshots) == 1:
             return snapshots[0]
-        return await self.push_screen_wait(SnapshotPickScreen(snapshots))
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[WorkspaceSnapshot | None] = loop.create_future()
+
+        def _on_result(result: WorkspaceSnapshot | None) -> None:
+            if not future.done():
+                future.set_result(result)
+
+        screen = SnapshotPickScreen(snapshots)
+        await self.push_screen(screen, callback=_on_result, wait_for_dismiss=False)
+        return await future
 
     def _make_ask_user_bridge(self):
         _ASK_TIMEOUT = 60  # 用户回复超时（秒）

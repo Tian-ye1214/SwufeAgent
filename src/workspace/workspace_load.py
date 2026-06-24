@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from cli.render import print_error, print_success, print_warning
+from infra import logger
+from infra.persist_utils import safe_name
 from tools.conversation_log import read_saved_model_messages_file
 from tools.memory import ChatHistory
 from workspace.workspace import (
@@ -33,6 +35,9 @@ async def load_snapshot_into_session(
             f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持 coordinator 或 manager。"
         )
     await reset_cli_session_for_load()
+    logger.setup_task_logger(
+        safe_name(str(meta.get("topic") or snapshot.topic), max_len=50, fallback="loaded")
+    )
     if agent == "coordinator":
         coordinator_history.set_messages(messages)
         manager_history.reset()

@@ -139,7 +139,10 @@ class ConversationLog:
         saved_at = iso_utc_now()
         meta: dict[str, Any] = {"agent": self._name, "date": self._date, "topic": self._topic}
         if self._sub_id:
-            meta["sub_id"] = self._sub_id
+            if self._name == "worker":
+                meta["sub_id"] = self._sub_id
+            else:
+                meta["session_id"] = self._sub_id
         if extra:
             meta.update(extra)
         readable_path, model_path = self._snapshot_paths(base)
@@ -223,7 +226,7 @@ class SessionConversationLogs:
     on_reset()               -- reset() 时调用
     """
 
-    __slots__ = ("_date", "_topic", "_logs", "_on_activate", "_on_reset")
+    __slots__ = ("_date", "_topic", "_session_id", "_logs", "_on_activate", "_on_reset")
 
     def __init__(
         self,
@@ -232,6 +235,7 @@ class SessionConversationLogs:
     ) -> None:
         self._date: str | None = None
         self._topic: str | None = None
+        self._session_id: str | None = None
         self._logs: dict[str, ConversationLog] = {}
         self._on_activate = on_activate
         self._on_reset = on_reset
@@ -242,12 +246,14 @@ class SessionConversationLogs:
             return
         self._date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
         self._topic = _safe_segment((topic_hint.strip() or "default")[:200], 80)
+        self._session_id = _safe_segment(datetime.now().strftime("%H%M%S%f"), 16)
         if self._on_activate:
             self._on_activate(self._date, self._topic)
 
     def reset(self) -> None:
         self._date = None
         self._topic = None
+        self._session_id = None
         self._logs.clear()
         if self._on_reset:
             self._on_reset()
@@ -266,13 +272,14 @@ class SessionConversationLogs:
         self._topic = topic
         self._logs.clear()
         key = _safe_segment(agent_name, 40)
-        sub_id_raw = meta.get("sub_id")
-        sub_id = _safe_segment(str(sub_id_raw), 60) if sub_id_raw else None
+        instance_raw = meta.get("session_id") or meta.get("sub_id")
+        instance_id = _safe_segment(str(instance_raw), 60) if instance_raw else None
+        self._session_id = instance_id
         self._logs[key] = ConversationLog(
             key,
             self._date,
             self._topic,
-            sub_id=sub_id,
+            sub_id=instance_id,
             existing_run_base=base,
         )
         if self._on_activate:
@@ -286,5 +293,10 @@ class SessionConversationLogs:
     def for_agent(self, name: str) -> ConversationLog:
         key = _safe_segment(name, 40)
         if key not in self._logs:
-            self._logs[key] = ConversationLog(key, self._date, self._topic)
+            self._logs[key] = ConversationLog(
+                key,
+                self._date,
+                self._topic,
+                sub_id=self._session_id,
+            )
         return self._logs[key]

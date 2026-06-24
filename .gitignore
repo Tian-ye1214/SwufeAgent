@@ -17,6 +17,7 @@ data/
 .cursor/
 .claude/
 .codegraph/
+.redlotus/*
 tests/*
 src/prompts/LongTermMemory/SOUL.md
 src/prompts/LongTermMemory/USER.md

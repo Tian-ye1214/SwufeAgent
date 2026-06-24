@@ -131,8 +131,10 @@ class WorkspaceSnapshot:
     @property
     def label(self) -> str:
         saved = self.saved_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        session_id = str(self.meta.get("session_id") or self.meta.get("sub_id") or "")
+        sid = f" #{session_id}" if session_id else ""
         return (
-            f"{saved} | {self.agent} | {self.date}/{self.topic} "
+            f"{saved} | {self.agent} | {self.date}/{self.topic}{sid} "
             f"| {self.message_count} msgs"
         )
 
