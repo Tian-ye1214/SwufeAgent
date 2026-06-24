@@ -13,6 +13,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    PENDING_CONFIRMATION = "pending_confirmation"
 
 
 @dataclass
@@ -139,7 +140,8 @@ class TaskManager:
                 TaskStatus.PENDING: "⬜",
                 TaskStatus.IN_PROGRESS: "🔄",
                 TaskStatus.COMPLETED: "✅",
-                TaskStatus.FAILED: "❌"
+                TaskStatus.FAILED: "❌",
+                TaskStatus.PENDING_CONFIRMATION: "⏸"
             }[task.status]
             
             line = f"{status_icon} [{task.id}] {task.description}"

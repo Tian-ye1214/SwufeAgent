@@ -48,6 +48,8 @@ cd src && python -m API.QQ      # 需配置 QQBOT 等环境变量
 cd src && python -m API.WeChat   # 扫码登录
 ```
 
+QQ 机器人前置：先装好并运行 [NapCat](https://github.com/NapNeko/NapCatQQ)（提供 OneBot WebSocket 接口）。配置文件 `config.yaml` 须放在 `src/API/` 下（已随仓库附带模板），其中填好 `bt_uin`（机器人 QQ 号，也可用环境变量 `QQBOT_ID` 覆盖）与 `napcat.webui_token`（需为强密码：至少 12 位且含数字、大小写字母与特殊符号）。配置缺失或无效时启动会直接报错退出，不会静默卡住。
+
 ---
 
 ## 给折腾的人

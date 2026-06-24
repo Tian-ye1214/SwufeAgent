@@ -25,7 +25,7 @@ from config.app_config import get_env, settings
 from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
-from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
+from tools.ExtractFileContent import document_attachment_text_block, is_supported_attachment
 from infra.shared_http import close_all_clients
 from infra import logger
 from runtime import tool_telemetry
@@ -47,6 +47,7 @@ class BotBase(ABC):
     """
     AGENT_RUN_TIMEOUT_S = 900.0
     SEND_REPLY_TIMEOUT_S = 120.0
+    REPLY_MAX_CHARS = 4500               # 单条回复字符上限，超长按段落/换行/空格切分后分条发送
     SESSION_IDLE_TTL_S = 3600.0          # 空闲超过此时长的会话将被后台回收；<=0 关闭回收
     SESSION_GC_INTERVAL_S = 300.0        # 空闲会话清扫间隔
     RESET_COMMANDS = frozenset({"新任务", "/新任务", "/reset"})
@@ -319,7 +320,29 @@ class BotBase(ABC):
             except Exception as e:
                 logger.error(f"[{self.platform_tag}] {session_id} 队列消费异常，继续下一轮: {e}", exc_info=True)
 
-    async def _safe_send(self, send_reply: Callable[..., Awaitable[Any]], text: str) -> None:
+    def _split_reply(self, text: str) -> list[str]:
+        """将超长回复按 段落(\\n\\n) > 换行(\\n) > 空格 边界切成 <=REPLY_MAX_CHARS 的若干段。"""
+        limit = self.REPLY_MAX_CHARS
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        rest = text
+        while len(rest) > limit:
+            window = rest[:limit]
+            cut = window.rfind("\n\n")
+            if cut <= 0:
+                cut = window.rfind("\n")
+            if cut <= 0:
+                cut = window.rfind(" ")
+            if cut <= 0:
+                cut = limit
+            chunks.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip()
+        if rest:
+            chunks.append(rest)
+        return chunks
+
+    async def _send_one(self, send_reply: Callable[..., Awaitable[Any]], text: str) -> None:
         try:
             await asyncio.wait_for(send_reply(text), timeout=self.SEND_REPLY_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -331,7 +354,11 @@ class BotBase(ABC):
         except Exception as e:
             logger.warning(f"[{self.platform_tag}] 发送消息失败: {e}")
 
-    async def _inline_pdf_bytes(
+    async def _safe_send(self, send_reply: Callable[..., Awaitable[Any]], text: str) -> None:
+        for chunk in self._split_reply(text):
+            await self._send_one(send_reply, chunk)
+
+    async def _inline_document_bytes(
         self,
         text: str,
         data: bytes,
@@ -339,11 +366,13 @@ class BotBase(ABC):
         media_type: str = "",
         filename: str = "",
     ) -> tuple[str, bool]:
-        if not data or not is_pdf_content(data, media_type=media_type, filename=filename):
+        if not data or not is_supported_attachment(data, media_type=media_type, filename=filename):
             return text, False
-        block = await asyncio.to_thread(pdf_attachment_text_block, data, filename=filename or None)
-        if block.startswith("（"):
-            logger.warning(f"[{self.platform_tag}] PDF 解析失败，未注入文本")
+        block = await asyncio.to_thread(
+            document_attachment_text_block, data, filename=filename or "", media_type=media_type
+        )
+        if not block:
+            return text, False
         return (f"{text}\n\n{block}".strip() if text else block), True
 
     def guess_download_mime(
@@ -358,21 +387,21 @@ class BotBase(ABC):
                 return mime
         return self._MIME_MAP.get((media_type_key or "").lower(), "application/octet-stream")
 
-    async def _partition_pdf_attachments(
+    async def _partition_document_attachments(
         self,
         user_text: str,
         attachments: list,
         *,
         filename_attr: str = "",
     ) -> tuple[str, list]:
-        """Inline PDF BinaryContent as text; keep other attachments unchanged."""
+        """Inline supported document BinaryContent as text; keep other attachments unchanged."""
         out: list = []
         text = user_text
         for att in attachments:
             data = getattr(att, "data", b"") or b""
             media_type = getattr(att, "media_type", "") or ""
             filename = getattr(att, filename_attr, "") if filename_attr else ""
-            text, consumed = await self._inline_pdf_bytes(
+            text, consumed = await self._inline_document_bytes(
                 text,
                 data,
                 media_type=media_type,

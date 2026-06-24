@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import mimetypes
 from ddgs import DDGS
 from infra import logger
@@ -56,6 +57,13 @@ class BasicToolkit:
         self._dangerous_start_patterns = [
             'eval ',
             'exec ',
+        ]
+        self._confirm_patterns = [
+            (re.compile(r'\brm\s+-\w*r', re.I), "rm 递归删除"),
+            (re.compile(r'\brd\s+/s', re.I), "rd /s 递归删除目录"),
+            (re.compile(r'\brmdir\s+/s', re.I), "rmdir /s 递归删除目录"),
+            (re.compile(r'\bdel\s+/s', re.I), "del /s 递归删除文件"),
+            (re.compile(r'\bRemove-Item\b.*-Recurse', re.I), "Remove-Item -Recurse 递归删除"),
         ]
 
     @property
@@ -253,6 +261,13 @@ class BasicToolkit:
                     f"Repo root: {_REPO_ROOT}"
                 )
         return True, ""
+
+    def _command_needs_confirm(self, command: str) -> str | None:
+        """Return a short reason if the command performs a recursive delete, else None."""
+        for pattern, reason in self._confirm_patterns:
+            if pattern.search(command):
+                return reason
+        return None
 
     def set_ask_user_handler(self, handler):
         """
@@ -470,6 +485,12 @@ class BasicToolkit:
         if not is_safe:
             return f"Security error: {reason}"
 
+        danger = self._command_needs_confirm(command)
+        if danger:
+            answer = (await self.ask_user(f"⚠ 该命令将递归删除文件:\n{command}\n确认执行？(y/N)")).strip().lower()
+            if answer not in ("y", "yes", "是", "确认"):
+                return f"已取消执行（用户未确认）: {danger}"
+
         try:
             policy = get_agent_run_policy()
             timeout = policy.clamp_command_timeout(timeout)
@@ -564,6 +585,47 @@ class BasicToolkit:
             ]
         )
 
+    async def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> ToolReturn | str:
+        """
+        Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
+
+        This is the PRIMARY tool for ALL image generation requests. Keywords that should trigger this tool:
+        - "create image" / "generate image" / "make a picture" / "draw" / "paint" / "illustrate"
+        - "give me an image" / "produce image"
+        - Any request involving creating visual content, artwork, diagrams, or images (any language)
+
+        Parameters:
+            prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
+            width: Image width in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
+            height: Image height in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
+            max_wait_time: Maximum wait time in seconds. Default: 300 (5 minutes).
+
+        Returns:
+            Success: The generated image displayed inline plus generation details.
+            Failure: Returns an error message.
+        """
+        result = await generate_image_from_flux(prompt, width=width, height=height, max_wait_time=max_wait_time)
+        if not isinstance(result, tuple):
+            return result
+
+        image_bytes, mime_type, info_text = result
+        ext = mimetypes.guess_extension(mime_type) or ".jpg"
+        name = f"generated_{int(time.time())}{ext}"
+        try:
+            path = self._resolve_path_candidate(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_bytes, image_bytes)
+        except ValueError as e:
+            return f"Security error: {e}"
+
+        return ToolReturn(
+            return_value=f"{info_text}\nSaved to: {path.name}",
+            content=[
+                info_text,
+                BinaryContent(data=image_bytes, media_type=mime_type),
+            ]
+        )
+
     def worker_tool_groups(self, *, include_browser: bool) -> dict[str, list]:
         """Worker tools grouped for resident tools and deferred capabilities."""
         browser = [
@@ -593,7 +655,7 @@ class BasicToolkit:
                 self.run_command,
             ],
             "media": [
-                generate_image_from_flux,
+                self.generate_image,
                 self.read_image,
                 extract_text,
             ],

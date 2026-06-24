@@ -29,6 +29,7 @@ from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from cli.panel import PanelSnapshotCache, build_panel_snapshot, render_panel
 from cli.pending_review import compute_hunks
 from infra import logger
+from runtime.runtime_state import current_short_agent_id
 from workspace.workspace import WorkspaceSnapshot
 
 READY_LABEL = "就绪"
@@ -242,6 +243,7 @@ class RedLotusTui(App[None]):
         self.stop_event = stop_event
         self.state = system.new_cli_session_state()
         self._ask_future: asyncio.Future[str] | None = None
+        self._ask_lock: asyncio.Lock | None = None
         self._ask_question = ""
         self._active_line_handlers = 0
         self._status_is_working = False
@@ -346,12 +348,14 @@ class RedLotusTui(App[None]):
 
         def ask_user_bridge(question: str) -> str:
             result_queue: queue.Queue[str | Exception] = queue.Queue()
+            who = current_short_agent_id()  # 在提问 agent 的上下文（worker 线程）内读取
+            tagged = f"[{who}] {question}" if who else question
 
             def _schedule_ask() -> None:
                 """在 Textual 事件循环线程中执行。"""
                 async def _do_ask() -> None:
                     try:
-                        answer = await self.ask_user(question)
+                        answer = await self.ask_user(tagged)
                         result_queue.put(answer)
                     except asyncio.CancelledError:
                         result_queue.put(
@@ -827,26 +831,27 @@ class RedLotusTui(App[None]):
 
     async def ask_user(self, question: str) -> str:
         """在 Textual 事件循环中弹出用户提问界面（内部方法）。"""
-        if self._ask_future is not None and not self._ask_future.done():
-            return "(已有用户提问等待回复)"
-        self._ask_question = question.strip()
-        self._ask_future = asyncio.get_running_loop().create_future()
-        inp = self.query_one("#input", AgentInput)
-        inp.add_class("ask")
-        inp.suggester = None
-        inp.placeholder = f"🤔 {self._ask_question}"
-        inp.value = ""
-        inp.focus()
-        self.refresh_status()
-        try:
-            return await self._ask_future
-        finally:
-            self._ask_future = None
-            self._ask_question = ""
-            inp.remove_class("ask")
-            inp.placeholder = "📝 请输入您的任务:"
-            inp.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
+        if self._ask_lock is None:
+            self._ask_lock = asyncio.Lock()
+        async with self._ask_lock:  # 多个并行提问按 FIFO 串行排队，互不丢弃
+            self._ask_question = question.strip()
+            self._ask_future = asyncio.get_running_loop().create_future()
+            inp = self.query_one("#input", AgentInput)
+            inp.add_class("ask")
+            inp.suggester = None
+            inp.placeholder = f"🤔 {self._ask_question}"
+            inp.value = ""
+            inp.focus()
             self.refresh_status()
+            try:
+                return await self._ask_future
+            finally:
+                self._ask_future = None
+                self._ask_question = ""
+                inp.remove_class("ask")
+                inp.placeholder = "📝 请输入您的任务:"
+                inp.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
+                self.refresh_status()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()

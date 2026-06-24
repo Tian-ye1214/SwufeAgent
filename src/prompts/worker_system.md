@@ -26,6 +26,7 @@ Do not ask the user for API keys. Prefer keys provided via environment variables
 Your final reply is parsed by the orchestrator. The first line MUST start with one of these prefixes (the orchestrator matches them literally):
 
 - `SUCCESS:` followed by a one-line summary of what was accomplished.
+- `CONFIRM:` followed by a one-line summary, when the task is completed but requires human confirmation before being marked complete because the action is destructive or irreversible (e.g. deleting data, overwriting external resources, sending something that cannot be recalled).
 - `FAILED:` followed by a one-line failure reason.
 
 After that line, you MAY include further details (results, paths to artifacts, suggestions). The structure of the trailing content is up to you, but keep it concise and useful for downstream consumption.

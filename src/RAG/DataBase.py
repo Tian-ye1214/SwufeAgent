@@ -253,12 +253,13 @@ class EmbedDataBase:
 
         await self.ensure_connected()
         await self.ensure_vector_index()
+        metric = str((self._index_config or {}).get("metric") or "cosine")
 
         def _search() -> list[dict[str, Any]]:
             db = self._require_db()
             if self._ensure_table_sync(db) is None:
                 return []
-            df = self._table.search(query_embedding).limit(top_k).to_pandas()
+            df = self._table.search(query_embedding).metric(metric).limit(top_k).to_pandas()
             out: list[dict[str, Any]] = []
             for _, row in df.iterrows():
                 dist = row.get("_distance")

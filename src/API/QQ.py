@@ -1,10 +1,18 @@
 import inspect
+import os
 import re
+import sys
 from functools import partial
+from pathlib import Path
+
+# ncatbot 在导入时即冻结配置（从 NCATBOT_CONFIG_PATH 读取配置文件路径），
+# 故须在导入 ncatbot 之前指向随包附带的 config.yaml，否则会回退到 input() 阻塞。
+os.environ.setdefault("NCATBOT_CONFIG_PATH", str(Path(__file__).resolve().parent / "config.yaml"))
 
 from ncatbot.core import BaseMessageEvent, BotClient, GroupMessageEvent, MetaEvent
 from ncatbot.plugin_system import on_message
 from ncatbot.utils import config
+from ncatbot.utils.config import strong_password_check
 
 from infra import logger
 from config.app_config import get_env
@@ -22,7 +30,8 @@ class QQBot(BotBase):
 
     def __init__(self):
         super().__init__()
-        config.set_bot_uin(get_env("QQBOT_ID", warn=False) or None)
+        if uin := get_env("QQBOT_ID", warn=False):
+            config.set_bot_uin(uin)
         self._bot_client = BotClient()
         self._bot_client.add_shutdown_handler(self._on_shutdown)
 
@@ -69,7 +78,7 @@ class QQBot(BotBase):
         session_id = self._session_id(event)
         user_text = self.clean_text(raw_text)
         attachments = await self._extract_attachments(event)
-        user_text, attachments = await self._partition_pdf_attachments(user_text, attachments)
+        user_text, attachments = await self._partition_document_attachments(user_text, attachments)
         await self.dispatch_user_message(
             session_id,
             UserMessage(text=user_text, attachments=attachments),
@@ -79,6 +88,30 @@ class QQBot(BotBase):
     def _register_handlers(self) -> None:
         on_message(self._handle_message)
 
+    def _doctor(self) -> None:
+        """启动前体检：配置缺失/无效时立即报错退出，避免 ncatbot 回退到 input() 静默卡死。"""
+        config_path = Path(os.environ["NCATBOT_CONFIG_PATH"])
+        if not config_path.is_file():
+            logger.error(
+                f"[QQ] 找不到 NapCat 配置文件 {config_path}。"
+                f"请在 src/API/ 下放置 config.yaml（参照仓库内模板）。"
+            )
+            sys.exit(1)
+        uin = str(config.bt_uin or "")
+        if uin in ("", "None", "123456"):
+            logger.error(
+                "[QQ] 机器人 QQ 号未配置。请设置环境变量 QQBOT_ID，"
+                f"或在 {config_path} 中填写 bt_uin。"
+            )
+            sys.exit(1)
+        token = config.napcat.webui_token
+        if not strong_password_check(token):
+            logger.error(
+                f"[QQ] NapCat WebUI 令牌强度不足（{config_path} 的 napcat.webui_token）。"
+                f"请改为至少 12 位、含数字与大小写字母及特殊符号的强密码。"
+            )
+            sys.exit(1)
+
     def run(
         self,
         *,
@@ -87,6 +120,7 @@ class QQBot(BotBase):
         enable_webui_interaction: bool = False,
         **kwargs,
     ):
+        self._doctor()
         self._released = False
         self._register_handlers()
         try:

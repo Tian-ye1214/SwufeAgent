@@ -22,6 +22,7 @@ class RAG:
         vector_dim: int,
         *,
         use_rerank: bool,
+        min_similarity: float = 0.0,
         extended_schema: bool = False,
         index_config: dict | None = None,
     ):
@@ -40,6 +41,7 @@ class RAG:
         self.vector_search_limit = vector_search_limit
         self.final_top_k = final_top_k
         self._use_rerank = use_rerank
+        self._min_similarity = min_similarity
 
     async def connect(self) -> None:
         await self._db.connect()
@@ -127,6 +129,19 @@ class RAG:
             )
             if not candidates:
                 return []
+
+            if self._min_similarity > 0.0:
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.get("_distance") is not None
+                    and 1.0 - c["_distance"] >= self._min_similarity
+                ]
+                if not candidates:
+                    logger.info(
+                        "RAG retrieve: 全部低于相似度阈值 %.2f，返回空", self._min_similarity
+                    )
+                    return []
 
             if not self._use_rerank:
                 cap = min(self.final_top_k, len(candidates))

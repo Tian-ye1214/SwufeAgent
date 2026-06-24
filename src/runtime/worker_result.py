@@ -26,6 +26,8 @@ def parse_worker_result(output: str) -> WorkerResult:
     first_line = text.splitlines()[0].upper() if text else ""
     if first_line.startswith("FAILED:"):
         return WorkerResult(False)
+    if first_line.startswith("CONFIRM:"):
+        return WorkerResult(True, needs_user_confirmation=True)
     if first_line.startswith("SUCCESS:"):
         return WorkerResult(True)
     if text.upper().startswith("ERROR:"):

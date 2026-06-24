@@ -302,13 +302,13 @@ class WorkerOrchestrator:
 
             async def _run_one(task_to_run):
                 async with sem:
-                    success, output = await self._execute_worker_task(
+                    success, output, needs_confirmation = await self._execute_worker_task(
                         task_to_run,
                         user_goal,
                         attachments=attachments,
                         turn_id=turn_id,
                     )
-                    return task_to_run.id, success, output
+                    return task_to_run.id, success, output, needs_confirmation
 
             results = await asyncio.gather(*[_run_one(t) for t in ready_tasks], return_exceptions=True)
 
@@ -325,8 +325,20 @@ class WorkerOrchestrator:
                     tm.mark_task_failed(failed_id, f"异常: {result}")
                     logger.error(f"\n\n！！！！！！！！Worker-{failed_id} 异常: {result}！！！！！！！！\n\n")
                 else:
-                    task_id, success, output = result
-                    if success:
+                    task_id, success, output, needs_confirmation = result
+                    if success and needs_confirmation:
+                        task = tm.tasks.get(task_id)
+                        if task is not None:
+                            task.status = TaskStatus.PENDING_CONFIRMATION
+                        if await self._confirm_task(task, output):
+                            tm.mark_task_complete(task_id, output)
+                            logger.info(f"Worker-{task_id} 完成（已人工确认）")
+                        else:
+                            if task is not None:
+                                task.failure_history.append("用户拒绝确认")
+                                task.status = TaskStatus.FAILED
+                            logger.warning(f"Worker-{task_id} 用户拒绝确认，标记失败")
+                    elif success:
                         tm.mark_task_complete(task_id, output)
                         logger.info(f"Worker-{task_id} 完成")
                     else:
@@ -382,14 +394,18 @@ class WorkerOrchestrator:
 
         prompt_input = [prompt, *attachments] if attachments else prompt
 
+        needs_confirmation = False
+
         def _after_parse(parsed, _output: str) -> None:
+            nonlocal needs_confirmation
             task.artifacts.extend(parsed.artifacts)
             if parsed.risks:
                 task.tool_summaries.append("risks: " + "; ".join(parsed.risks))
             if parsed.needs_user_confirmation:
+                needs_confirmation = True
                 task.tool_summaries.append("needs user confirmation")
 
-        return await self._run_worker(
+        success, output = await self._run_worker(
             worker_agent,
             prompt_input,
             task.worker_chat_history,
@@ -410,3 +426,12 @@ class WorkerOrchestrator:
             error_log_prefix=f"[{worker_id}]",
             log_exception_type=False,
         )
+        return success, output, needs_confirmation
+
+    async def _confirm_task(self, task: Task, output: str) -> bool:
+        """请求人工确认某个需确认任务是否真正完成。"""
+        answer = (await self._toolkit.ask_user(
+            f"⚠ 任务 [{task.id}] 已完成但需人工确认（操作不可逆）:\n{task.description}\n"
+            f"Worker 报告:\n{output}\n确认完成？(y/N)"
+        )).strip().lower()
+        return answer in ("y", "yes", "是", "确认")

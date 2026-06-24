@@ -83,6 +83,7 @@
     "vector_search_limit": 30,
     "final_top_k": 8,
     "use_rerank": false,
+    "min_similarity": 0.3,
     "reconcile_on_query": true,
     "turn_token_limit": 8192,
     "turn_chunk_overlap_tokens": 512,
@@ -103,5 +104,6 @@
       "merge_len_check_min_old_chars": 200
     }
   },
-  "request_limit": null
+  "request_limit": null,
+  "MODEL_HTTP_TIMEOUT": 300
 }

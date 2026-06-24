@@ -47,7 +47,7 @@ class WeChatAgentBot(BotBase):
                 b64 = base64.standard_b64encode(media.data).decode("ascii")
                 attachments.append(ImageUrl(url=f"data:{mime};base64,{b64}"))
             else:
-                text, consumed = await self._inline_pdf_bytes(
+                text, consumed = await self._inline_document_bytes(
                     text,
                     media.data,
                     media_type=mime,

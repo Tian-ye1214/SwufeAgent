@@ -307,6 +307,67 @@ def pdf_attachment_text_block(data: bytes, *, filename: str | None = None) -> st
     return f"{label}\n\n{extracted}"
 
 
+_DOCX_MEDIA_TYPES = frozenset({
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+})
+_XLSX_MEDIA_TYPES = frozenset({
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+})
+_TEXT_EXTS = (".csv", ".json", ".txt", ".md", ".markdown")
+_TEXT_MEDIA_TYPES = frozenset({
+    "text/csv",
+    "application/json",
+    "text/plain",
+    "text/markdown",
+})
+
+
+def document_attachment_text_block(data: bytes, *, filename: str = "", media_type: str = "") -> str | None:
+    """Extract a labelled text block from a document attachment; None if unsupported."""
+    if not data:
+        return None
+    name = filename or ""
+    ext = Path(name).suffix.lower()
+    mt = (media_type or "").split(";")[0].strip().lower()
+
+    if is_pdf_content(data, media_type=media_type, filename=name):
+        return pdf_attachment_text_block(data, filename=name or None)
+
+    if ext == ".docx" or mt in _DOCX_MEDIA_TYPES:
+        text = _clean_extracted_text(extract_text_from_docx(io.BytesIO(data)))
+        label = f"【Word 附件：{name}】" if name else "【Word 附件】"
+        return f"{label}\n\n{text}"
+
+    if ext in (".xlsx", ".xls") or mt in _XLSX_MEDIA_TYPES:
+        text = _clean_extracted_text(extract_text_from_excel(io.BytesIO(data)))
+        label = f"【Excel 附件：{name}】" if name else "【Excel 附件】"
+        return f"{label}\n\n{text}"
+
+    if ext in _TEXT_EXTS or mt in _TEXT_MEDIA_TYPES:
+        text = _clean_extracted_text(data.decode("utf-8", errors="replace"))
+        label = f"【文本附件：{name}】" if name else "【文本附件】"
+        return f"{label}\n\n{text}"
+
+    return None
+
+
+def is_supported_attachment(data: bytes, *, filename: str = "", media_type: str = "") -> bool:
+    name = filename or ""
+    ext = Path(name).suffix.lower()
+    mt = (media_type or "").split(";")[0].strip().lower()
+    if is_pdf_content(data, media_type=media_type, filename=name):
+        return True
+    if ext == ".docx" or mt in _DOCX_MEDIA_TYPES:
+        return True
+    if ext in (".xlsx", ".xls") or mt in _XLSX_MEDIA_TYPES:
+        return True
+    if ext in _TEXT_EXTS or mt in _TEXT_MEDIA_TYPES:
+        return True
+    return False
+
+
 def extract_text_from_excel(file):
     sheets = pd.read_excel(file, sheet_name=None)
     content = ""

@@ -30,6 +30,7 @@ def _stm_rag_from_config(cfg: dict[str, Any]) -> Any:
         final_top_k=int(cfg["final_top_k"]),
         vector_dim=vector_dim,
         use_rerank=bool(cfg["use_rerank"]),
+        min_similarity=float(cfg.get("min_similarity", 0.0) or 0.0),
         extended_schema=True,
         index_config=index_cfg,
     )

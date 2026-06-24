@@ -135,7 +135,11 @@ def _openai_compatible_thinking_profile(model_name: str) -> ModelProfile:
 
 
 def _get_shared_http_client() -> httpx.AsyncClient:
-    return get_client(_HTTP_KEY, create_async_http_client)
+    timeout = int(float(get_env("MODEL_HTTP_TIMEOUT", warn=False) or 300))
+    return get_client(
+        _HTTP_KEY,
+        lambda: create_async_http_client(timeout=timeout, connect=10),
+    )
 
 
 def create_model(model_name: str, parameter: dict):
