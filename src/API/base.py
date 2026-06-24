@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
 
-from paths import repo_root
+from infra.paths import repo_root
 
 _REPO_ROOT = repo_root()
 _SRC = _REPO_ROOT / "src"
@@ -21,14 +21,14 @@ for _p in (str(_SRC), _API_DIR):
         sys.path.insert(0, _p)
 os.chdir(_REPO_ROOT)
 
-from app_config import get_env, settings
+from config.app_config import get_env, settings
 from agent_core.input_messages import UserMessage
 from agent_core.system import AgentSystem
 from tools.memory import ChatHistory
 from tools.ExtractFileContent import is_pdf_content, pdf_attachment_text_block
-from shared_http import close_all_clients
-import logger
-import tool_telemetry
+from infra.shared_http import close_all_clients
+from infra import logger
+from runtime import tool_telemetry
 
 
 @dataclass(frozen=True)

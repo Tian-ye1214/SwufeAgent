@@ -4,9 +4,9 @@ import asyncio
 from typing import Any
 
 import httpx
-import logger
-from app_config import get_env, settings
-from shared_http import get_client
+from infra import logger
+from config.app_config import get_env, settings
+from infra.shared_http import get_client
 
 _HTTP_KEY = "rag"
 

@@ -5,7 +5,7 @@ from functools import partial
 from pydantic_ai import BinaryContent, ImageUrl
 from wechatbot import WeChatBot
 
-import logger
+from infra import logger
 from agent_core.input_messages import UserMessage
 from base import BotBase
 

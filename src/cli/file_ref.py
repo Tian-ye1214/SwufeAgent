@@ -6,7 +6,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from path_sandbox import runtime_repo_root
+from infra.path_sandbox import runtime_repo_root
 
 _BINARY_SUFFIXES = frozenset(
     {

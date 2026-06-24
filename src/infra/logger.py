@@ -10,8 +10,8 @@ from typing import Any
 
 from loguru import logger as _lg
 
-from paths import repo_root
-from persist_utils import safe_name
+from infra.paths import repo_root
+from infra.persist_utils import safe_name
 
 CONSOLE_FMT = "{time:HH:mm:ss} | {level: <8} | {message}"
 FILE_FMT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}"

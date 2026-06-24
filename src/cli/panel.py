@@ -10,7 +10,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-import logger
+from infra import logger
+from workspace.workspace import conversations_root
 from ModelGateway.usage_accounting import (
     MODEL_MESSAGES_GLOB,
     UsageTotals,
@@ -193,7 +194,7 @@ async def build_panel_snapshot(
     include_all: bool = False,
     cache: PanelSnapshotCache | None = None,
 ) -> PanelSnapshot:
-    root = Path(log_root or logger.LOG_DIR)
+    root = Path(log_root or conversations_root())
     history, sessions = await asyncio.to_thread(_collect_history, root, cache or PanelSnapshotCache())
     visible_sessions = sessions if include_all else sessions[:RECENT_SESSION_LIMIT]
     runtime = await _collect_runtime(system, coordinator_history, manager_history)
@@ -227,7 +228,7 @@ def _collect_history(
 ) -> tuple[PanelHistoryStats, list[PanelSessionSummary]]:
     history = PanelHistoryStats()
     sessions: dict[tuple[str, str], PanelSessionSummary] = {}
-    files = sorted((log_root / "conversations").rglob(MODEL_MESSAGES_GLOB), key=str)
+    files = sorted(root.glob(MODEL_MESSAGES_GLOB), key=str)
     for path in files:
         result = cache.load(path)
         if result.error:
@@ -305,15 +306,15 @@ def _file_identity(path: Path, meta: dict[str, Any]) -> tuple[str, str, str]:
     agent = str(meta.get("agent") or "")
     date = str(meta.get("date") or "")
     topic = str(meta.get("topic") or "")
-    parts = path.parts
     if not agent or not date or not topic:
-        try:
-            idx = parts.index("conversations")
-            agent = agent or parts[idx + 1]
-            date = date or parts[idx + 2]
-            topic = topic or parts[idx + 3]
-        except Exception:
-            pass
+        stem = path.name
+        if stem.endswith("_ModelMessages.json"):
+            stem = stem[: -len("_ModelMessages.json")]
+        parts = stem.split("_", 2)
+        if len(parts) >= 3:
+            agent = agent or parts[0]
+            date = date or parts[1]
+            topic = topic or parts[2]
     return agent or "unknown", date or "unknown", topic or "unknown"
 
 

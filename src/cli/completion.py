@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app_config import get_agent_roles
+from config.app_config import get_agent_roles
 
 COMMANDS: tuple[str, ...] = (
     "/help",
@@ -55,7 +55,7 @@ def completion_for_input(text: str) -> InputCompletion | None:
             return InputCompletion(kind="agent_role", prefix=prefix)
         return None
 
-    if text.startswith("/cd ") or text.startswith("/load "):
+    if text.startswith("/cd "):
         prefix = text.split(" ", 1)[1] if " " in text else ""
         return InputCompletion(kind="file_path", prefix=prefix)
 

@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypeVar
 
-import logger
-from app_config import settings
-from runtime_state import TRACE_STORE, agent_context, turn_context
+from infra import logger
+from config.app_config import settings
+from runtime.runtime_state import TRACE_STORE, agent_context, turn_context
 
 T = TypeVar("T")
 
@@ -469,6 +469,49 @@ async def run_agent_with_lifecycle(
             usage_limits=usage_limits,
             event_stream_handler=event_stream_handler,
         )
+    return await run_coroutine_with_lifecycle(
+        factory=_factory, agent_id=agent_id, registry=registry,
+        hooks=hooks, turn_id=turn_id,
+        parent_invocation_id=parent_invocation_id,
+    )
+
+
+async def run_agent_iter_with_lifecycle(
+    *,
+    agent: Any,
+    prompt: Any,
+    agent_id: str,
+    registry: AgentRegistry,
+    hooks: LifecycleHooks,
+    turn_id: str | None,
+    message_history: Any,
+    usage_limits: Any,
+    parent_invocation_id: str | None = None,
+    event_stream_handler: Callable[[Any, Any], Awaitable[Any]] | None = None,
+    on_node: Callable[[Any], Awaitable[None]] | None = None,
+) -> Any:
+    """逐节点驱动 agent.iter()，每个图节点（模型响应/工具批次）完成后回调 on_node。
+
+    用于在回合进行中增量落盘对话历史：即使回合中途崩溃或被取消，已产生的
+    model_messages 也已写盘，不会整段丢失。event_stream_handler 行为对齐
+    agent.run(...)（仅对 model-request / call-tools 节点流式输出）。
+    """
+    async def _factory() -> Any:
+        async with agent.iter(
+            prompt,
+            message_history=message_history,
+            usage_limits=usage_limits,
+        ) as run:
+            async for node in run:
+                if event_stream_handler is not None and (
+                    agent.is_model_request_node(node) or agent.is_call_tools_node(node)
+                ):
+                    async with node.stream(run.ctx) as stream:
+                        await event_stream_handler(run.ctx, stream)
+                if on_node is not None:
+                    await on_node(run)
+        return run.result
+
     return await run_coroutine_with_lifecycle(
         factory=_factory, agent_id=agent_id, registry=registry,
         hooks=hooks, turn_id=turn_id,

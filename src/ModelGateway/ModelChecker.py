@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app_config import (
+from config.app_config import (
     chat_completion_inference_request_fields,
     get_agent_roles,
     get_context_config,
@@ -29,7 +29,7 @@ from tools.memory import ChatHistory, pydantic_messages_to_text
 from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
 from ModelGateway.usage_accounting import latest_usage_input_tokens
 
-import logger
+from infra import logger
 
 from pydantic_ai.messages import (
     BaseToolCallPart,

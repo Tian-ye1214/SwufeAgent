@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
-from lifecycle import AgentInvocationState
-from runtime_state import TRACE_STORE
+from config.app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
+from runtime.lifecycle import AgentInvocationState
+from runtime.runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
     _lookup_openrouter_meta,
     compress_history_async,
@@ -31,10 +31,12 @@ from ModelGateway.usage_accounting import (
 from prompt import get_skills_as_in_system_prompt
 from skills.SkillsManager import SkillsManager
 from tools.memory import ChatHistory
-from tools.conversation_log import drain_pending_saves, read_saved_model_messages_file
+from tools.conversation_log import drain_pending_saves
+from workspace.workspace import WorkspaceSnapshot, conversations_root
+from workspace.workspace_load import enter_workspace
 from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
 from cli.panel import build_panel_snapshot, render_panel
-import logger
+from infra import logger
 
 
 def _out(text: str = "") -> None:
@@ -98,7 +100,7 @@ def print_cli_help() -> None:
 | `/exit` / `/quit` | 退出程序 |
 | `/clear` | 清空任务与对话上下文 |
 | `/pwd` | 查看当前工作目录 |
-| `/cd <path>` | 切换工作目录 |
+| `/cd <path>` | 切换工作目录（并自动加载该工作区对话） |
 | `/config` | 查看配置摘要 |
 | `/context` | 查看上下文 token 用量分解 |
 | `/panel` | 查看当前工作区运行与历史总览 |
@@ -111,7 +113,7 @@ def print_cli_help() -> None:
 | `/status` | Agent 生命周期与 invocation |
 | `/cancel` | 中止 invocation |
 | `/stop` | 中断当前用户回合 |
-| `/load <path>` | 从落盘文件恢复对话 |
+| `/load` | 从当前工作区选择并加载对话快照 |
 | `/trace` / `/tasks` | 追踪与任务状态 |
 
 ## 其他
@@ -292,7 +294,7 @@ async def _print_usage_report(raw: str, system: Any) -> None:
         if not session_key:
             print_error("当前会话尚未绑定日志目录；请使用 /usage <path>")
             return
-        files = session_model_message_files(logger.LOG_DIR, session_key)
+        files = session_model_message_files(conversations_root(), session_key)
         if not files:
             print_error(f"当前会话没有 model_messages 日志: {session_key}")
             return
@@ -422,6 +424,7 @@ class SlashCommandContext:
     manager_history: ChatHistory | None
     reset_cli_session_for_load: Callable[[], Awaitable[None]]
     bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None]
+    pick_snapshot: Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]] | None
     system: Any
 
 
@@ -500,7 +503,7 @@ async def _cmd_panel(ctx: SlashCommandContext) -> bool | None:
     await drain_pending_saves()
     include_all = any(part.strip().lower() == "--all" for part in ctx.parts[1:])
     snapshot = await build_panel_snapshot(
-        log_root=logger.LOG_DIR,
+        log_root=conversations_root(),
         system=ctx.system,
         coordinator_history=ctx.coordinator_history,
         manager_history=ctx.manager_history,
@@ -527,7 +530,15 @@ async def _cmd_cd(ctx: SlashCommandContext) -> bool | None:
         return None
     os.chdir(target)
     print_success(f"已切换工作目录: {target}")
-    return None
+    loaded = await enter_workspace(
+        workspace_path=target,
+        coordinator_history=ctx.coordinator_history,
+        manager_history=ctx.manager_history,
+        reset_cli_session_for_load=ctx.reset_cli_session_for_load,
+        bind_loaded_snapshot_for_save=ctx.bind_loaded_snapshot_for_save,
+        pick_snapshot=ctx.pick_snapshot,
+    )
+    return True if loaded else None
 
 
 async def _cmd_status(ctx: SlashCommandContext) -> bool | None:
@@ -676,45 +687,18 @@ async def _cmd_api(ctx: SlashCommandContext) -> bool | None:
 
 
 async def _cmd_load(ctx: SlashCommandContext) -> bool | None:
-    tail = ctx.raw.strip()[5:].strip()
-    if not tail:
-        print_error("用法: /load <*.model_messages.json 路径>")
-        return None
-    raw_path = _strip_quotes(tail)
-    load_path = Path(raw_path).expanduser()
-    if not load_path.is_file():
-        print_error(f"找不到文件: {load_path}")
-        return None
-    try:
-        messages, meta = read_saved_model_messages_file(load_path)
-    except Exception as e:
-        print_error(f"加载失败: {e}")
-        return None
-    agent = (meta.get("agent") or "").strip().lower()
-    if agent not in ("coordinator", "manager"):
-        print_error(
-            f"该快照的 agent={meta.get('agent')!r}，CLI 仅支持从 coordinator 或 manager 落盘文件恢复。"
-        )
-        return None
     if ctx.coordinator_history is None or ctx.manager_history is None:
         print_error("当前环境未绑定历史对象，无法加载。")
         return None
-    await ctx.reset_cli_session_for_load()
-    if agent == "coordinator":
-        ctx.coordinator_history.set_messages(messages)
-        ctx.manager_history.reset()
-        ctx.bind_loaded_snapshot_for_save("coordinator", load_path, meta)
-        print_success(
-            f"已加载 Coordinator 对话（{len(messages)} 条模型消息），任务与 Manager 上下文已清空。"
-        )
-    else:
-        ctx.manager_history.set_messages(messages)
-        ctx.coordinator_history.reset()
-        ctx.bind_loaded_snapshot_for_save("manager", load_path, meta)
-        print_success(
-            f"已加载 Manager 对话（{len(messages)} 条模型消息），任务与 Coordinator 上下文已清空。"
-        )
-    return True
+    return await enter_workspace(
+        coordinator_history=ctx.coordinator_history,
+        manager_history=ctx.manager_history,
+        reset_cli_session_for_load=ctx.reset_cli_session_for_load,
+        bind_loaded_snapshot_for_save=ctx.bind_loaded_snapshot_for_save,
+        pick_snapshot=ctx.pick_snapshot,
+        force_picker=True,
+        announce_empty=True,
+    )
 
 
 async def _cmd_compress(ctx: SlashCommandContext) -> bool | None:
@@ -783,6 +767,7 @@ async def handle_slash_command(
     manager_history: ChatHistory | None,
     reset_cli_session_for_load: Callable[[], Awaitable[None]],
     bind_loaded_snapshot_for_save: Callable[[str, Path, dict], None],
+    pick_snapshot: Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]] | None = None,
     system: Any,
 ) -> bool | None:
     """
@@ -802,6 +787,7 @@ async def handle_slash_command(
         manager_history=manager_history,
         reset_cli_session_for_load=reset_cli_session_for_load,
         bind_loaded_snapshot_for_save=bind_loaded_snapshot_for_save,
+        pick_snapshot=pick_snapshot,
         system=system,
     )
 

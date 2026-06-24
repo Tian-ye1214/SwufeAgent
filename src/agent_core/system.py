@@ -1,4 +1,4 @@
-import app_config
+from config import app_config
 
 app_config.load_config()
 
@@ -16,7 +16,7 @@ from ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
-from app_config import get_agent_usage_limits
+from config.app_config import get_agent_usage_limits
 from cli.output import supports_model_stream
 from cli.render import (
     TextEventStreamHandler,
@@ -28,8 +28,8 @@ from cli.render import (
     print_warning,
     show_model_output,
 )
-from cli_ui import format_user_log_text
-import logger
+from cli.cli_ui import format_user_log_text
+from infra import logger
 import traceback
 import time
 import asyncio
@@ -43,10 +43,11 @@ from pydantic_ai.exceptions import ModelHTTPError
 from skills.SkillsManager import SkillsManager
 from agent_core.goal_mode import run_goal_loop
 
-from lifecycle import (
+from runtime.lifecycle import (
     AgentRegistry,
     LifecycleHooks,
     register_default_lifecycle_logging,
+    run_agent_iter_with_lifecycle,
     run_agent_stream_with_lifecycle,
     run_agent_with_lifecycle,
 )
@@ -458,7 +459,7 @@ class AgentSystem:
     async def generate_task_title(self, user_text: str) -> str:
         """用 LLM（worker 模型，thinking=disabled）生成简洁的任务目录标题。"""
         try:
-            from app_config import get_model_and_params, get_agent_usage_limits
+            from config.app_config import get_model_and_params, get_agent_usage_limits
             from ModelGateway.agent_factory import create_agent
 
             name, params = get_model_and_params("worker")
@@ -568,8 +569,15 @@ class AgentSystem:
 
         planning_prompt = [planning_text, *attachments] if attachments else planning_text
         manager_aid = await self._agent_id("manager")
+        manager_log = self._session_logs.for_agent("manager")
+        planning_extra = {"kind": "manager", "phase": "planning", "turn_id": tid}
+
+        async def _save_planning_node(run: Any) -> None:
+            self._manager_history.set_messages(list(run.all_messages()))
+            manager_log.save(self._manager_history.messages, extra=planning_extra)
+
         with model_generating_indicator():
-            result = await run_agent_with_lifecycle(
+            result = await run_agent_iter_with_lifecycle(
                 agent=manager_agent,
                 prompt=planning_prompt,
                 agent_id=manager_aid,
@@ -578,6 +586,7 @@ class AgentSystem:
                 turn_id=tid,
                 message_history=self._manager_history.messages,
                 usage_limits=get_agent_usage_limits(),
+                on_node=_save_planning_node,
             )
         await self._save_manager_result(phase="planning", turn_id=tid, result=result)
         show_model_output(result.output, title="Manager 规划")
@@ -751,8 +760,17 @@ class AgentSystem:
         start_time = time.time()
         coord_aid = await self._agent_id("coordinator")
         stream_handler = None if output_transform is not None else _make_coordinator_stream_handler()
+        coord_log = self._session_logs.for_agent("coordinator")
+        extra: dict = {"kind": "coordinator"}
+        if conversation_log_extra:
+            extra.update(conversation_log_extra)
+
+        async def _save_coordinator_node(run: Any) -> None:
+            history.set_messages(list(run.all_messages()))
+            coord_log.save(history.messages, extra=extra)
+
         try:
-            result = await run_agent_with_lifecycle(
+            result = await run_agent_iter_with_lifecycle(
                 agent=agent,
                 prompt=message.to_prompt(),
                 agent_id=coord_aid,
@@ -762,6 +780,7 @@ class AgentSystem:
                 message_history=history.messages,
                 usage_limits=get_agent_usage_limits(),
                 event_stream_handler=stream_handler,
+                on_node=_save_coordinator_node,
             )
         except BaseException:
             clear_model_stream()
@@ -779,10 +798,7 @@ class AgentSystem:
         elapsed = time.time() - start_time
 
         logger.debug("run_agent_system 完成，耗时 %.2f 秒", elapsed)
-        extra: dict = {"kind": "coordinator"}
-        if conversation_log_extra:
-            extra.update(conversation_log_extra)
-        self._session_logs.for_agent("coordinator").save(history.messages, extra=extra)
+        coord_log.save(history.messages, extra=extra)
         await _maybe_auto_compress(
             history,
             role="coordinator",

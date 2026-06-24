@@ -11,7 +11,7 @@ import httpx
 from ncatbot.core import BaseMessageEvent, GroupMessageEvent
 from pydantic_ai import BinaryContent
 
-import logger
+from infra import logger
 
 
 def norm_url(url: str) -> str:

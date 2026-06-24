@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import httpx
 
-import logger
+from infra import logger
 
 _clients: dict[str, httpx.AsyncClient] = {}
 

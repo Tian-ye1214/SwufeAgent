@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from ModelGateway.agent_factory import create_agent, create_function_toolset
-from app_config import get_model_and_params
+from config.app_config import get_model_and_params
 from prompt import get_coordinator_system_prompt, get_manager_system_prompt
 from skills.SkillsManager import SkillsManager
 

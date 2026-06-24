@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-import logger
-from app_config import settings
+from config.app_config import settings
 from tools.conversation_log import SessionConversationLogs
 from tools.memory import ChatHistory, LongTermMemory, ShortTermMemory
 
@@ -15,10 +14,7 @@ class MemoryRuntime:
     def __init__(self) -> None:
         self.long_term = LongTermMemory()
         self.long_term.refresh_from_disk_sync()
-        self.short_term = ShortTermMemory(
-            settings()["short_term_memory"],
-            log_root=logger.LOG_DIR,
-        )
+        self.short_term = ShortTermMemory(settings()["short_term_memory"])
         self._injection_snapshot: str | None = None
 
     @property
@@ -60,17 +56,15 @@ class MemoryRuntime:
         msgs = list(history.messages)
         spawn_background(self.long_term.consolidate_from_messages(msgs, silent=True))
 
+        from workspace.workspace import stm_log_key
+
         coord_log = session_logs.for_agent("coordinator")
         messages_path = coord_log.model_messages_path()
         session_key = session_logs.session_key()
         if messages_path is None or session_key is None:
             return
 
-        root = logger.LOG_DIR.resolve()
-        try:
-            log_key = messages_path.resolve().relative_to(root).as_posix()
-        except ValueError:
-            log_key = messages_path.resolve().as_posix()
+        log_key = stm_log_key(messages_path)
 
         self.short_term.schedule_ingest_after_turn(
             msgs, log_key, "coordinator", session_key

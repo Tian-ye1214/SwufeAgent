@@ -6,8 +6,8 @@ from ncatbot.core import BaseMessageEvent, BotClient, GroupMessageEvent, MetaEve
 from ncatbot.plugin_system import on_message
 from ncatbot.utils import config
 
-import logger
-from app_config import get_env
+from infra import logger
+from config.app_config import get_env
 from agent_core.input_messages import UserMessage
 from base import BotBase
 from qq_media_helpers import extract_media

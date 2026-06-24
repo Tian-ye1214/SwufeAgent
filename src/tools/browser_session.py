@@ -4,7 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Callable
 
-import logger
+from infra import logger
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
 

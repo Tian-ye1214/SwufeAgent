@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
-import logger
-from paths import skills_dir as default_skills_dir
+from infra import logger
+from infra.paths import skills_dir as default_skills_dir
 
 
 @dataclass
@@ -206,7 +206,7 @@ class SkillsManager:
     ) -> str:
         import sys
         import subprocess
-        from subprocess_runner import run_subprocess
+        from infra.subprocess_runner import run_subprocess
 
         skill = self.skills.get(skill_name)
         if not skill:

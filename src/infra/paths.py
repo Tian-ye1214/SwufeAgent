@@ -8,7 +8,7 @@ def repo_root() -> Path:
     """Project root: exe directory when frozen, else parent of src/."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def src_root() -> Path:

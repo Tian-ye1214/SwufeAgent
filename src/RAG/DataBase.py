@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import lancedb
-import logger
+from infra import logger
 from lancedb.pydantic import LanceModel, Vector
 from RAG.storage_path import resolve_lancedb_dir
 

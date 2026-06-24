@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from paths import repo_root as runtime_repo_root, work_database_root
+from infra.paths import repo_root as runtime_repo_root, work_database_root
 
 
 def readable_roots(*, work_base: Path) -> tuple[Path, ...]:

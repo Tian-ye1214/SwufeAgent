@@ -7,9 +7,9 @@ from typing import Any
 
 import httpx
 import json_repair
-import logger
-from persist_utils import atomic_write_text, file_lock
-from app_config import (
+from infra import logger
+from infra.persist_utils import atomic_write_text, file_lock
+from config.app_config import (
     chat_completion_inference_request_fields,
     get_env,
     get_model_and_params,
@@ -19,7 +19,7 @@ from tools.memory.consolidation import (
     merge_looks_like_unrelated_rewrite,
 )
 from tools.memory.message_text import user_prompts_to_text
-from shared_http import get_client
+from infra.shared_http import get_client
 
 _HTTP_KEY = "ltm"
 

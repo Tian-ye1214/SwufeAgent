@@ -17,9 +17,9 @@ from pydantic_ai.models import ModelRequestParameters, create_async_http_client
 from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
-import logger
-from app_config import get_env, http_chat_completions_thinking_extras, unified_thinking_setting
-from shared_http import get_client
+from infra import logger
+from config.app_config import get_env, http_chat_completions_thinking_extras, unified_thinking_setting
+from infra.shared_http import get_client
 
 _HTTP_KEY = "model"
 

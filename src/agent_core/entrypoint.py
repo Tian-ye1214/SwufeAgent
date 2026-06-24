@@ -4,7 +4,7 @@ import asyncio
 import signal
 
 from agent_core.system import AgentSystem
-from shared_http import close_all_clients
+from infra.shared_http import close_all_clients
 
 
 def install_stop_handlers(stop_event: asyncio.Event) -> None:

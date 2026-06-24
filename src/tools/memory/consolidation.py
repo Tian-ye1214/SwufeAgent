@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
-from app_config import settings
+from config.app_config import settings
 
 
 def long_term_memory_consolidation_params(**kwargs: Any) -> dict[str, int | float]:

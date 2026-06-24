@@ -14,8 +14,10 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.suggester import Suggester
-from textual.widgets import Footer, Input, Label, ProgressBar, RichLog, Sparkline, Static
+from textual.widgets import Footer, Input, Label, OptionList, ProgressBar, RichLog, Sparkline, Static
+from textual.widgets.option_list import Option
 
 from cli.completer import _iter_file_completions
 from cli.completion import (
@@ -26,7 +28,8 @@ from cli.completion import (
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from cli.panel import PanelSnapshotCache, build_panel_snapshot, render_panel
 from cli.pending_review import compute_hunks
-import logger
+from infra import logger
+from workspace.workspace import WorkspaceSnapshot
 
 READY_LABEL = "就绪"
 WORKING_LABEL = "工作中"
@@ -80,6 +83,33 @@ def _complete_path_value(value: str, fragment: str) -> str | None:
 
 class AgentInput(Input):
     BINDINGS = [*Input.BINDINGS, Binding("tab", "cursor_right", "Complete", show=False)]
+
+
+class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
+    BINDINGS = [Binding("escape", "cancel", "取消", show=False)]
+
+    def __init__(self, snapshots: list[WorkspaceSnapshot]) -> None:
+        super().__init__()
+        self._snapshots = snapshots
+
+    def compose(self) -> ComposeResult:
+        yield OptionList(
+            *[
+                Option(snapshot.label, id=str(index))
+                for index, snapshot in enumerate(self._snapshots)
+            ],
+            id="snapshot-list",
+        )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id
+        if option_id is None:
+            self.dismiss(None)
+            return
+        self.dismiss(self._snapshots[int(option_id)])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class TextualOutputSink(OutputSink):
@@ -242,8 +272,24 @@ class RedLotusTui(App[None]):
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
         await self.system.prepare_cli_session()
+        controller = self.system._cli_controller
+        controller._active_session_state = self.state
+        controller.set_snapshot_picker(self.pick_snapshot)
+        loaded = await controller.enter_current_workspace()
+        if loaded:
+            self.state.is_first_input = False
         if self.stop_event is not None:
             asyncio.create_task(self._watch_stop_event())
+
+    async def pick_snapshot(
+        self,
+        snapshots: list[WorkspaceSnapshot],
+    ) -> WorkspaceSnapshot | None:
+        if not snapshots:
+            return None
+        if len(snapshots) == 1:
+            return snapshots[0]
+        return await self.push_screen_wait(SnapshotPickScreen(snapshots))
 
     def _make_ask_user_bridge(self):
         _ASK_TIMEOUT = 60  # 用户回复超时（秒）
@@ -440,8 +486,10 @@ class RedLotusTui(App[None]):
         if not self._panel_mode:
             return
         try:
+            from workspace.workspace import conversations_root
+
             snapshot = await build_panel_snapshot(
-                log_root=logger.LOG_DIR,
+                log_root=conversations_root(),
                 system=self.system,
                 coordinator_history=self.state.history,
                 manager_history=getattr(self.system, "_manager_history", None),

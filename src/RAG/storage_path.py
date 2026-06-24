@@ -4,9 +4,9 @@ import os
 import sys
 from pathlib import Path
 
-import logger
-from app_config import get_env
-from path_sandbox import runtime_repo_root
+from infra import logger
+from config.app_config import get_env
+from infra.path_sandbox import runtime_repo_root
 
 _UNSUPPORTED_FS = frozenset({"EXFAT", "FAT32", "FAT"})
 

@@ -6,8 +6,8 @@ from typing import Any
 from pydantic_ai import Agent, FunctionToolset
 from pydantic_ai.capabilities import Capability
 
-import tool_telemetry
-from app_config import get_agent_run_policy
+from runtime import tool_telemetry
+from config.app_config import get_agent_run_policy
 from ModelGateway.model_factory import create_model
 
 

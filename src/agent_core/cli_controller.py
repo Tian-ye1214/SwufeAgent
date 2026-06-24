@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
-import logger
-from persist_utils import safe_name
+from infra import logger
+from infra.persist_utils import safe_name
 from ModelGateway.ModelChecker import (
     get_effective_max_context_async,
     prewarm_effective_max_contexts_by_role_async,
@@ -17,9 +17,12 @@ from cli.file_ref import augment_text_with_file_refs, load_file_refs
 from cli.output import ContextUsageItem, clear_context_usage, set_context_usage
 from cli.render import print_repl_welcome, print_success, print_warning
 from cli.repl import InteractiveRepl
-from cli_commands import handle_slash_command
-from cli_ui import print_startup_logo
+from cli.cli_commands import handle_slash_command
+from cli.cli_ui import print_startup_logo
 from tools.memory import ChatHistory
+from workspace.workspace import WorkspaceSnapshot
+from workspace.workspace_load import enter_workspace
+from workspace.workspace_picker import legacy_pick_snapshot
 
 if TYPE_CHECKING:
     from agent_core.system import AgentSystem
@@ -48,6 +51,39 @@ class AgentCliController:
         self._queued_inputs: list[QueuedCliInput] = []
         self._queue_drain_task: asyncio.Task[None] | None = None
         self._queue_draining = False
+        self._snapshot_picker: Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]] | None = None
+        self._legacy_repl: InteractiveRepl | None = None
+
+    def set_snapshot_picker(
+        self,
+        picker: Callable[[list[WorkspaceSnapshot]], Awaitable[WorkspaceSnapshot | None]] | None,
+    ) -> None:
+        self._snapshot_picker = picker
+
+    async def _pick_snapshot(
+        self,
+        snapshots: list[WorkspaceSnapshot],
+    ) -> WorkspaceSnapshot | None:
+        if self._snapshot_picker is not None:
+            return await self._snapshot_picker(snapshots)
+        if self._legacy_repl is not None:
+            return await legacy_pick_snapshot(snapshots, self._legacy_repl.read_line)
+        return None
+
+    async def enter_current_workspace(self, *, force_picker: bool = False) -> bool | None:
+        state = getattr(self, "_active_session_state", None)
+        if state is None:
+            return None
+        return await enter_workspace(
+            coordinator_history=state.history,
+            manager_history=self.system._manager_history,
+            reset_cli_session_for_load=lambda: self.reset_session(state.history),
+            bind_loaded_snapshot_for_save=lambda agent, path, meta: (
+                self.system._session_logs.bind_loaded_snapshot(agent, path, meta)
+            ),
+            pick_snapshot=self._pick_snapshot,
+            force_picker=force_picker,
+        )
 
     @property
     def queued_input_count(self) -> int:
@@ -179,6 +215,7 @@ class AgentCliController:
             bind_loaded_snapshot_for_save=lambda agent, path, meta: (
                 system._session_logs.bind_loaded_snapshot(agent, path, meta)
             ),
+            pick_snapshot=self._pick_snapshot,
             system=system,
         )
         if first_override is not None:
@@ -302,6 +339,7 @@ class AgentCliController:
 
         await self.prepare_session()
         state = self.new_session_state()
+        self._active_session_state = state
 
         async def on_cli_keyboard_interrupt() -> None:
             if self.system._current_turn is not None:
@@ -310,6 +348,13 @@ class AgentCliController:
             raise KeyboardInterrupt
 
         repl = InteractiveRepl(on_interrupt_during_handler=on_cli_keyboard_interrupt)
+        self._legacy_repl = repl
+        self.set_snapshot_picker(
+            lambda snapshots: legacy_pick_snapshot(snapshots, repl.read_line)
+        )
+        loaded = await self.enter_current_workspace()
+        if loaded:
+            state.is_first_input = False
 
         async def process_one_line(raw_input: str) -> str:
             return await self.process_line(raw_input, state, wait_for_turn=True)

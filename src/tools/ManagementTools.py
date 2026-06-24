@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import json_repair as json
-import logger
+from infra import logger
 
 from tools.memory import ChatHistory
 

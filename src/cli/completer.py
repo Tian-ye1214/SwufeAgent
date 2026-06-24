@@ -11,7 +11,7 @@ from cli.completion import (
     iter_agent_role_completions,
     iter_command_completions,
 )
-from path_sandbox import runtime_repo_root
+from infra.path_sandbox import runtime_repo_root
 
 _COMPLETION_LIMIT = 50
 

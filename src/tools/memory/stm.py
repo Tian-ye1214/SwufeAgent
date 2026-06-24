@@ -8,11 +8,12 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-import logger
-from app_config import get_env
-from persist_utils import iso_utc_now, load_json_state, rel_key, save_locked_json
+from infra import logger
+from config.app_config import get_env
+from infra.persist_utils import iso_utc_now, load_json_state, save_locked_json
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
+from workspace.workspace import MODEL_MESSAGES_GLOB, conversations_root, stm_log_key
 from tools.memory.message_text import TurnMemoryEntry, turn_entries_from_messages
 
 
@@ -79,7 +80,10 @@ class ShortTermMemory:
         return logger.stm_ingest_console_quiet()
 
     def _log_root_resolved(self) -> Path:
-        return (self._log_root if self._log_root is not None else logger.LOG_DIR).resolve()
+        return conversations_root().resolve()
+
+    def _stm_source_key(self, path: Path) -> str:
+        return stm_log_key(path)
 
     def _db_dir(self) -> Path:
         p = Path(str(self._cfg["db_path"]))
@@ -94,7 +98,7 @@ class ShortTermMemory:
         return self._db_dir() / "conversation_stm_failures.jsonl"
 
     def _rel_log_key(self, path: Path, root: Path) -> str:
-        return rel_key(path, root)
+        return self._stm_source_key(path)
 
     def _load_stm_state_sync(self) -> dict[str, Any]:
         return load_json_state(self._stm_state_path(), 2)
@@ -367,11 +371,10 @@ class ShortTermMemory:
     def _current_log_sources_state_sync(self) -> dict[str, Any]:
         root = self._log_root_resolved()
         sources: dict[str, Any] = {}
-        conv = root / "conversations"
-        if conv.is_dir():
-            for fp in sorted(conv.rglob("messages_*.model_messages.json"), key=str):
+        if root.is_dir():
+            for fp in sorted(root.glob(MODEL_MESSAGES_GLOB), key=str):
                 messages, _ = read_saved_model_messages_file(fp)
-                sources[self._rel_log_key(fp, root)] = {
+                sources[self._stm_source_key(fp)] = {
                     "turns_done": len(turn_entries_from_messages(messages))
                 }
         return {"version": 2, "sources": sources}
@@ -404,11 +407,8 @@ class ShortTermMemory:
         root = self._log_root_resolved()
         if not root.is_dir():
             return
-        conv = root / "conversations"
-        if not conv.is_dir():
-            return
 
-        files = sorted(conv.rglob("messages_*.model_messages.json"), key=str)
+        files = sorted(root.glob(MODEL_MESSAGES_GLOB), key=str)
         rag: Any | None = None
         for fp in files:
             state = await asyncio.to_thread(self._load_stm_state_sync)

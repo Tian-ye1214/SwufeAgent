@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from pydantic_ai import BinaryContent
 
-from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
+from infra.path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
 
 _WORK_DATABASE_ROOT = work_database_root()
 

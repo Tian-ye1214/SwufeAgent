@@ -5,16 +5,16 @@ import asyncio
 import time
 import traceback
 
-import logger
+from infra import logger
 from prompt import get_worker_system_prompt
 from ModelGateway.agent_factory import create_agent, create_worker_toolsets_and_capabilities
 from ModelGateway.ModelChecker import maybe_auto_compress_async
-from app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
-from lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
+from config.app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
+from runtime.lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
 from tools.ManagementTools import Task, TaskStatus, TaskManager
 from tools.memory import ChatHistory
 from tools.conversation_log import ConversationLog
-from worker_result import parse_worker_result
+from runtime.worker_result import parse_worker_result
 
 if TYPE_CHECKING:
     from tools.BasicTools import BasicToolkit
@@ -69,11 +69,9 @@ class WorkerOrchestrator:
         if self._stm is not None and self._conversation_date and self._conversation_topic:
             mp = wl.model_messages_path()
             if mp is not None:
-                root = logger.LOG_DIR.resolve()
-                try:
-                    log_key = mp.resolve().relative_to(root).as_posix()
-                except ValueError:
-                    log_key = mp.resolve().as_posix()
+                from workspace.workspace import stm_log_key
+
+                log_key = stm_log_key(mp)
                 sk = f"{self._conversation_date}/{self._conversation_topic}"
                 self._stm.schedule_ingest_after_turn(
                     messages, log_key, "worker", sk

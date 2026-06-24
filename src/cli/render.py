@@ -6,7 +6,7 @@ import sys
 from contextlib import contextmanager
 from typing import Any
 
-import logger
+from infra import logger
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text

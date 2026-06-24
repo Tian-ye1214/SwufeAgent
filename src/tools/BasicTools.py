@@ -7,17 +7,17 @@ import subprocess
 import threading
 import mimetypes
 from ddgs import DDGS
-import logger
+from infra import logger
 import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
 from tools.ImageGeneration import generate_image_from_flux
-from app_config import get_agent_run_policy, get_env
+from config.app_config import get_agent_run_policy, get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
-from path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
-from subprocess_runner import run_subprocess
+from infra.path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
+from infra.subprocess_runner import run_subprocess
 from tools.browser_session import PlaywrightBrowserSession
 from cli.render import show_file_diff
 from cli.pending_review import PendingReviewStore

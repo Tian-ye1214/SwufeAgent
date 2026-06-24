@@ -1,8 +1,8 @@
-import logger
+from infra import logger
 import requests
 import time
 
-from app_config import get_env
+from config.app_config import get_env
 
 
 def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> str:

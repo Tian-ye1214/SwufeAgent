@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
 
 
-MODEL_MESSAGES_GLOB = "*.model_messages.json"
+MODEL_MESSAGES_GLOB = "*_ModelMessages.json"
 
 
 @dataclass(frozen=True)
@@ -200,17 +200,25 @@ def model_message_files_for_path(path: Path) -> list[Path]:
     return []
 
 
-def session_model_message_files(log_root: Path, session_key: str) -> list[Path]:
+def session_model_message_files(conversations_root_path: Path, session_key: str) -> list[Path]:
     parts = str(session_key or "").split("/", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         return []
     date, topic = parts
-    root = Path(log_root) / "conversations"
+    root = Path(conversations_root_path)
+    if not root.is_dir():
+        return []
     out: list[Path] = []
-    for role in ("coordinator", "manager", "worker"):
-        role_root = root / role / date / topic
-        if role_root.is_dir():
-            out.extend(role_root.rglob(MODEL_MESSAGES_GLOB))
+    for fp in root.glob(MODEL_MESSAGES_GLOB):
+        try:
+            with fp.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        meta_raw = data.get("meta")
+        meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+        if str(meta.get("date") or "") == date and str(meta.get("topic") or "") == topic:
+            out.append(fp)
     return sorted(out, key=lambda item: str(item))
 
 
