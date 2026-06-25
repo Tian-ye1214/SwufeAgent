@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import threading
@@ -15,6 +16,11 @@ from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
 from workspace.workspace import MODEL_MESSAGES_GLOB, conversations_root, stm_log_key
 from tools.memory.message_text import TurnMemoryEntry, turn_entries_from_messages
+
+
+def _turn_hash(text: str) -> str:
+    """turn 内容指纹：跨压缩（历史被重排/截断）稳定标识一个 turn，替代易错的位置游标。"""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _stm_rag_from_config(cfg: dict[str, Any]) -> Any:
@@ -108,15 +114,24 @@ class ShortTermMemory:
     def _save_stm_state_sync(self, state: dict[str, Any]) -> None:
         save_locked_json(self._stm_state_path(), state)
 
-    def _turns_done_for_key(self, sources: dict[str, Any], log_key: str) -> int:
+    def _ingested_for_key(
+        self,
+        sources: dict[str, Any],
+        log_key: str,
+        turn_entries: list[TurnMemoryEntry],
+    ) -> set[str]:
+        """已入库的 turn 指纹集合；兼容旧版按位置计数的 turns_done。"""
         ent = sources.get(log_key)
         if not isinstance(ent, dict):
-            return 0
+            return set()
+        raw = ent.get("ingested")
+        if isinstance(raw, list):
+            return {str(h) for h in raw}
         try:
-            done = int(ent.get("turns_done", ent.get("chunks_done", 0)))
+            legacy = int(ent.get("turns_done", ent.get("chunks_done", 0)))
         except (TypeError, ValueError):
-            return 0
-        return max(0, done)
+            legacy = 0
+        return {_turn_hash(e.text) for e in turn_entries[: max(0, legacy)]}
 
     def _append_failure_sync(self, source: str, error: str) -> None:
         p = self._failures_path()
@@ -191,57 +206,56 @@ class ShortTermMemory:
                 chunks.append(chunk)
         return chunks or [text]
 
-    def _collect_pending_turn_rows(
+    def _collect_turn_rows(
         self,
         log_key: str,
-        turn_entries: list[TurnMemoryEntry],
-        turns_done: int,
+        entry: TurnMemoryEntry,
+        turn_hash: str,
         agent: str,
         session_key: str,
-        *,
-        end: int | None = None,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         now = iso_utc_now()
-        stop = len(turn_entries) if end is None else end
-        for i in range(turns_done, stop):
-            entry = turn_entries[i]
-            chunks = self._split_turn_text(entry.text, entry.token_reference)
-            for chunk_index, chunk in enumerate(chunks):
-                source = (
-                    f"{log_key}#t{i}"
-                    if len(chunks) == 1
-                    else f"{log_key}#t{i}#c{chunk_index}"
-                )
-                rows.append(
-                    {
-                        "id": source,
-                        "source": source,
-                        "text": chunk,
-                        "agent": agent,
-                        "session_key": session_key,
-                        "created_at": now,
-                    }
-                )
+        chunks = self._split_turn_text(entry.text, entry.token_reference)
+        for chunk_index, chunk in enumerate(chunks):
+            source = (
+                f"{log_key}#{turn_hash}"
+                if len(chunks) == 1
+                else f"{log_key}#{turn_hash}#c{chunk_index}"
+            )
+            rows.append(
+                {
+                    "id": source,
+                    "source": source,
+                    "text": chunk,
+                    "agent": agent,
+                    "session_key": session_key,
+                    "created_at": now,
+                }
+            )
         return rows
 
     async def _ingest_pending_turns(
         self,
         log_key: str,
         turn_entries: list[TurnMemoryEntry],
-        turns_done: int,
+        ingested: set[str],
         agent: str,
         session_key: str,
         rag: Any,
     ) -> None:
-        """Ingest pending complete user turns and advance the cursor per turn."""
-        end = len(turn_entries)
-        a = turns_done
-        while a < end:
-            b = a + 1
-            rows = self._collect_pending_turn_rows(
-                log_key, turn_entries, a, agent, session_key, end=b
-            )
+        """Ingest turns whose content fingerprint isn't recorded yet; persist per turn.
+
+        指纹集每次入库都裁剪到当前存活的 turn（压缩丢弃的 turn 不会再出现），
+        既避免重复入库，也避免压缩后新增 turn 被位置游标漏记。
+        """
+        live = {_turn_hash(e.text) for e in turn_entries}
+        done = set(ingested) & live
+        for entry in turn_entries:
+            h = _turn_hash(entry.text)
+            if h in done:
+                continue
+            rows = self._collect_turn_rows(log_key, entry, h, agent, session_key)
             if rows:
                 try:
                     await rag.ingest_turn_rows(rows)
@@ -251,18 +265,18 @@ class ShortTermMemory:
                             self._append_failure_sync, r.get("source", log_key), str(e)
                         )
                     raise
+            done.add(h)
             state = await asyncio.to_thread(self._load_stm_state_sync)
             sources = state.setdefault("sources", {})
-            sources[log_key] = {"turns_done": b}
+            sources[log_key] = {"ingested": sorted(done)}
             await asyncio.to_thread(self._save_stm_state_sync, state)
             if self._verbose_ingest:
                 logger.info(
                     "STM ingest: log_key=%s turns=%d new_rows=%d",
                     log_key,
-                    b,
+                    len(done),
                     len(rows),
                 )
-            a = b
 
     async def ingest_after_turn(
         self,
@@ -279,14 +293,14 @@ class ShortTermMemory:
                 turn_entries = turn_entries_from_messages(messages)
                 state = await asyncio.to_thread(self._load_stm_state_sync)
                 sources = state.setdefault("sources", {})
-                done = self._turns_done_for_key(sources, log_key)
-                if len(turn_entries) <= done:
+                ingested = self._ingested_for_key(sources, log_key, turn_entries)
+                if all(_turn_hash(e.text) in ingested for e in turn_entries):
                     return
                 rag = _stm_rag_from_config(self._cfg)
                 try:
                     await rag.connect()
                     await self._ingest_pending_turns(
-                        log_key, turn_entries, done, agent, session_key, rag
+                        log_key, turn_entries, ingested, agent, session_key, rag
                     )
                 finally:
                     await rag.close()
@@ -374,8 +388,9 @@ class ShortTermMemory:
         if root.is_dir():
             for fp in sorted(root.glob(MODEL_MESSAGES_GLOB), key=str):
                 messages, _ = read_saved_model_messages_file(fp)
+                entries = turn_entries_from_messages(messages)
                 sources[self._stm_source_key(fp)] = {
-                    "turns_done": len(turn_entries_from_messages(messages))
+                    "ingested": sorted(_turn_hash(e.text) for e in entries)
                 }
         return {"version": 2, "sources": sources}
 
@@ -384,13 +399,13 @@ class ShortTermMemory:
         fp: Path,
         root: Path,
         state: dict[str, Any],
-    ) -> tuple[list[TurnMemoryEntry], str, int, str, str]:
+    ) -> tuple[list[TurnMemoryEntry], str, set[str], str, str]:
         """Read one saved model_messages log and return STM cursor context."""
         sources = state.setdefault("sources", {})
         log_key = self._rel_log_key(fp, root)
         messages, meta = read_saved_model_messages_file(fp)
         turn_entries = turn_entries_from_messages(messages)
-        done = self._turns_done_for_key(sources, log_key)
+        ingested = self._ingested_for_key(sources, log_key, turn_entries)
         agent = str(meta.get("agent", "") or "")
         if not agent and "conversations/" in log_key:
             parts = log_key.split("/")
@@ -399,7 +414,7 @@ class ShortTermMemory:
         date = str(meta.get("date", "") or "")
         topic = str(meta.get("topic", "") or "")
         session_key = f"{date}/{topic}" if date and topic else ""
-        return turn_entries, log_key, done, agent, session_key
+        return turn_entries, log_key, ingested, agent, session_key
 
     async def _reconcile_from_logs(self, *, flush: bool = False) -> None:
         root = self._log_root_resolved()
@@ -410,17 +425,16 @@ class ShortTermMemory:
         rag: Any | None = None
         for fp in files:
             state = await asyncio.to_thread(self._load_stm_state_sync)
-            turn_entries, log_key, done, agent, session_key = await asyncio.to_thread(
+            turn_entries, log_key, ingested, agent, session_key = await asyncio.to_thread(
                 self._sync_reconcile_file, fp, root, state
             )
-            pending = len(turn_entries) - done
-            if pending <= 0:
+            if all(_turn_hash(e.text) in ingested for e in turn_entries):
                 continue
             if rag is None:
                 rag = self._get_rag()
                 await rag.connect()
             await self._ingest_pending_turns(
-                log_key, turn_entries, done, agent, session_key, rag
+                log_key, turn_entries, ingested, agent, session_key, rag
             )
 
     async def _flush_inner(self) -> None:
