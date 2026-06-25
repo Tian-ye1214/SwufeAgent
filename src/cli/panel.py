@@ -228,7 +228,7 @@ def _collect_history(
 ) -> tuple[PanelHistoryStats, list[PanelSessionSummary]]:
     history = PanelHistoryStats()
     sessions: dict[tuple[str, str], PanelSessionSummary] = {}
-    files = sorted(root.glob(MODEL_MESSAGES_GLOB), key=str)
+    files = sorted(log_root.glob(MODEL_MESSAGES_GLOB), key=str)
     for path in files:
         result = cache.load(path)
         if result.error:

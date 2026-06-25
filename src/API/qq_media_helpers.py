@@ -4,7 +4,9 @@ import os
 import re
 import html
 import base64
+import ipaddress
 import mimetypes
+import socket
 from typing import Any
 
 import httpx
@@ -55,16 +57,51 @@ def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     return mm if mm else "application/octet-stream"
 
 
+_MAX_REDIRECTS = 5
+
+
+def _host_is_public(host: str) -> bool:
+    """解析主机名，仅当其所有解析结果都是公网地址时返回 True（防 SSRF）。"""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (not ip.is_global or ip.is_private or ip.is_loopback
+                or ip.is_link_local or ip.is_reserved or ip.is_multicast):
+            return False
+    return True
+
+
 def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
     url = norm_url(url)
-    if not url.startswith("http"):
-        return None
     try:
-        resp = httpx.get(url, timeout=30, follow_redirects=True)
-        resp.raise_for_status()
-        hc = resp.headers.get("content-type", "").split(";")[0].strip()
-        raw = resp.content
-        return BinaryContent(data=raw, media_type=pick_ct(url, hc, raw, filename=filename))
+        # 手动逐跳跟随重定向，对每一跳的目标地址都做公网校验，避免 302 跳转进内网。
+        with httpx.Client(timeout=30, follow_redirects=False) as client:
+            for _ in range(_MAX_REDIRECTS + 1):
+                parsed = httpx.URL(url)
+                if parsed.scheme not in ("http", "https") or not parsed.host:
+                    return None
+                if not _host_is_public(parsed.host):
+                    logger.warning(f"[QQ] 拒绝下载非公网媒体地址 {url[:80]}")
+                    return None
+                resp = client.get(url)
+                location = resp.headers.get("location")
+                if resp.is_redirect and location:
+                    url = str(parsed.join(location))
+                    continue
+                resp.raise_for_status()
+                hc = resp.headers.get("content-type", "").split(";")[0].strip()
+                raw = resp.content
+                return BinaryContent(data=raw, media_type=pick_ct(url, hc, raw, filename=filename))
+        logger.warning(f"[QQ] 重定向次数过多 {url[:80]}")
+        return None
     except Exception as e:
         logger.warning(f"[QQ] 下载媒体失败 {url[:80]}: {e}")
         return None

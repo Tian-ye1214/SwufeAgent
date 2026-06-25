@@ -43,7 +43,8 @@ class _AsyncThreadLock:
         self._lock = threading.Lock()
 
     async def __aenter__(self) -> _AsyncThreadLock:
-        await asyncio.to_thread(self._lock.acquire)
+        while not self._lock.acquire(blocking=False):
+            await asyncio.sleep(0.01)
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -279,8 +280,6 @@ class ShortTermMemory:
                 state = await asyncio.to_thread(self._load_stm_state_sync)
                 sources = state.setdefault("sources", {})
                 done = self._turns_done_for_key(sources, log_key)
-                if len(turn_entries) < done:
-                    done = 0
                 if len(turn_entries) <= done:
                     return
                 rag = _stm_rag_from_config(self._cfg)
@@ -392,8 +391,6 @@ class ShortTermMemory:
         messages, meta = read_saved_model_messages_file(fp)
         turn_entries = turn_entries_from_messages(messages)
         done = self._turns_done_for_key(sources, log_key)
-        if len(turn_entries) < done:
-            done = 0
         agent = str(meta.get("agent", "") or "")
         if not agent and "conversations/" in log_key:
             parts = log_key.split("/")
