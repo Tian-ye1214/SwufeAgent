@@ -61,6 +61,16 @@ class RAG:
     async def clear_table(self) -> None:
         await self._db.drop_table()
 
+    async def delete_by_source_prefix(self, prefix: str) -> None:
+        """删除所有 source 以 prefix 开头的行（prefix 可为 log_key 或 log_key#hash）。"""
+        if not prefix:
+            return
+        from tools.memory.hygiene import like_prefix_escaped  # noqa: PLC0415 (避免循环导入)
+        pat, esc = like_prefix_escaped(prefix)
+        pat_sql = pat.replace("'", "''")
+        where = f"source LIKE '{pat_sql}' ESCAPE '{esc}'"
+        await self._db.delete_where(where)
+
     def format_instruction(
         self,
         instruction: str | None,
