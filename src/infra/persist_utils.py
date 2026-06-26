@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from filelock import FileLock
 
@@ -73,3 +73,25 @@ def safe_name(text: str, *, extra: str = "_-", max_len: int = 50, fallback: str 
 
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def update_locked_json(
+    path: Path, version: int, mutate: Callable[[dict], None]
+) -> dict[str, Any]:
+    """跨进程文件锁下的原子读-改-写：在同一把锁内 load→mutate→write，
+    关闭"读不加锁、只锁写"导致的丢更新。mutate 就地修改 state。"""
+    path = Path(path)
+    with file_lock(path):
+        state: dict[str, Any] = {"version": version}
+        if path.is_file():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    state = loaded
+            except Exception:
+                pass
+        state.setdefault("version", version)
+        mutate(state)
+        atomic_write_json(path, state)
+    return state
