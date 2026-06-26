@@ -36,8 +36,9 @@ async def test_prefix_deletes_only_target_turn_not_chunk_siblings(tmp_path):
 @pytest.mark.asyncio
 async def test_underscore_not_treated_as_wildcard(tmp_path):
     r = await _rag(tmp_path)
-    # 若 _ 被当通配符，删 "convX1#h" 会误删 "convA1#h" 的兄弟
-    await r._db.add_vectors([_row("convX1#h"), _row("convA1#h")])
-    await r.delete_by_source_prefix("convX1#h")
-    assert await r._db.row_count() == 1  # convA1#h 必须保留
+    # prefix has a literal '_'; if '_' were an unescaped LIKE wildcard,
+    # pattern conv_1#h% would also match convA1#h (the _ matching 'A') and wrongly delete it.
+    await r._db.add_vectors([_row("conv_1#h"), _row("convA1#h")])
+    await r.delete_by_source_prefix("conv_1#h")
+    assert await r._db.row_count() == 1   # convA1#h must survive (escaped _ is literal)
     await r.close()
