@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import unicodedata
+from datetime import datetime
 
 _NL_RUN = re.compile(r"\n{3,}")
 _WS_ANY = re.compile(r"\s+")
@@ -28,10 +30,6 @@ def normalize_for_key(text: str) -> str:
 def turn_key_hash(text: str) -> str:
     """turn 内容指纹：跨压缩/空白/IME 漂移稳定。"""
     return hashlib.sha1(normalize_for_key(text).encode("utf-8")).hexdigest()[:16]
-
-
-import math
-from datetime import datetime
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -88,3 +86,36 @@ def apply_soft_forget(
             continue
         kept.append(h)
     return kept
+
+
+def should_consolidate(
+    *,
+    fingerprint: str,
+    last_fingerprint: str | None,
+    new_turn_count: int,
+    seconds_since_last_run: float | None,
+    params: dict,
+) -> tuple[bool, str]:
+    """LTM 合并频率门控：满足任一跳过条件则返回 (False, reason)。"""
+    if not last_fingerprint:
+        return (True, "first_run")
+    if fingerprint == last_fingerprint:
+        return (False, "unchanged")
+    if int(new_turn_count) < int(params.get("min_new_turns", 3)):
+        return (False, "too_few_new_turns")
+    if seconds_since_last_run is not None and float(seconds_since_last_run) < float(
+        params.get("min_interval_sec", 120)
+    ):
+        return (False, "too_soon")
+    return (True, "ok")
+
+
+def like_prefix_escaped(prefix: str, *, escape: str = "\\") -> tuple[str, str]:
+    """构造 `source LIKE pattern ESCAPE escape_char` 的前缀匹配模式。
+    转义 prefix 中的 LIKE 通配符 %、_ 与转义符本身，杜绝误匹配。"""
+    out: list[str] = []
+    for ch in prefix:
+        if ch in (escape, "%", "_"):
+            out.append(escape)
+        out.append(ch)
+    return ("".join(out) + "%", escape)
