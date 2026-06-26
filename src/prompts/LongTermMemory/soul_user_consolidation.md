@@ -7,8 +7,10 @@ You are responsible for **merging** the durable facts from the **“full text to
 
 ## Emit **a single body of prose per category**—do not break into a tag-like bullet list of isolated items
 
-- **soul**: **Stable, reusable** information about the assistant, environment, and project habits, written as **valid Markdown body text** (you may use `##` / `###` sections, ordered or unordered lists, **bold** emphasis, and so on, for long-term readability and maintenance); merge overlapping wording and **remove duplicates, contradictions, or one-off minutiae**; if the new text conflicts with the old, prefer the **later, more reliable** information in the **“full text to analyze”** and resolve to **one** consistent phrasing (unless the two clearly refer to different facts).
-- **user**: **Enduring** personal information—preferences, taboos, forms of address, working style, and the like—likewise in **a single** document, also as **valid Markdown body text**; the line from soul is: **“about the user as a person”** versus **“about the environment and how the assistant works.”**
+- **soul**: **Stable, reusable** information about the assistant, environment, and project habits, written as **valid Markdown body text** (you may use `##` / `###` sections, ordered or unordered lists, **bold** emphasis, and so on, for long-term readability and maintenance); merge overlapping wording and **remove duplicates, contradictions, or one-off minutiae**; if the new text conflicts with the old, prefer the **later, more reliable** information in the **”full text to analyze”** and resolve to **one** consistent phrasing (unless the two clearly refer to different facts).
+- **user**: **Enduring** personal information—preferences, taboos, forms of address, working style, and the like—likewise in **a single** document, also as **valid Markdown body text**; the line from soul is: **”about the user as a person”** versus **”about the environment and how the assistant works.”**
+- Two statements are duplicates only if they assert the **same fact**; differing
+  scope, condition, or object means keep both. Merge wording, never merge meaning.
 
 ## Minimal-change rule (anti–whole-document drift)
 
@@ -16,6 +18,18 @@ You are responsible for **merging** the durable facts from the **“full text to
 - If the **“full text to analyze”** is noisy, speculative, or a **single stray line** that does not clearly belong in durable memory, **ignore it** and return **`null`** for that category.
 - If you are **not sure** whether a fact is true or will matter next session, output **`null`** for that category—**do not guess** or invent user traits/project conventions.
 - **User** (`user`): record preferences/identity only when **explicitly stated or strongly implied across the transcript** (not one-off jokes, not assistant hallucinations).
+
+## Forgetting rule (supersession-only)
+
+- Remove or rewrite an existing fact **only** when the new "full text to analyze"
+  **clearly supersedes or contradicts** it. Prefer the later, more reliable statement.
+- **Never** drop a fact merely because it was not restated this time, or because it
+  has not appeared for several sessions. Rules, preferences, and taboos are often
+  **stated once and remain binding** — silence is not revocation.
+- When unsure whether something is obsolete, **keep it**. Only the user explicitly
+  reversing a fact, or a direct contradiction in the new text, justifies removal.
+- Deduplicate aggressively (merge synonymous restatements into one phrasing) but
+  this must **never** delete a distinct, still-valid fact.
 
 ## Do **not** include
 

@@ -8,6 +8,12 @@ Memory is injected into every turn, so keep it compact and focused on facts that
 
 Prioritize what reduces future user steering — the most valuable memory is one that prevents the user from having to correct or remind you again. User preferences and recurring corrections matter more than procedural task details.
 
+## Before you write
+
+Check the memory shown above first: if the fact is already present in any phrasing,
+do not re-add it. Use `remove` only for facts that are now wrong or explicitly
+reversed — not for facts that simply were not mentioned recently.
+
 ## What not to save
 
 Do **not** save task progress, session outcomes, completed-work logs, or temporary TODO state to memory.
