@@ -4,30 +4,30 @@ import inspect
 import os
 import re
 import subprocess
+import threading
+import time
 import mimetypes
-import sys
 from ddgs import DDGS
-import logger
+from infra import logger
 import shlex
 import platform as _platform
 from pydantic_ai import BinaryContent, ImageUrl, ToolReturn
 from tools.ExtractFileContent import extract_text
-from app_config import get_env
+from tools.ImageGeneration import generate_image_from_flux
+from config.app_config import get_agent_run_policy, get_env
 from skills.SkillsManager import SkillsManager
 from skills.SkillsTools import SkillsToolkit
-from path_sandbox import resolve_readable_path
+from infra.path_sandbox import resolve_readable_path, runtime_repo_root, work_database_root
+from infra.subprocess_runner import run_subprocess
 from tools.browser_session import PlaywrightBrowserSession
+from cli.render import show_file_diff
+from cli.pending_review import PendingReviewStore
 
-def _get_runtime_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
-
-_REPO_ROOT = _get_runtime_root()
+_REPO_ROOT = runtime_repo_root()
 
 
 class BasicToolkit:
-    _WORK_DATABASE_ROOT = _REPO_ROOT / "WorkDatabase"
+    _WORK_DATABASE_ROOT = work_database_root()
 
     def __init__(
         self,
@@ -36,6 +36,9 @@ class BasicToolkit:
         extra_worker_tools: list | None = None,
     ):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
+        self._file_lock = threading.Lock()
+        self._command_lock = asyncio.Lock()
+        self._review_store = PendingReviewStore(self._file_lock)
         self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
         self._skills_manager = skills_manager
@@ -56,21 +59,25 @@ class BasicToolkit:
             'eval ',
             'exec ',
         ]
+        self._confirm_patterns = [
+            (re.compile(r'\brm\s+-\w*r', re.I), "rm 递归删除"),
+            (re.compile(r'\brd\s+/s', re.I), "rd /s 递归删除目录"),
+            (re.compile(r'\brmdir\s+/s', re.I), "rmdir /s 递归删除目录"),
+            (re.compile(r'\bdel\s+/s', re.I), "del /s 递归删除文件"),
+            (re.compile(r'\bRemove-Item\b.*-Recurse', re.I), "Remove-Item -Recurse 递归删除"),
+        ]
 
     @property
     def skills_manager(self) -> SkillsManager:
         return self._skills_manager
 
     @property
-    def base_dir(self) -> Path:
-        return self._base_dir
+    def review_store(self) -> PendingReviewStore:
+        return self._review_store
 
     def close(self) -> None:
         """进程退出时关闭 Playwright 等资源。"""
-        bs = getattr(self, "_browser_session", None)
-        if bs is not None:
-            bs.shutdown()
-            del self._browser_session
+        self._browser_session.shutdown()
 
     def set_task_directory(self, task_name: str) -> Path:
         """
@@ -107,6 +114,9 @@ class BasicToolkit:
     async def _run_blocking(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
 
+    def _resolve_path_candidate(self, name: str) -> Path:
+        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+
     def _safe_path(self, name: str) -> Path:
         path = self._resolve_path_candidate(name)
         root = self._WORK_DATABASE_ROOT.resolve()
@@ -115,13 +125,17 @@ class BasicToolkit:
         return path
 
     def _readable_path(self, name: str) -> Path:
-        return resolve_readable_path(name, work_base=self._base_dir, repo_root=_REPO_ROOT)
+        return self._resolve_path_candidate(name)
 
     def _browser_headless_from_env(self) -> bool:
         v = (get_env("BROWSER_HEADLESS", warn=False) or "").strip().lower()
         if v in ("0", "false", "no"):
             return False
         return True
+
+    async def _browser_call(self, fn, **kw) -> str:
+        h = self._browser_headless_from_env()
+        return await self._run_blocking(fn, headless=h, **kw)
 
     async def browser_navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """
@@ -135,9 +149,8 @@ class BasicToolkit:
             url: Full URL (https://...)
             wait_until: Load wait strategy; one of domcontentloaded, load, networkidle (default domcontentloaded)
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.navigate, url, headless=h, wait_until=wait_until
+        return await self._browser_call(
+            self._browser_session.navigate, url=url, wait_until=wait_until
         )
 
     async def browser_get_content(self) -> str:
@@ -145,8 +158,7 @@ class BasicToolkit:
         Return visible text from the current page (body innerText), for reading dynamically rendered content.
         Returns the full text with no length truncation.
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(self._browser_session.get_content, headless=h)
+        return await self._browser_call(self._browser_session.get_content)
 
     async def browser_screenshot(self, name: str, full_page: bool = False) -> str:
         """
@@ -157,15 +169,13 @@ class BasicToolkit:
             name: File path, e.g. page.png or an absolute path
             full_page: If True, capture the full scrollable page
         """
-        h = self._browser_headless_from_env()
         try:
             path = self._resolve_path_candidate(name)
             path.parent.mkdir(parents=True, exist_ok=True)
         except ValueError as e:
             return str(e)
-        return await self._run_blocking(
+        return await self._browser_call(
             self._browser_session.screenshot,
-            headless=h,
             filename=str(path),
             full_page=full_page,
         )
@@ -177,10 +187,7 @@ class BasicToolkit:
         Parameters:
             selector: e.g. #submit, text=Sign in
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.click, headless=h, selector=selector
-        )
+        return await self._browser_call(self._browser_session.click, selector=selector)
 
     async def browser_fill(self, selector: str, text: str) -> str:
         """
@@ -190,9 +197,8 @@ class BasicToolkit:
             selector: CSS or other Playwright selector for the input
             text: Text to enter
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.fill, headless=h, selector=selector, text=text
+        return await self._browser_call(
+            self._browser_session.fill, selector=selector, text=text
         )
 
     async def browser_press_key(self, key: str) -> str:
@@ -202,8 +208,7 @@ class BasicToolkit:
         Parameters:
             key: Playwright key name, e.g. Enter, ArrowDown
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(self._browser_session.press, headless=h, key=key)
+        return await self._browser_call(self._browser_session.press, key=key)
 
     async def browser_wait_for_selector(self, selector: str, timeout_ms: int = 30000) -> str:
         """
@@ -213,10 +218,8 @@ class BasicToolkit:
             selector: Playwright selector
             timeout_ms: Timeout in milliseconds
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
+        return await self._browser_call(
             self._browser_session.wait_for_selector,
-            headless=h,
             selector=selector,
             timeout_ms=timeout_ms,
         )
@@ -229,22 +232,14 @@ class BasicToolkit:
         Parameters:
             javascript_expression: A single-line expression to evaluate
         """
-        h = self._browser_headless_from_env()
-        return await self._run_blocking(
-            self._browser_session.run_javascript,
-            headless=h,
-            expression=javascript_expression,
+        return await self._browser_call(
+            self._browser_session.run_javascript, expression=javascript_expression
         )
 
     async def browser_close(self) -> str:
         """Close the Playwright browser process and release resources; the next action will start a new browser."""
-        await self._run_blocking(self._browser_session.shutdown)
+        await self._run_blocking(self._browser_session.close)
         return "Browser closed"
-
-    def _resolve_path_candidate(self, name: str) -> Path:
-        """解析读/列路径，限制在 WorkDatabase 与 src/skills。"""
-        return self._readable_path(name)
-
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command contains dangerous patterns"""
@@ -267,6 +262,13 @@ class BasicToolkit:
                     f"Repo root: {_REPO_ROOT}"
                 )
         return True, ""
+
+    def _command_needs_confirm(self, command: str) -> str | None:
+        """Return a short reason if the command performs a recursive delete, else None."""
+        for pattern, reason in self._confirm_patterns:
+            if pattern.search(command):
+                return reason
+        return None
 
     def set_ask_user_handler(self, handler):
         """
@@ -308,7 +310,7 @@ class BasicToolkit:
             name: File name/path
         """
         try:
-            file_path = self._resolve_path_candidate(name)
+            file_path = self._readable_path(name)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             return content if content else "File is empty"
@@ -325,7 +327,7 @@ class BasicToolkit:
         """
         try:
             target_dir = (
-                self._resolve_path_candidate(directory) if directory else self._base_dir
+                self._readable_path(directory) if directory else self._base_dir
             )
             if not target_dir.exists():
                 return f"Error: Directory '{directory}' does not exist"
@@ -357,19 +359,20 @@ class BasicToolkit:
             name: File name/path (relative to WorkDatabase directory)
             content: Content to write
         """
-        content_len = len(content) if content else 0
         try:
-            if not isinstance(content, str):
-                content = str(content)
-
             self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
             os.makedirs(file_path.parent, exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-
-            result = f"File '{name}' written successfully ({content_len} characters)"
-            return result
+            with self._file_lock:
+                try:
+                    old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+                except Exception:
+                    old_content = ""
+                file_path.write_text(content, encoding="utf-8")
+            show_file_diff(old_content, content, path=name)
+            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=content)
+            content_len = len(content)
+            return f"File '{name}' written successfully ({content_len} characters)"
         except ValueError as e:
             return f"Security error: {e}"
         except PermissionError as e:
@@ -377,51 +380,43 @@ class BasicToolkit:
         except Exception as e:
             return f"Write error: {type(e).__name__} - {e}"
 
-    def append_to_file(self, name: str, content: str) -> str:
+    def edit_file(self, name: str, old_string: str, new_string: str) -> str:
         """
-        Append content to an existing file (or create new file if it doesn't exist).
-        Use this for writing large content in chunks.
+        Edit an existing file by replacing an EXACT, UNIQUE snippet (string replace).
+        Prefer this over write_file when modifying an existing file: it makes a precise,
+        local change and shows a colored diff instead of rewriting the whole file.
 
         Parameters:
-            name: File name/path (relative to WorkDatabase directory)
-            content: Content to append (keep each chunk under 5000 characters)
+            name: File path (relative to WorkDatabase directory).
+            old_string: Exact text to replace. Must occur EXACTLY ONCE in the file —
+                include enough surrounding context (indentation, neighboring lines) to be unique.
+            new_string: Replacement text.
         """
-        content_len = len(content) if content else 0
         try:
-            if content is None:
-                return "Append error: content cannot be None"
-            if not isinstance(content, str):
-                content = str(content)
-
-            self._base_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._safe_path(name)
-            os.makedirs(file_path.parent, exist_ok=True)
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(content)
-
-            total_size = file_path.stat().st_size
-            return f"Content appended to '{name}' successfully ({content_len} chars added, total file size: {total_size} bytes)"
+            if not file_path.exists():
+                return f"Edit error: file '{name}' does not exist (use write_file to create it)"
+            with self._file_lock:
+                old_content = file_path.read_text(encoding="utf-8")
+                count = old_content.count(old_string)
+                if count == 0:
+                    return f"Edit error: old_string not found in '{name}'"
+                if count > 1:
+                    return f"Edit error: old_string is not unique in '{name}' (found {count}×); add more surrounding context"
+                new_content = old_content.replace(old_string, new_string, 1)
+                if new_content == old_content:
+                    return "Edit error: new_string is identical to old_string; nothing to change"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+            added, deleted, modified = show_file_diff(old_content, new_content, path=name)
+            self._review_store.register(file_path, name=name, baseline=old_content, snapshot=new_content)
+            return f"Edited '{name}' successfully (+{added} -{deleted} ~{modified})"
         except ValueError as e:
             return f"Security error: {e}"
         except PermissionError as e:
-            return f"Permission error: Cannot append to '{name}' - {e}"
+            return f"Permission error: Cannot edit '{name}' - {e}"
         except Exception as e:
-            return f"Append error: {type(e).__name__} - {e}"
-
-    def create_directory(self, name: str) -> str:
-        """
-        Create a directory.
-        Parameters:
-            name: Directory name/path
-        """
-        try:
-            dir_path = self._resolve_path_candidate(name)
-            os.makedirs(dir_path, exist_ok=True)
-            return f"Directory '{name}' created successfully"
-        except ValueError as e:
-            return f"Security error: {e}"
-        except Exception as e:
-            return f"Error creating directory: {e}"
+            return f"Edit error: {type(e).__name__} - {e}"
 
     def search_in_files(self, keyword: str, file_extension: str = None) -> str:
         """
@@ -443,7 +438,7 @@ class BasicToolkit:
                             if keyword.lower() in line.lower():
                                 rel_path = file_path.relative_to(self._base_dir)
                                 results.append(f"{rel_path}:{line_num}: {line.strip()}")
-                except:
+                except Exception:
                     continue
 
             if results:
@@ -480,53 +475,6 @@ class BasicToolkit:
             logger.error(f"❌ 搜索出错: {e}")
             return f"Error during search: {e}"
 
-    async def execute_file(self, name: str, args: str = "") -> str:
-        """
-        Execute a file (supports Python, Shell scripts, etc.).
-        Parameters:
-            name: File name/path to execute
-            args: Optional, command-line arguments to pass to the script
-        """
-        try:
-            file_path = self._safe_path(name)
-            if not file_path.exists():
-                return f"Error: File '{name}' does not exist"
-
-            ext = file_path.suffix.lower()
-            executors = {
-                ".py": ["python"],
-                ".sh": ["bash"],
-                ".bat": ["cmd", "/c"],
-                ".ps1": ["powershell", "-File"],
-            }
-
-            if ext not in executors:
-                return f"Error: Unsupported file type '{ext}'. Supported: {', '.join(executors.keys())}"
-
-            cmd = executors[ext] + [str(file_path)]
-            if args:
-                cmd.extend(args.split())
-
-            result = await self._run_blocking(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                cwd=str(self._base_dir),
-            )
-            output = result.stdout + result.stderr
-            return_code = result.returncode
-            return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
-        except subprocess.TimeoutExpired:
-            return "Error: Execution timed out (60 seconds)"
-        except ValueError as e:
-            return f"Security error: {e}"
-        except Exception as e:
-            return f"Execution error: {e}"
-
     async def run_command(self, command: str, timeout: int = 60) -> str:
         """
         Execute a Shell/terminal command.
@@ -538,33 +486,33 @@ class BasicToolkit:
         if not is_safe:
             return f"Security error: {reason}"
 
+        danger = self._command_needs_confirm(command)
+        if danger:
+            answer = (await self.ask_user(f"⚠ 该命令将递归删除文件:\n{command}\n确认执行？(y/N)")).strip().lower()
+            if answer not in ("y", "yes", "是", "确认"):
+                return f"已取消执行（用户未确认）: {danger}"
+
         try:
-            use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
-            cwd = str(self._base_dir.resolve())
-            sub_kw: dict = {}
-            if re.search(r"\bclawhub\b", command, re.I):
-                cwd = str(_REPO_ROOT)
-                if "--workdir" not in command:
-                    sub_kw["env"] = os.environ | {"CLAWHUB_WORKDIR": cwd}
-            sub_kw.update(
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                cwd=cwd,
-            )
+            async with self._command_lock:
+                policy = get_agent_run_policy()
+                timeout = policy.clamp_command_timeout(timeout)
+                use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
+                if use_shell and re.search(r"\b(start|nohup|setsid)\b|&\s*$", command, re.I):
+                    return "Security error: background shell processes are not allowed"
+                cwd = str(self._base_dir.resolve())
+                env = None
+                if re.search(r"\bclawhub\b", command, re.I):
+                    cwd = str(_REPO_ROOT)
+                    if "--workdir" not in command:
+                        env = os.environ | {"CLAWHUB_WORKDIR": cwd}
 
-            if use_shell:
-                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
-            elif _platform.system() == "Windows":
-                result = await self._run_blocking(subprocess.run, command, shell=True, **sub_kw)
-            else:
-                result = await self._run_blocking(subprocess.run, shlex.split(command), **sub_kw)
-
-            output = result.stdout + result.stderr
-            return_code = result.returncode
-            return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
+                shell = use_shell or _platform.system() == "Windows"
+                args = command if shell else shlex.split(command)
+                stdout, stderr, return_code = await run_subprocess(
+                    args, shell=shell, cwd=cwd, env=env, timeout=timeout
+                )
+                output = stdout + stderr
+                return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({timeout} seconds)"
         except Exception as e:
@@ -639,23 +587,50 @@ class BasicToolkit:
             ]
         )
 
-    @property
-    def workers_tools(self) -> list:
-        """List of tool callables exposed to the Worker Agent."""
-        return [
-            # Read / list
-            self.list_files,
-            self.read_file,
-            self.read_image,
-            # Write
-            self.write_file,
-            self.append_to_file,
-            # Directories
-            self.create_directory,
-            # Search
-            self.search_in_files,
-            self.search_web,
-            # Browser automation (Playwright / Chromium)
+    async def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> ToolReturn | str:
+        """
+        Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
+
+        This is the PRIMARY tool for ALL image generation requests. Keywords that should trigger this tool:
+        - "create image" / "generate image" / "make a picture" / "draw" / "paint" / "illustrate"
+        - "give me an image" / "produce image"
+        - Any request involving creating visual content, artwork, diagrams, or images (any language)
+
+        Parameters:
+            prompt: The text description of what image to generate. Be detailed and specific about the visual content, style, composition, colors, mood, etc. This is the most important parameter.
+            width: Image width in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
+            height: Image height in pixels. Default: 1024. Common values: 512, 768, 1024, 1536, etc.
+            max_wait_time: Maximum wait time in seconds. Default: 300 (5 minutes).
+
+        Returns:
+            Success: The generated image displayed inline plus generation details.
+            Failure: Returns an error message.
+        """
+        result = await generate_image_from_flux(prompt, width=width, height=height, max_wait_time=max_wait_time)
+        if not isinstance(result, tuple):
+            return result
+
+        image_bytes, mime_type, info_text = result
+        ext = mimetypes.guess_extension(mime_type) or ".jpg"
+        name = f"generated_{int(time.time())}{ext}"
+        try:
+            path = self._resolve_path_candidate(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_bytes, image_bytes)
+        except ValueError as e:
+            return f"Security error: {e}"
+
+        return ToolReturn(
+            return_value=f"{info_text}\nSaved to: {path.name}",
+            content=[
+                info_text,
+                BinaryContent(data=image_bytes, media_type=mime_type),
+            ]
+        )
+
+    def worker_tool_groups(self, *, include_browser: bool) -> dict[str, list]:
+        """Worker tools grouped for resident tools and deferred capabilities."""
+        browser = [
             self.browser_navigate,
             self.browser_get_content,
             self.browser_screenshot,
@@ -665,13 +640,42 @@ class BasicToolkit:
             self.browser_wait_for_selector,
             self.browser_evaluate,
             self.browser_close,
-            # Execute
-            self.run_command,
-            self.execute_file,
-            # Images and user input
-            self.ask_user,
-            extract_text,
-            *self._extra_worker_tools,
-            # Agent Skills tools
-            *self._skills_toolkit.tools,
-        ]
+        ] if include_browser else []
+        groups = {
+            "core": [
+                self.list_files,
+                self.read_file,
+                self.search_in_files,
+                self.search_web,
+                self.ask_user,
+            ],
+            "file_mutation": [
+                self.write_file,
+                self.edit_file,
+            ],
+            "execution": [
+                self.run_command,
+            ],
+            "media": [
+                self.generate_image,
+                self.read_image,
+                extract_text,
+            ],
+            "memory": list(self._extra_worker_tools),
+            "skills": list(self._skills_toolkit.tools),
+        }
+        if browser:
+            groups["browser"] = browser
+        return {name: tools for name, tools in groups.items() if tools}
+
+    def _worker_tools(self, *, include_browser: bool) -> list:
+        """扁平工具集（Coordinator 直用）：由 worker_tool_groups 拍平，单一真相源。"""
+        tools: list = []
+        for group in self.worker_tool_groups(include_browser=include_browser).values():
+            tools.extend(group)
+        return tools
+
+    @property
+    def workers_tools(self) -> list:
+        """List of tool callables exposed to the Worker Agent."""
+        return self._worker_tools(include_browser=True)

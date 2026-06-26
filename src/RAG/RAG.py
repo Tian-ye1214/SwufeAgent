@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from typing import Any
 
-import logger
-from app_config import get_env
+from infra import logger
+from config.app_config import get_env
+from infra.persist_utils import iso_utc_now
 from RAG.DataBase import EmbedDataBase
 from RAG.embedding_function import embed_texts, rerank_documents
 
@@ -22,6 +22,7 @@ class RAG:
         vector_dim: int,
         *,
         use_rerank: bool,
+        min_similarity: float = 0.0,
         extended_schema: bool = False,
         index_config: dict | None = None,
     ):
@@ -40,6 +41,7 @@ class RAG:
         self.vector_search_limit = vector_search_limit
         self.final_top_k = final_top_k
         self._use_rerank = use_rerank
+        self._min_similarity = min_similarity
 
     async def connect(self) -> None:
         await self._db.connect()
@@ -52,6 +54,22 @@ class RAG:
 
     async def close(self) -> None:
         await self._db.close()
+
+    async def row_count(self) -> int:
+        return await self._db.row_count()
+
+    async def clear_table(self) -> None:
+        await self._db.drop_table()
+
+    async def delete_by_source_prefix(self, prefix: str) -> None:
+        """删除所有 source 以 prefix 开头的行（prefix 可为 log_key 或 log_key#hash）。"""
+        if not prefix:
+            return
+        from tools.memory.hygiene import like_prefix_escaped  # noqa: PLC0415 (避免循环导入)
+        pat, esc = like_prefix_escaped(prefix)
+        pat_sql = pat.replace("'", "''")
+        where = f"source LIKE '{pat_sql}' ESCAPE '{esc}'"
+        await self._db.delete_where(where)
 
     def format_instruction(
         self,
@@ -75,22 +93,6 @@ class RAG:
         vectors = await embed_texts(instruct_text)
         return vectors[0]
 
-    async def ingest_chunk_pairs(self, pairs: list[tuple[str, str]]) -> int:
-        """每条 (source, text) 单独取向量并入库，不做字符切分。"""
-        if not pairs:
-            return 0
-        await self._db.ensure_connected()
-        texts = [p[1] for p in pairs]
-        sources = [p[0] for p in pairs]
-        vectors = await embed_texts(texts)
-        rows = [
-            {"vector": vectors[i], "text": texts[i], "source": sources[i]}
-            for i in range(len(pairs))
-        ]
-        n = await self._db.add_vectors(rows)
-        logger.info("RAG ingest_chunk_pairs: rows=%d", n)
-        return n
-
     async def ingest_turn_rows(self, rows: list[dict[str, Any]]) -> int:
         """短期记忆：每条含 text、source、id，及可选 agent、session_key、created_at。"""
         if not rows:
@@ -98,7 +100,7 @@ class RAG:
         await self._db.ensure_connected()
         texts = [r["text"] for r in rows]
         vectors = await embed_texts(texts)
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = iso_utc_now()
         built: list[dict[str, Any]] = []
         for i, r in enumerate(rows):
             built.append(
@@ -138,6 +140,19 @@ class RAG:
             if not candidates:
                 return []
 
+            if self._min_similarity > 0.0:
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.get("_distance") is not None
+                    and 1.0 - c["_distance"] >= self._min_similarity
+                ]
+                if not candidates:
+                    logger.info(
+                        "RAG retrieve: 全部低于相似度阈值 %.2f，返回空", self._min_similarity
+                    )
+                    return []
+
             if not self._use_rerank:
                 cap = min(self.final_top_k, len(candidates))
                 out = [
@@ -151,7 +166,7 @@ class RAG:
                 return out
 
             texts = [c["text"] for c in candidates]
-            top_n = min(self.final_top_k, len(texts)) if self.final_top_k is not None else len(texts)
+            top_n = min(self.final_top_k, len(texts))
             ranked = await rerank_documents(query, texts, top_n=top_n)
 
             results: list[dict[str, Any]] = []
@@ -163,5 +178,5 @@ class RAG:
             logger.info("RAG retrieve: rerank 后返回条数=%d", len(results))
             return results
         except Exception as e:
-            logger.error("RAG retrieve 失败: %s", e, exc_info=True)
+            logger.warning("RAG retrieve 失败: %s", e, exc_info=True)
             raise

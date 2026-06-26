@@ -1,25 +1,38 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
 import httpx
 import json_repair
-import logger
-from persist_utils import atomic_write_json, atomic_write_text, file_lock
-from app_config import (
+from infra import logger
+from infra.persist_utils import atomic_write_text, file_lock, iso_utc_now, update_locked_json
+from config.app_config import (
     chat_completion_inference_request_fields,
     get_env,
     get_model_and_params,
 )
 from tools.memory.consolidation import (
     long_term_memory_consolidation_params,
+    long_term_memory_debounce_params,
     merge_looks_like_unrelated_rewrite,
 )
-from tools.memory.message_text import pydantic_messages_to_text
+from tools.memory.hygiene import should_consolidate, _parse_iso
+from tools.memory.message_text import user_prompts_to_text
+from infra.shared_http import get_client
+
+_HTTP_KEY = "ltm"
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """进程级共享长期记忆合并客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
+    return get_client(
+        _HTTP_KEY,
+        lambda: httpx.AsyncClient(http2=True, timeout=httpx.Timeout(90.0)),
+    )
 
 
 class LongTermMemory:
@@ -27,8 +40,7 @@ class LongTermMemory:
 
     - MEMORY_GUIDANCE.md：给模型的长期记忆**使用**说明（随 load 注入 get_injection，不是抽取提示词）
     - soul_user_consolidation.md：从对话或日志增量中**合并**出 SOUL/USER 整篇正文的**唯一**提示词
-    - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；旧版无标题的纯文本会在加载时整篇当正文；\\n---\\n 分隔的段落会合并
-    - log_sources_state.json：各 .log 已读字节偏移，避免重复喂给模型；**不存在时首次加载会自动创建**（version + 空 sources）
+    - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；无标题时整篇当正文；`\\n---\\n` 分隔的段落会合并
     """
     _CHAR_LIMIT = 8000
     _PROMPT_BODY_ELIDE = 10_000
@@ -39,17 +51,29 @@ class LongTermMemory:
     _MEMORY_DIR = Path(__file__).resolve().parent.parent.parent / "prompts" / "LongTermMemory"
     _GUIDANCE_FILE = "MEMORY_GUIDANCE.md"
     _CONSOLIDATION_TEMPLATE_FILE = "soul_user_consolidation.md"
-    _LOG_STATE_FILE = "log_sources_state.json"
     _TARGETS = {"soul": "SOUL.md", "user": "USER.md"}
     _MD_H1_SOUL = re.compile(r"^#\s*SOUL\s*$", re.IGNORECASE)
     _MD_H1_USER = re.compile(r"^#\s*USER\s*$", re.IGNORECASE)
+    _GLOBAL_WRITE_LOCK = asyncio.Lock()
+    _CONSOLIDATION_STATE_FILE = "consolidation_state.json"
+
+    def _consolidation_state_path(self):
+        return self._MEMORY_DIR / self._CONSOLIDATION_STATE_FILE
+
+    def _read_consolidation_state_sync(self) -> dict:
+        import json
+        p = self._consolidation_state_path()
+        if not p.is_file():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
 
     def __init__(self):
         self._guidance_text: str = ""
         self._soul_body: str = ""
         self._user_body: str = ""
-        self._write_lock = asyncio.Lock()
-        self._logs_consolidate_lock = asyncio.Lock()
 
     def _sync_read_guidance(self) -> str:
         path = self._MEMORY_DIR / self._GUIDANCE_FILE
@@ -58,10 +82,6 @@ class LongTermMemory:
             return ""
         return path.read_text(encoding="utf-8").strip()
 
-    async def load(self) -> None:
-        """从磁盘加载 MEMORY_GUIDANCE.md、SOUL/USER 正文。应在程序启动时调用一次。"""
-        await asyncio.to_thread(self._load_sync)
-
     def refresh_from_disk_sync(self) -> None:
         """同步从磁盘刷新指引与 SOUL/USER（供 AgentSystem 启动等非 async 场景）。"""
         self._load_sync()
@@ -69,7 +89,6 @@ class LongTermMemory:
     def _load_sync(self) -> None:
         self._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._ensure_soul_user_files_sync()
-        self._ensure_log_state_file_sync()
         self._guidance_text = self._sync_read_guidance()
         self._soul_body = self._read_whole_body(self._MEMORY_DIR / "SOUL.md")
         self._user_body = self._read_whole_body(self._MEMORY_DIR / "USER.md")
@@ -82,13 +101,6 @@ class LongTermMemory:
                 continue
             title = "SOUL" if key == "soul" else "USER"
             path.write_text(f"# {title}\n\n", encoding="utf-8")
-
-    def _ensure_log_state_file_sync(self) -> None:
-        """若 log_sources_state.json 不存在，则创建默认 `{\"version\": 1, \"sources\": {}}`。"""
-        p = self._log_state_path()
-        if p.is_file():
-            return
-        self._save_log_state_sync({"version": 1, "sources": {}})
 
     @staticmethod
     def _read_whole_body(path: Path) -> str:
@@ -169,6 +181,29 @@ class LongTermMemory:
             parts.append(f"## User Preferences\n\n{u}")
         return "\n\n".join(parts)
 
+    async def snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return the current user-visible long-term memory bodies."""
+        await asyncio.to_thread(self._load_sync)
+        out: dict[str, dict[str, Any]] = {}
+        for key, filename in self._TARGETS.items():
+            body = (self._get_body(key) or "").strip()
+            out[key] = {
+                "path": self._MEMORY_DIR / filename,
+                "body": body,
+                "chars": len(body),
+                "empty": not bool(body),
+            }
+        return out
+
+    async def clear_all(self) -> None:
+        """Clear SOUL/USER bodies while keeping valid empty Markdown files."""
+        async with type(self)._GLOBAL_WRITE_LOCK:
+            await asyncio.to_thread(self._load_sync)
+            self._set_body("soul", "")
+            self._set_body("user", "")
+            await asyncio.to_thread(self._save_sync, "soul")
+            await asyncio.to_thread(self._save_sync, "user")
+
     def _load_consolidation_template_sync(self) -> str:
         path = self._MEMORY_DIR / self._CONSOLIDATION_TEMPLATE_FILE
         if not path.is_file():
@@ -176,7 +211,7 @@ class LongTermMemory:
         return path.read_text(encoding="utf-8")
 
     def _parse_consolidation_response(self, raw: str) -> dict[str, str | None]:
-        """输出整篇正文的 JSON：soul / user 为字符串或 null。兼容旧版数组，将合并为一段。"""
+        """输出整篇正文的 JSON：soul / user 为字符串或 null。"""
         text = (raw or "").strip()
         if "```" in text:
             fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
@@ -196,9 +231,6 @@ class LongTermMemory:
             elif isinstance(val, str):
                 s = val.strip()
                 out[key] = s if s else None
-            elif isinstance(val, list):
-                parts = [p.strip() for p in val if isinstance(p, str) and p.strip()]
-                out[key] = "\n\n".join(parts) if parts else None
             else:
                 out[key] = None
         return out
@@ -206,7 +238,7 @@ class LongTermMemory:
     async def _apply_consolidation_parsed(self, parsed: dict[str, str | None]) -> bool:
         """以模型给出的整篇正文**替换**对应 SOUL/USER；无更新则返回 False。"""
         changed = False
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             for key in ("soul", "user"):
                 val = parsed.get(key)
@@ -227,46 +259,6 @@ class LongTermMemory:
                 await asyncio.to_thread(self._save_sync, key)
                 changed = True
         return changed
-
-    def _log_state_path(self) -> Path:
-        return self._MEMORY_DIR / self._LOG_STATE_FILE
-
-    def _load_log_state_sync(self) -> dict[str, Any]:
-        self._ensure_log_state_file_sync()
-        p = self._log_state_path()
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return {"version": 1, "sources": {}}
-            src = data.get("sources")
-            if not isinstance(src, dict):
-                data["sources"] = {}
-            return data
-        except Exception:
-            return {"version": 1, "sources": {}}
-
-    def _save_log_state_sync(self, state: dict[str, Any]) -> None:
-        self._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        p = self._log_state_path()
-        with file_lock(p):
-            atomic_write_json(p, state)
-
-    def _rel_log_key(self, path: Path, root: Path) -> str:
-        try:
-            return path.resolve().relative_to(root).as_posix()
-        except ValueError:
-            return path.resolve().as_posix()
-
-    def _merge_log_state_updates_sync(self, updates: dict[str, int]) -> None:
-        """合并已处理到的字节偏移（仅更新传入的键）。"""
-        if not updates:
-            return
-        state = self._load_log_state_sync()
-        sources = state.setdefault("sources", {})
-        for k, br in updates.items():
-            sources[k] = {"bytes_read": int(br)}
-        self._save_log_state_sync(state)
 
     async def _consolidation_chat_and_parse(
         self,
@@ -311,129 +303,26 @@ class LongTermMemory:
             "messages": [{"role": "user", "content": user_content}],
             **chat_completion_inference_request_fields(
                 w_params,
+                model_name=model_name,
                 max_tokens=int(ltm["max_output_tokens"]),
                 temperature=0.2,
                 **kwargs,
             ),
         }
 
-        async with httpx.AsyncClient(http2=True, timeout=90.0) as client:
-            resp = await client.post(
-                f"{api_base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data["choices"][0]["message"]["content"]
+        resp = await _get_shared_client().post(
+            f"{api_base}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
 
         return self._parse_consolidation_response(raw)
-
-    async def consolidate_from_logs(
-        self,
-        log_root: Path | None = None,
-        *,
-        silent: bool = True,
-    ) -> None:
-        """
-        后台：扫描 logs 下全部 .log 的增量内容，调用模型提取 SOUL/USER；用 log_sources_state.json 记录已读字节，避免重复。
-        log_root 默认使用 logger.LOG_DIR（进程当前工作目录下的 logs）。
-        """
-        try:
-            root = (log_root if log_root is not None else logger.LOG_DIR).resolve()
-        except Exception:
-            if not silent:
-                raise
-            logger.warning("长期记忆（日志）：无法解析日志目录。")
-            return
-
-        async with self._logs_consolidate_lock:
-            try:
-                template = await asyncio.to_thread(self._load_consolidation_template_sync)
-                if not template.strip():
-                    return
-
-                state = await asyncio.to_thread(self._load_log_state_sync)
-                sources: dict[str, Any] = state.setdefault("sources", {})
-
-                log_files = sorted(
-                    [p for p in root.rglob("*.log") if p.is_file()],
-                    key=lambda p: str(p),
-                )
-                if not log_files:
-                    return
-
-                pending_state: dict[str, int] = {}
-
-                for fp in log_files:
-                    key = self._rel_log_key(fp, root)
-                    try:
-                        size = fp.stat().st_size
-                    except OSError:
-                        continue
-
-                    prev = 0
-                    ent = sources.get(key)
-                    if isinstance(ent, dict):
-                        try:
-                            prev = int(ent.get("bytes_read", 0))
-                        except (TypeError, ValueError):
-                            prev = 0
-                    if prev > size:
-                        prev = 0
-                    if prev >= size:
-                        continue
-
-                    pos = prev
-                    last_committed = prev
-                    try:
-                        while pos < size:
-                            ltm = long_term_memory_consolidation_params()
-                            log_chunk_b = int(ltm["log_read_chunk_bytes"])
-                            max_tc = int(ltm["max_transcript_chars"])
-                            to_read = min(log_chunk_b, size - pos)
-                            with fp.open("rb") as f:
-                                f.seek(pos)
-                                raw = f.read(to_read)
-                            if not raw:
-                                last_committed = size
-                                break
-                            text = raw.decode("utf-8", errors="replace")
-                            ci = 0
-                            maxc = max_tc
-                            while ci < len(text):
-                                piece = text[ci : ci + maxc]
-                                cj = ci + len(piece)
-                                header = (
-                                    f"=== FILE: {key} | file_bytes {pos}:{pos + len(raw)} / {size} "
-                                    f"| chunk_chars {ci}-{cj} ===\n"
-                                )
-                                parsed = await self._consolidation_chat_and_parse(
-                                    template,
-                                    header + piece,
-                                    truncate=False,
-                                )
-                                await self._apply_consolidation_parsed(parsed)
-                                ci = cj
-                            pos += len(raw)
-                            last_committed = pos
-
-                        pending_state[key] = last_committed
-                        await asyncio.to_thread(self._merge_log_state_updates_sync, dict(pending_state))
-
-                    except Exception:
-                        if last_committed > prev:
-                            pending_state[key] = last_committed
-                            await asyncio.to_thread(self._merge_log_state_updates_sync, dict(pending_state))
-                        raise
-
-            except Exception as e:
-                if not silent:
-                    raise
-                logger.warning(f"长期记忆（日志）合并失败（已忽略）: {e}")
 
     async def consolidate_from_messages(self, messages: list, *, silent: bool = True) -> None:
         """
@@ -445,14 +334,42 @@ class LongTermMemory:
             if not template.strip():
                 return
 
-            transcript = await asyncio.to_thread(pydantic_messages_to_text, messages)
+            transcript = await asyncio.to_thread(user_prompts_to_text, messages)
             transcript = transcript.strip()
             if not transcript:
                 return
 
+            fingerprint = hashlib.sha1(transcript.encode("utf-8")).hexdigest()
+            last = await asyncio.to_thread(self._read_consolidation_state_sync)
+            params = long_term_memory_debounce_params()
+            now_iso = iso_utc_now()
+            last_at = _parse_iso(last.get("last_run_at"))
+            now_dt = _parse_iso(now_iso)
+            secs = (now_dt - last_at).total_seconds() if (last_at and now_dt) else None
+            new_turns = len(messages) - int(last.get("turn_count", 0))
+            ok, reason = should_consolidate(
+                fingerprint=fingerprint,
+                last_fingerprint=last.get("last_fingerprint"),
+                new_turn_count=new_turns,
+                seconds_since_last_run=secs,
+                params=params,
+            )
+            if not ok:
+                logger.debug("长期记忆合并已跳过(debounce): %s", reason)
+                return
+
             parsed = await self._consolidation_chat_and_parse(template, transcript)
-            if await self._apply_consolidation_parsed(parsed):
-                logger.info("长期记忆已根据本轮对话更新（SOUL/USER 整篇）。")
+            changed = await self._apply_consolidation_parsed(parsed)
+
+            def _save_state(state: dict) -> None:
+                state["last_fingerprint"] = fingerprint
+                state["last_run_at"] = now_iso
+                state["turn_count"] = len(messages)
+            await asyncio.to_thread(
+                lambda: update_locked_json(self._consolidation_state_path(), 1, _save_state)
+            )
+            if changed:
+                logger.warning("📝 长期记忆已根据你的输入更新（SOUL/USER）。")
 
         except Exception as e:
             if not silent:
@@ -479,7 +396,7 @@ class LongTermMemory:
         if err:
             return f"安全检查拒绝：{err}"
 
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             body = (self._get_body(target) or "").strip()
             if content in body:
@@ -512,7 +429,7 @@ class LongTermMemory:
         if not content:
             return "错误：要删除的片段不能为空。"
 
-        async with self._write_lock:
+        async with type(self)._GLOBAL_WRITE_LOCK:
             await asyncio.to_thread(self._load_sync)
             body = self._get_body(target)
             if content not in body:

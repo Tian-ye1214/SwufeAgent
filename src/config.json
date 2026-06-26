@@ -33,50 +33,39 @@
       "thinking": "enabled"
     },
     "compressor": {
-      "name": "deepseek-v4-flash",
+      "name": "deepseek-v4-pro",
       "temperature": 0.2,
-      "max_tokens": 2048,
+      "max_tokens": 4096,
       "top_p": 1.0,
       "reasoning_effort": "xhigh",
       "thinking": "enabled"
     }
   },
   "context": {
-    "defaults": {
-      "token_estimate_fallback_chars_per_token": 4,
-      "litellm_model_prices_json_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-    },
+    "defaults": {},
     "compression": {
-      "weak_streak_max": 2,
-      "min_saved_ratio": 0.1,
       "middle_tool_args_max_chars": 1200
     },
     "coordinator": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     },
     "manager": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     },
     "worker": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
-      "tail_max_ratio": 0.12,
-      "head_turns": 2,
-      "head_max_ratio": 0.12
+      "head_turns": 2
     }
   },
   "bot": {
@@ -93,12 +82,20 @@
     "table_name": "conversation_turns",
     "vector_search_limit": 30,
     "final_top_k": 8,
-    "use_rerank": false,
+    "use_rerank": true,
+    "min_similarity": 0.3,
     "reconcile_on_query": true,
+    "turn_token_limit": 8192,
+    "turn_chunk_overlap_tokens": 512,
     "index": {
       "min_rows": 256,
       "metric": "cosine",
       "rebuild_every_n_adds": 100
+    },
+    "soft_forget": {
+      "enabled": true,
+      "max_age_days": 30,
+      "grace_until_first_use": true
     }
   },
   "long_term_memory": {
@@ -109,8 +106,10 @@
       "merge_min_similarity": 0.35,
       "merge_max_len_ratio": 2.6,
       "merge_min_len_ratio": 0.35,
-      "merge_len_check_min_old_chars": 200
+      "merge_len_check_min_old_chars": 200,
+      "debounce": { "min_new_turns": 3, "min_interval_sec": 120 }
     }
   },
-  "request_limit": null
+  "request_limit": null,
+  "MODEL_HTTP_TIMEOUT": 300
 }

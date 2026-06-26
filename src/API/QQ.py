@@ -1,34 +1,37 @@
-import re
-import asyncio
 import inspect
+import os
+import re
+import sys
 from functools import partial
+from pathlib import Path
 
-from ncatbot.core import BotClient, BaseMessageEvent, GroupMessageEvent, MetaEvent
+# ncatbot 在导入时即冻结配置（从 NCATBOT_CONFIG_PATH 读取配置文件路径），
+# 故须在导入 ncatbot 之前指向随包附带的 config.yaml，否则会回退到 input() 阻塞。
+os.environ.setdefault("NCATBOT_CONFIG_PATH", str(Path(__file__).resolve().parent / "config.yaml"))
+
+from ncatbot.core import BaseMessageEvent, BotClient, GroupMessageEvent, MetaEvent
 from ncatbot.plugin_system import on_message
 from ncatbot.utils import config
-from pydantic_ai import BinaryContent
+from ncatbot.utils.config import strong_password_check
 
-import logger
-from app_config import get_env
+from infra import logger
+from config.app_config import get_env
+from agent_core.input_messages import UserMessage
 from base import BotBase
 from qq_media_helpers import extract_media
-from tools.ExtractFileContent import extract_text_from_pdf_bytes
-
-_u = get_env("QQBOT_ID", warn=False)
-config.set_bot_uin(_u if _u else None)
-
-_FILE_ALLOW_EXT = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm",
-     ".pdf", ".txt", ".md", ".docx", ".xlsx", ".csv", ".json"}
-)
-
 
 class QQBot(BotBase):
     _ENV_AGENT_TIMEOUT = "QQ_AGENT_TIMEOUT_S"
     _ENV_SEND_TIMEOUT = "QQ_SEND_REPLY_TIMEOUT_S"
+    _FILE_ALLOW_EXT = frozenset({
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".webm",
+        ".pdf", ".txt", ".md", ".docx", ".xlsx", ".csv", ".json",
+    })
 
     def __init__(self):
         super().__init__()
+        if uin := get_env("QQBOT_ID", warn=False):
+            config.set_bot_uin(uin)
         self._bot_client = BotClient()
         self._bot_client.add_shutdown_handler(self._on_shutdown)
 
@@ -56,37 +59,14 @@ class QQBot(BotBase):
 
     async def _reply_event(self, event: BaseMessageEvent, text: str) -> None:
         sig = inspect.signature(event.reply)
-        await (event.reply(text=text, at=False) if "at" in sig.parameters else event.reply(text=text))
+        await (
+            event.reply(text=text, at=False)
+            if "at" in sig.parameters
+            else event.reply(text=text)
+        )
 
     async def _extract_attachments(self, event: BaseMessageEvent) -> list:
-        return await extract_media(self._bot_client.api, event, _FILE_ALLOW_EXT)
-
-    def _is_pdf_binary(self, att: BinaryContent) -> bool:
-        mt = (att.media_type or "").split(";")[0].strip().lower()
-        if mt in ("application/pdf", "application/x-pdf"):
-            return True
-        data = att.data or b""
-        return len(data) >= 4 and data[:4] == b"%PDF"
-
-    async def _inline_pdf_attachments(self, user_text: str, attachments: list) -> tuple[str, list]:
-        """将 PDF 的 BinaryContent 解析为正文，其余附件原样保留。"""
-        out: list = []
-        blocks: list[str] = []
-        for att in attachments:
-            if not isinstance(att, BinaryContent) or not self._is_pdf_binary(att):
-                out.append(att)
-                continue
-            extracted = await asyncio.to_thread(extract_text_from_pdf_bytes, att.data)
-            if extracted:
-                blocks.append(f"【PDF 附件】\n\n{extracted}")
-            else:
-                logger.warning("[QQ] PDF 解析失败，未注入文本")
-                blocks.append("（PDF 附件无法解析为文本，请尝试发送截图或纯文本。）")
-        text = user_text
-        if blocks:
-            body = "\n\n".join(blocks)
-            text = f"{text}\n\n{body}".strip() if text else body
-        return text, out
+        return await extract_media(self._bot_client.api, event, self._FILE_ALLOW_EXT)
 
     async def _on_shutdown(self, _: MetaEvent) -> None:
         await self.release_all_resources_async()
@@ -98,20 +78,49 @@ class QQBot(BotBase):
         session_id = self._session_id(event)
         user_text = self.clean_text(raw_text)
         attachments = await self._extract_attachments(event)
-        user_text, attachments = await self._inline_pdf_attachments(user_text, attachments)
-        await self.dispatch_message(
+        user_text, attachments = await self._partition_document_attachments(user_text, attachments)
+        await self.dispatch_user_message(
             session_id,
-            user_text,
-            attachments,
+            UserMessage(text=user_text, attachments=attachments),
             partial(self._reply_event, event),
-            asyncio.get_running_loop(),
         )
 
     def _register_handlers(self) -> None:
         on_message(self._handle_message)
 
-    def run(self, *, debug: bool = True, remote_mode: bool = True,
-            enable_webui_interaction: bool = False, **kwargs):
+    def _doctor(self) -> None:
+        """启动前体检：配置缺失/无效时立即报错退出，避免 ncatbot 回退到 input() 静默卡死。"""
+        config_path = Path(os.environ["NCATBOT_CONFIG_PATH"])
+        if not config_path.is_file():
+            logger.error(
+                f"[QQ] 找不到 NapCat 配置文件 {config_path}。"
+                f"请在 src/API/ 下放置 config.yaml（参照仓库内模板）。"
+            )
+            sys.exit(1)
+        uin = str(config.bt_uin or "")
+        if uin in ("", "None", "123456"):
+            logger.error(
+                "[QQ] 机器人 QQ 号未配置。请设置环境变量 QQBOT_ID，"
+                f"或在 {config_path} 中填写 bt_uin。"
+            )
+            sys.exit(1)
+        token = config.napcat.webui_token
+        if not strong_password_check(token):
+            logger.error(
+                f"[QQ] NapCat WebUI 令牌强度不足（{config_path} 的 napcat.webui_token）。"
+                f"请改为至少 12 位、含数字与大小写字母及特殊符号的强密码。"
+            )
+            sys.exit(1)
+
+    def run(
+        self,
+        *,
+        debug: bool = True,
+        remote_mode: bool = True,
+        enable_webui_interaction: bool = False,
+        **kwargs,
+    ):
+        self._doctor()
         self._released = False
         self._register_handlers()
         try:

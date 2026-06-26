@@ -1,8 +1,7 @@
-"""上下文窗口探测、Token 估算与各角色历史压缩（中间段摘录 + 结构化 Markdown 摘要）。"""
+"""上下文窗口探测与各角色历史压缩（中间段摘录 + 结构化 Markdown 摘要）。"""
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import threading
@@ -12,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app_config import (
+from config.app_config import (
     chat_completion_inference_request_fields,
     get_agent_roles,
     get_context_config,
@@ -21,18 +20,21 @@ from app_config import (
     get_model_and_params,
     settings,
 )
-from prompt import format_prompt_current_time, load_prompt
-from tools.Memory import ChatHistory, _pydantic_messages_to_text
-
-import tiktoken
+from prompt import (
+    format_prompt_current_time,
+    load_prompt,
+)
+from tools.memory import ChatHistory, pydantic_messages_to_text
 
 from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
+from ModelGateway.usage_accounting import latest_usage_input_tokens
 
-import logger
+from infra import logger
 
 from pydantic_ai.messages import (
     BaseToolCallPart,
     BaseToolReturnPart,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -42,50 +44,48 @@ from pydantic_ai.messages import (
 _CONTEXT_LIMIT_CACHE: dict[str, int] = {}
 _COMPRESS_PREFIX = "[CONTEXT_COMPRESSION_SUMMARY]"
 _COMPRESS_MARKER = "<<COMPRESS_SUMMARY>>"
+_MODEL_VARIANT_SUFFIXES = re.compile(
+    r"[-_](?:pro|flash|turbo|latest|preview|mini|lite|plus|max|ultra|fast|small|medium|large|long|free|instruct)$",
+    re.IGNORECASE,
+)
+_COMPRESS_REQUIRED_HEADINGS = (
+    "## 原始目标与当前目标",
+    "## 已完成节点",
+    "## 待完成节点",
+    "## 工具调用与关键结果",
+    "## 当前状态",
+    "## 未解决问题与阻塞",
+    "## 用户约束与已做决策",
+    "## 恢复后下一步",
+)
 
 
-def _count_text_tokens(text: str, chars_per_token: float) -> int:
-    try:
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
-    except Exception as e:
-        logger.error(f"tiktoken分词错误: {e}")
-        return max(1, int(len(text) / max(chars_per_token, 0.25)))
+class CompressionValidationError(RuntimeError):
+    """压缩摘要或写回消息不满足可恢复检查点契约。"""
 
 
-def estimate_message_tokens(msg: Any, chars_per_token: float) -> int:
-    """单条 pydantic-ai 消息的 token 估算。"""
-    if isinstance(msg, ModelRequest):
-        parts: list[str] = []
-        for p in msg.parts:
-            if isinstance(p, UserPromptPart):
-                parts.append(str(p.content))
-            elif isinstance(p, BaseToolReturnPart):
-                parts.append(f"{p.tool_name}:{p.tool_call_id}:{p.model_response_str()}")
-        return _count_text_tokens("\n".join(parts), chars_per_token)
-    if isinstance(msg, ModelResponse):
-        parts: list[str] = []
-        for p in msg.parts:
-            if isinstance(p, TextPart):
-                parts.append(p.content)
-            elif isinstance(p, BaseToolCallPart):
-                args = p.args if isinstance(p.args, str) else json.dumps(p.args, ensure_ascii=False)
-                parts.append(f"{p.tool_name}:{args}")
-        return _count_text_tokens("\n".join(parts), chars_per_token)
-    return _count_text_tokens(str(msg), chars_per_token)
-
-
-def estimate_history_tokens(
-    messages: list,
+def context_usage_breakdown(
+    role: str,
+    history_messages: list,
     *,
-    chars_per_token: float | None = None,
-    role
-) -> int:
-    if not messages:
-        return 0
+    skills_manager: Any,
+    memory_injection: str,
+) -> dict[str, Any]:
+    """基于最近一次真实模型 usage 的上下文占用。没有真实 usage 时不回退估算。"""
     ctx = get_context_config(role)
-    cpt = float(chars_per_token if chars_per_token is not None else ctx["token_estimate_fallback_chars_per_token"])
-    return sum(estimate_message_tokens(m, cpt) for m in messages)
+    max_tokens = get_effective_max_context(role=role)
+    used = latest_usage_input_tokens(history_messages)
+    total = int(used or 0)
+    threshold = int(max_tokens * float(ctx["auto_compress_ratio"]))
+    percent = 0.0 if max_tokens <= 0 else min(100.0, total * 100.0 / max_tokens)
+    return {
+        "has_usage": used is not None,
+        "input": total,
+        "total": total,
+        "max": max_tokens,
+        "threshold": threshold,
+        "percent": percent,
+    }
 
 
 def _normalize_model_name(name: str) -> str:
@@ -95,10 +95,6 @@ def _normalize_model_name(name: str) -> str:
         n = n.rsplit("/", 1)[-1]
     n = re.sub(r"-\d{6,8}$", "", n)
     while True:
-        _MODEL_VARIANT_SUFFIXES = re.compile(
-            r"[-_](?:pro|flash|turbo|latest|preview|mini|lite|plus|max|ultra|fast|small|medium|large|long|free|instruct)$",
-            re.IGNORECASE,
-        )
         stripped = _MODEL_VARIANT_SUFFIXES.sub("", n)
         if stripped == n:
             break
@@ -118,126 +114,146 @@ def _lookup_genai_prices(name: str) -> int | None:
     return None
 
 
-_LITELLM_LOCK = threading.Lock()
-_LITELLM_CONTEXT_MAP: dict[str, int] | None = None   # max_input_tokens（降级 max_tokens）
-_LITELLM_OUTPUT_MAP: dict[str, int] | None = None    # max_output_tokens
-_LITELLM_FAILED = False
-_LITELLM_URL_USED: str | None = None
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
+_OPENROUTER_LOCK = threading.Lock()
+_OPENROUTER_CONTEXT_MAP: dict[str, int] | None = None
+_OPENROUTER_OUTPUT_MAP: dict[str, int] | None = None
+_OPENROUTER_META_MAP: dict[str, dict[str, Any]] | None = None
+_OPENROUTER_FAILED = False
 
-
-def _litellm_model_prices_json_url() -> str | None:
-    for role in get_agent_roles():
-        raw = get_context_config(role).get("litellm_model_prices_json_url")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-    return None
-
-
-def _litellm_cache_file_path(url: str) -> Path:
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+def _openrouter_cache_path() -> Path:
     d = logger.LOG_DIR / "cache"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"litellm_model_prices_{digest}.json"
+    return d / "openrouter_models.json"
 
 
-def _read_litellm_cache(url: str) -> dict[str, Any] | None:
-    path = _litellm_cache_file_path(url)
-    if not path.is_file():
-        return None
-    with open(path, encoding="utf-8") as f:
-        env = json.load(f)
-    if env.get("url") != url:
-        return None
-    return env["body"]
-
-
-def _write_litellm_cache(url: str, raw: dict[str, Any]) -> None:
-    path = _litellm_cache_file_path(url)
-    envelope = {"url": url, "body": raw}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(envelope, f, ensure_ascii=False)
-
-
-def _litellm_raw_to_maps(raw: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+def _openrouter_raw_to_maps(
+    data: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, dict[str, Any]]]:
     ctx_map: dict[str, int] = {}
     out_map: dict[str, int] = {}
-    for key, info in raw.items():
-        if not isinstance(info, dict):
+    meta_map: dict[str, dict[str, Any]] = {}
+    for m in data.get("data", []):
+        if not isinstance(m, dict):
             continue
-        low = key.lower()
-        bare = key.rsplit("/", 1)[-1].lower() if "/" in key else None
+        mid = m.get("id", "").lower()
+        if not mid:
+            continue
+        bare = mid.rsplit("/", 1)[-1] if "/" in mid else None
 
-        ctx = info.get("max_input_tokens") or info.get("max_tokens")
+        meta = {
+            k: m[k]
+            for k in (
+                "id",
+                "name",
+                "canonical_slug",
+                "context_length",
+                "top_provider",
+                "pricing",
+                "architecture",
+                "supported_parameters",
+                "default_parameters",
+                "knowledge_cutoff",
+                "expiration_date",
+            )
+            if k in m
+        }
+        meta_map[mid] = meta
+        if bare and bare not in meta_map:
+            meta_map[bare] = meta
+
+        ctx = None
+        tp = m.get("top_provider")
+        if isinstance(tp, dict):
+            tp_ctx = tp.get("context_length")
+            if isinstance(tp_ctx, int) and tp_ctx >= 4096:
+                ctx = tp_ctx
+        if ctx is None:
+            raw_ctx = m.get("context_length")
+            if isinstance(raw_ctx, int) and raw_ctx >= 4096:
+                ctx = raw_ctx
         if isinstance(ctx, int) and ctx >= 4096:
-            ctx_map[low] = ctx
+            ctx_map[mid] = ctx
             if bare and bare not in ctx_map:
                 ctx_map[bare] = ctx
 
-        out = info.get("max_output_tokens")
-        if isinstance(out, int) and out >= 1:
-            out_map[low] = out
-            if bare and bare not in out_map:
-                out_map[bare] = out
+        if isinstance(tp, dict):
+            out = tp.get("max_completion_tokens")
+            if isinstance(out, int) and out >= 1:
+                out_map[mid] = out
+                if bare and bare not in out_map:
+                    out_map[bare] = out
 
-    return ctx_map, out_map
+    return ctx_map, out_map, meta_map
 
 
-def _ensure_litellm_maps() -> None:
-    """拉取 litellm JSON 并填充 _LITELLM_CONTEXT_MAP 与 _LITELLM_OUTPUT_MAP，只拉一次；有缓存则直接读盘。"""
-    global _LITELLM_CONTEXT_MAP, _LITELLM_OUTPUT_MAP, _LITELLM_FAILED, _LITELLM_URL_USED
-    url = _litellm_model_prices_json_url()
-    cache_key = url or "__no_url__"
-    with _LITELLM_LOCK:
-        if _LITELLM_CONTEXT_MAP is not None and _LITELLM_URL_USED == cache_key:
+def _ensure_openrouter_maps() -> None:
+    global _OPENROUTER_CONTEXT_MAP, _OPENROUTER_OUTPUT_MAP, _OPENROUTER_META_MAP, _OPENROUTER_FAILED
+    with _OPENROUTER_LOCK:
+        if (
+            _OPENROUTER_CONTEXT_MAP is not None
+            and _OPENROUTER_OUTPUT_MAP is not None
+            and _OPENROUTER_META_MAP is not None
+        ):
             return
-        if _LITELLM_FAILED and _LITELLM_URL_USED == cache_key:
+        if _OPENROUTER_FAILED:
             return
-    if not url:
-        logger.warning(
-            "未配置 litellm_model_prices_json_url（可在 context.defaults 或任一 context.coordinator|manager|worker 下设置），"
-            "跳过 litellm 模型元数据拉取"
-        )
-        with _LITELLM_LOCK:
-            _LITELLM_CONTEXT_MAP = {}
-            _LITELLM_OUTPUT_MAP = {}
-            _LITELLM_URL_USED = cache_key
-            _LITELLM_FAILED = False
-        return
 
-    cached = _read_litellm_cache(url)
-    if cached is not None:
-        ctx_map, out_map = _litellm_raw_to_maps(cached)
-        with _LITELLM_LOCK:
-            _LITELLM_CONTEXT_MAP = ctx_map
-            _LITELLM_OUTPUT_MAP = out_map
-            _LITELLM_URL_USED = cache_key
-            _LITELLM_FAILED = False
-        logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
-        return
+    cache_path = _openrouter_cache_path()
+    if cache_path.is_file():
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                cached = json.load(f)
+            ctx_map, out_map, meta_map = _openrouter_raw_to_maps(cached)
+            with _OPENROUTER_LOCK:
+                _OPENROUTER_CONTEXT_MAP = ctx_map
+                _OPENROUTER_OUTPUT_MAP = out_map
+                _OPENROUTER_META_MAP = meta_map
+                _OPENROUTER_FAILED = False
+            logger.info(
+                "OpenRouter 模型元数据已从缓存加载，context=%d 条 output=%d 条 meta=%d 条",
+                len(ctx_map),
+                len(out_map),
+                len(meta_map),
+            )
+            return
+        except Exception as e:
+            logger.warning("OpenRouter 缓存读取失败: %s，将重新拉取", e)
 
     try:
         with httpx.Client(timeout=15.0) as client:
-            r = client.get(url)
+            r = client.get(_OPENROUTER_URL)
             r.raise_for_status()
             raw = r.json()
     except Exception as e:
-        logger.warning("拉取 litellm 模型元数据失败 (%s): %s", url, e)
-        with _LITELLM_LOCK:
-            _LITELLM_FAILED = True
-            _LITELLM_URL_USED = cache_key
+        logger.warning("拉取 OpenRouter 模型元数据失败 (%s): %s", _OPENROUTER_URL, e)
+        with _OPENROUTER_LOCK:
+            _OPENROUTER_FAILED = True
         return
 
-    _write_litellm_cache(url, raw)
-    ctx_map, out_map = _litellm_raw_to_maps(raw)
-    with _LITELLM_LOCK:
-        _LITELLM_CONTEXT_MAP = ctx_map
-        _LITELLM_OUTPUT_MAP = out_map
-        _LITELLM_URL_USED = cache_key
-        _LITELLM_FAILED = False
-    logger.info("litellm 模型元数据已加载（%s），context=%d 条 output=%d 条", url, len(ctx_map), len(out_map))
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning("OpenRouter 缓存写入失败: %s", e)
+
+    ctx_map, out_map, meta_map = _openrouter_raw_to_maps(raw)
+    with _OPENROUTER_LOCK:
+        _OPENROUTER_CONTEXT_MAP = ctx_map
+        _OPENROUTER_OUTPUT_MAP = out_map
+        _OPENROUTER_META_MAP = meta_map
+        _OPENROUTER_FAILED = False
+    logger.info(
+        "OpenRouter 模型元数据已加载（%s），context=%d 条 output=%d 条 meta=%d 条",
+        _OPENROUTER_URL,
+        len(ctx_map),
+        len(out_map),
+        len(meta_map),
+    )
 
 
-def _litellm_lookup(name: str, m: dict[str, int] | None) -> int | None:
+def _map_lookup(name: str, m: dict | None) -> Any:
     if not m:
         return None
     low = name.lower()
@@ -249,14 +265,25 @@ def _litellm_lookup(name: str, m: dict[str, int] | None) -> int | None:
     return None
 
 
-def _lookup_litellm(name: str) -> int | None:
-    _ensure_litellm_maps()
-    return _litellm_lookup(name, _LITELLM_CONTEXT_MAP)
+def _lookup_openrouter(name: str) -> int | None:
+    _ensure_openrouter_maps()
+    return _map_lookup(name, _OPENROUTER_CONTEXT_MAP)
 
 
-def _lookup_litellm_output(name: str) -> int | None:
-    _ensure_litellm_maps()
-    return _litellm_lookup(name, _LITELLM_OUTPUT_MAP)
+def _lookup_openrouter_output(name: str) -> int | None:
+    _ensure_openrouter_maps()
+    return _map_lookup(name, _OPENROUTER_OUTPUT_MAP)
+
+
+def _lookup_openrouter_meta(name: str) -> dict[str, Any] | None:
+    _ensure_openrouter_maps()
+    meta = _map_lookup(name, _OPENROUTER_META_MAP)
+    if meta:
+        return meta
+    normalized = _normalize_model_name(name)
+    if normalized != name.lower():
+        return _map_lookup(normalized, _OPENROUTER_META_MAP)
+    return None
 
 
 def _multi_source_lookup(name: str, fns: tuple) -> int | None:
@@ -275,24 +302,28 @@ def _multi_source_lookup(name: str, fns: tuple) -> int | None:
 
 
 def lookup_model_context(model_name: str) -> int | None:
-    """多源查找上下文窗口：内置字典 > genai-prices > litellm(max_input_tokens/max_tokens)。"""
-    return _multi_source_lookup(model_name, (_lookup_genai_prices, _lookup_litellm))
+    """多源查找上下文窗口：OpenRouter > genai-prices 兜底。"""
+    return _multi_source_lookup(model_name, (_lookup_openrouter, _lookup_genai_prices))
 
 
 def lookup_model_max_output_tokens(model_name: str) -> int | None:
-    """多源查找最大输出 tokens：内置字典 > litellm(max_output_tokens)。"""
-    return _multi_source_lookup(model_name, (_lookup_litellm_output,))
+    """多源查找最大输出 tokens：OpenRouter API。"""
+    return _multi_source_lookup(model_name, (_lookup_openrouter_output,))
 
 
-def merge_litellm_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+def merge_openrouter_into_model_params(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """
-    根据 litellm 元数据覆盖模型参数：
-    - max_output_tokens 覆盖 params['max_tokens']
+    根据 OpenRouter 元数据覆盖模型参数：
+    - max_output_tokens 作为 params['max_tokens'] 的上限
     """
     out = dict(params)
     max_out = lookup_model_max_output_tokens(model_name)
     if isinstance(max_out, int) and max_out > 0:
-        out["max_tokens"] = max_out
+        configured = out.get("max_tokens")
+        if isinstance(configured, int) and configured > 0:
+            out["max_tokens"] = min(configured, max_out)
+        else:
+            out["max_tokens"] = max_out
     return out
 
 
@@ -326,25 +357,27 @@ def get_effective_max_context(
     return fallback
 
 
-def format_context_usage_line(
-    used_tokens: int,
-    max_tokens: int,
-    *,
-    width: int = 18,
-) -> str:
-    if max_tokens <= 0:
-        return f"[ctx] {used_tokens} tok (max unknown)"
-    pct = min(100.0, 100.0 * used_tokens / max_tokens)
-    filled = int(round(width * pct / 100.0))
-    filled = min(width, max(0, filled))
-    bar = "=" * filled + "." * (width - filled)
+_TOOL_IMPORTANT_LINE_RE = re.compile(
+    r"(exit\s+code|return\s+code|status\s*code|error|failed|failure|exception|traceback|"
+    r"stderr|command|cmd|path|file|artifact|output)",
+    re.IGNORECASE,
+)
 
-    def _k(n: int) -> str:
-        if n >= 1000:
-            return f"{n / 1000:.1f}k"
-        return str(n)
 
-    return f"[ctx {bar}] {pct:.0f}% ({_k(used_tokens)}/{_k(max_tokens)} tok)"
+def _compact_tool_content_for_compress(tool_content: str, *, max_chars: int = 480) -> str:
+    text = (tool_content or "").strip()
+    if not text:
+        return "content=empty"
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    important = [line for line in lines if _TOOL_IMPORTANT_LINE_RE.search(line)]
+    selected = important[:6] if important else lines[:4]
+    compact = " | ".join(selected).strip()
+    if not compact:
+        compact = text.replace("\n", " ")
+    if len(compact) > max_chars:
+        compact = compact[: max_chars - 24].rstrip() + " ...(tool output truncated)"
+    return compact
 
 
 def summarize_tool_result(tool_name: str, tool_args: Any, tool_content: str) -> str:
@@ -354,7 +387,8 @@ def summarize_tool_result(tool_name: str, tool_args: Any, tool_content: str) -> 
         arg_line = json.dumps(tool_args, ensure_ascii=False)[:240]
     else:
         arg_line = str(tool_args)
-    return f"`{name}` {arg_line} → {len(tool_content)} chars"
+    result_line = _compact_tool_content_for_compress(tool_content)
+    return f"`{name}` {arg_line} → {len(tool_content)} chars; {result_line}"
 
 
 def _elide_tool_call_args_for_compress(arg_txt: str, max_chars: int) -> str:
@@ -380,50 +414,26 @@ def _user_spans(messages: list) -> list[tuple[int, int]]:
     return spans
 
 
-def _tokens_range(messages: list, i: int, j: int, cpt: float) -> int:
-    if i >= j:
-        return 0
-    return sum(estimate_message_tokens(messages[k], cpt) for k in range(i, j))
-
-
 def _compute_head_end(
-    messages: list,
     spans: list[tuple[int, int]],
     *,
     head_turns: int,
-    head_max_tokens: int,
-    cpt: float,
 ) -> int:
     if not spans or head_turns <= 0:
         return 0
     n = min(head_turns, len(spans))
-    end_idx = spans[n - 1][1]
-    while n > 0 and _tokens_range(messages, 0, end_idx, cpt) > head_max_tokens:
-        n -= 1
-        if n <= 0:
-            return 0
-        end_idx = spans[n - 1][1]
-    return end_idx
+    return spans[n - 1][1]
 
 
 def _compute_tail_start(
-    messages: list,
     spans: list[tuple[int, int]],
     *,
     tail_turns: int,
-    tail_max_tokens: int,
-    cpt: float,
 ) -> int:
     if not spans or tail_turns <= 0:
-        return len(messages)
+        return spans[-1][1] if spans else 0
     n = min(tail_turns, len(spans))
-    start_idx = spans[len(spans) - n][0]
-    while n > 0 and _tokens_range(messages, start_idx, len(messages), cpt) > tail_max_tokens:
-        n -= 1
-        if n <= 0:
-            return len(messages)
-        start_idx = spans[len(spans) - n][0]
-    return start_idx
+    return spans[len(spans) - n][0]
 
 
 def _tool_calls_up_to(messages: list, hi: int) -> dict[str, tuple[str, Any]]:
@@ -486,13 +496,13 @@ def _save_compress_debug_artifacts(
     run_dir = root / f"{int(time.time() * 1000)}_{role}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "before_messages.md").write_text(
-        _pydantic_messages_to_text(messages_before), encoding="utf-8"
+        pydantic_messages_to_text(messages_before), encoding="utf-8"
     )
     before_llm = f"## compressor system\n\n{system_prompt}\n\n## compressor user\n\n{user_content}\n"
     (run_dir / "before_compress.md").write_text(before_llm, encoding="utf-8")
     (run_dir / "compressor_output.md").write_text(summary_md, encoding="utf-8")
     (run_dir / "after_context.md").write_text(
-        _pydantic_messages_to_text(new_messages), encoding="utf-8"
+        pydantic_messages_to_text(new_messages), encoding="utf-8"
     )
     (run_dir / "slice_bounds.txt").write_text(
         f"role={role}\nhead_end={head_end}\ntail_start={tail_start}\n",
@@ -509,6 +519,83 @@ def _build_compress_user_body(summary_md: str) -> str:
         f"{_COMPRESS_MARKER}\n"
         f"{body}"
     )
+
+
+def _level2_sections(markdown: str) -> list[tuple[str, str]]:
+    sections: list[tuple[str, str]] = []
+    current_heading: str | None = None
+    current_lines: list[str] = []
+    for raw_line in markdown.splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            if current_heading is not None:
+                sections.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading = line
+            current_lines = []
+        elif current_heading is not None:
+            current_lines.append(raw_line)
+    if current_heading is not None:
+        sections.append((current_heading, "\n".join(current_lines).strip()))
+    return sections
+
+
+def _nonempty_section(section_body: str) -> bool:
+    return bool(section_body.strip())
+
+
+def _lint_compression_summary(summary_md: str) -> str:
+    body = (summary_md or "").strip()
+    errors: list[str] = []
+    if not body:
+        errors.append("压缩摘要为空")
+    if "```" in body:
+        errors.append("压缩摘要不能包含 Markdown code fence")
+    if body.startswith("{") or body.startswith("["):
+        errors.append("压缩摘要必须是 Markdown，不得输出 JSON")
+
+    sections = _level2_sections(body)
+    headings = [heading for heading, _ in sections]
+    required = list(_COMPRESS_REQUIRED_HEADINGS)
+    missing = [h for h in required if h not in headings]
+    if missing:
+        errors.append(
+            "压缩摘要缺少必需标题: "
+            f"missing={missing!r} actual={headings!r}"
+        )
+    else:
+        bodies = {heading: section_body for heading, section_body in sections}
+        if not _nonempty_section(bodies["## 原始目标与当前目标"]):
+            errors.append("`原始目标与当前目标` 不能为空")
+        if not (
+            _nonempty_section(bodies["## 已完成节点"])
+            or _nonempty_section(bodies["## 待完成节点"])
+        ):
+            errors.append("`已完成节点` / `待完成节点` 至少一个不能为空")
+
+    if errors:
+        raise CompressionValidationError("; ".join(errors))
+    return body
+
+
+def _validate_compression_message(summary_msg: ModelRequest) -> None:
+    parts = list(summary_msg.parts)
+    if len(parts) != 1 or not isinstance(parts[0], UserPromptPart):
+        raise CompressionValidationError("压缩摘要必须写入单个 UserPromptPart")
+    content = parts[0].content
+    if not content.startswith(f"{_COMPRESS_PREFIX}\n"):
+        raise CompressionValidationError("压缩摘要缺少 CONTEXT_COMPRESSION_SUMMARY 前缀")
+    if f"\n{_COMPRESS_MARKER}\n" not in content:
+        raise CompressionValidationError("压缩摘要缺少 COMPRESS_SUMMARY marker")
+
+
+def _validate_model_messages_round_trip(messages: list[Any]) -> None:
+    try:
+        raw = ModelMessagesTypeAdapter.dump_python(messages, mode="json")
+        ModelMessagesTypeAdapter.validate_python(raw)
+    except Exception as e:
+        raise CompressionValidationError(
+            f"压缩后 model_messages dump/validate 失败: {e}"
+        ) from e
 
 
 def _call_compressor_llm(
@@ -530,7 +617,7 @@ def _call_compressor_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        **chat_completion_inference_request_fields(comp_params, **kwargs),
+        **chat_completion_inference_request_fields(comp_params, model_name=model, **kwargs),
     }
     headers = {"Content-Type": "application/json"}
     if key:
@@ -543,7 +630,13 @@ def _call_compressor_llm(
     return str(data["choices"][0]["message"]["content"]).strip()
 
 
-def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
+def compress_history(
+    history: ChatHistory,
+    *,
+    role: str,
+    force: bool,
+    task_state: str | None = None,
+) -> bool:
     """
     压缩三步：1) 按阈值或 force 触发；2) 头尾保留，中间段展成 Markdown 摘录；
     3) 压缩模型输出固定结构的 Markdown，写入一条 User 摘要消息。
@@ -553,46 +646,27 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
         return False
 
     ctx = get_context_config(role)
-    cpt = float(ctx["token_estimate_fallback_chars_per_token"])
     max_ctx = get_effective_max_context(role=role)
-    used = estimate_history_tokens(messages, chars_per_token=cpt, role=role)
+    used = latest_usage_input_tokens(messages)
     threshold = max_ctx * float(ctx["auto_compress_ratio"])
 
-    if not force and used < threshold:
+    if not force and (used is None or used < threshold):
         return False
 
     cfg = settings()["context"]["compression"]
     knobs = {
-            "weak_streak_max": int(cfg["weak_streak_max"]),
-            "min_saved_ratio": float(cfg["min_saved_ratio"]),
             "middle_tool_args_max_chars": int(cfg["middle_tool_args_max_chars"]),
     }
 
-    if not force and history._compress_weak_streak >= int(knobs["weak_streak_max"]):
-        logger.warning(
-            "上下文压缩跳过：连续 %s 次压缩收益低于 %.0f%%（抗抖动）",
-            int(knobs["weak_streak_max"]),
-            float(knobs["min_saved_ratio"]) * 100,
-        )
-        return False
-
     spans = _user_spans(messages)
 
-    head_max_tokens = int(max_ctx * float(ctx["head_max_ratio"]))
     head_end = _compute_head_end(
-        messages,
         spans,
         head_turns=int(ctx["head_turns"]),
-        head_max_tokens=head_max_tokens,
-        cpt=cpt,
     )
-    tail_max_tokens = int(max_ctx * float(ctx["tail_max_ratio"]))
     tail_start = _compute_tail_start(
-        messages,
         spans,
         tail_turns=int(ctx["tail_turns"]),
-        tail_max_tokens=tail_max_tokens,
-        cpt=cpt,
     )
 
     if head_end >= tail_start:
@@ -600,8 +674,6 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
         return False
 
     middle_lo, middle_hi = head_end, tail_start
-    if middle_hi <= middle_lo:
-        return False
 
     prev_summary = history.compress_summary_state
     excerpt = _middle_segment_markdown(messages, middle_lo, middle_hi, **knobs)
@@ -611,17 +683,25 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
     )
     user_parts: list[str] = []
     if prev_summary:
-        user_parts.append("## 上轮压缩摘要（合并更新）\n\n" + prev_summary)
-    user_parts.append("## 本轮待压缩中间段\n\n" + excerpt)
+        user_parts.append(
+            "## 上轮压缩摘要（必须合并更新，不能丢失仍有效信息）\n\n"
+            + prev_summary
+        )
+    if task_state and task_state.strip():
+        user_parts.append("## 当前结构化任务状态（权威）\n\n" + task_state.strip())
+    user_parts.append("## 本轮待压缩中间段\n\n" + (excerpt or "unknown"))
     user_content = "\n\n".join(user_parts)
 
     summary_md = _call_compressor_llm(
         system_prompt=system_prompt, user_content=user_content
     )
+    summary_md = _lint_compression_summary(summary_md)
     new_body = _build_compress_user_body(summary_md)
 
     summary_msg = ModelRequest(parts=[UserPromptPart(content=new_body)])
     new_messages = messages[:head_end] + [summary_msg] + messages[tail_start:]
+    _validate_compression_message(summary_msg)
+    _validate_model_messages_round_trip(new_messages)
     _save_compress_debug_artifacts(
         role=role,
         system_prompt=system_prompt,
@@ -634,14 +714,6 @@ def compress_history(history: ChatHistory, *, role: str, force: bool) -> bool:
     )
     history.set_messages(new_messages)
     history.compress_summary_state = summary_md.strip()
-
-    used_after = estimate_history_tokens(new_messages, chars_per_token=cpt, role=role)
-    denom = max(used, 1)
-    saved_ratio = (used - used_after) / denom
-    if saved_ratio < float(knobs["min_saved_ratio"]):
-        history._compress_weak_streak += 1
-    else:
-        history._compress_weak_streak = 0
     return True
 
 
@@ -688,28 +760,32 @@ async def get_effective_max_context_async(
     return await asyncio.to_thread(lambda: get_effective_max_context(model_name, role=role))
 
 
-async def estimate_history_tokens_async(
-    messages: list,
-    *,
-    chars_per_token: float | None = None,
-    role: str,
-) -> int:
-    return await asyncio.to_thread(
-        estimate_history_tokens,
-        messages,
-        chars_per_token=chars_per_token,
-        role=role,
-    )
-
-
 async def compress_history_async(
     history: ChatHistory,
     *,
     role: str,
     force: bool,
+    task_state: str | None = None,
 ) -> bool:
-    return await asyncio.to_thread(compress_history, history, role=role, force=force)
+    return await asyncio.to_thread(
+        compress_history,
+        history,
+        role=role,
+        force=force,
+        task_state=task_state,
+    )
 
 
-async def maybe_auto_compress_async(history: ChatHistory, *, role: str) -> bool:
-    return await asyncio.to_thread(compress_history, history, role=role, force=False)
+async def maybe_auto_compress_async(
+    history: ChatHistory,
+    *,
+    role: str,
+    task_state: str | None = None,
+) -> bool:
+    return await asyncio.to_thread(
+        compress_history,
+        history,
+        role=role,
+        force=False,
+        task_state=task_state,
+    )

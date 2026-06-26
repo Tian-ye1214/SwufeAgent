@@ -2,7 +2,7 @@
 from tools.BasicTools import BasicToolkit
 from tools.ExtractFileContent import extract_text
 from tools.ManagementTools import Task, TaskManager, TaskStatus
-from tools.Memory import ChatHistory, UserMessage
+from tools.memory import ChatHistory
 from tools.WorkerOrchestrator import WorkerOrchestrator
 
 __all__ = [
@@ -16,7 +16,6 @@ __all__ = [
     "WorkerOrchestrator",
     # 对话与消息
     "ChatHistory",
-    "UserMessage",
     # 文档提取
     "extract_text",
 ]

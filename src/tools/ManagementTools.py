@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Dict
 from dataclasses import dataclass, field
 from enum import Enum
 import json_repair as json
-import logger
+from infra import logger
 
-from tools.Memory import ChatHistory
+from tools.memory import ChatHistory
 
 
 class TaskStatus(Enum):
@@ -14,6 +13,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    PENDING_CONFIRMATION = "pending_confirmation"
 
 
 @dataclass
@@ -25,17 +25,19 @@ class Task:
     result: str = ""
     retry_count: int = 0
     max_retries: int = 3
-    dependencies: List[str] = field(default_factory=list)
-    failure_history: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    failure_history: list[str] = field(default_factory=list)
     worker_chat_history: ChatHistory = field(default_factory=ChatHistory)
+    artifacts: list[str] = field(default_factory=list)
+    tool_summaries: list[str] = field(default_factory=list)
 
 
 class TaskManager:
     """Task Manager - Manages the Todo List"""
     
     def __init__(self):
-        self.tasks: Dict[str, Task] = {}
-        self.task_order: List[str] = []
+        self.tasks: dict[str, Task] = {}
+        self.task_order: list[str] = []
     
     def reset(self):
         """Reset task manager state, clear all tasks"""
@@ -47,23 +49,25 @@ class TaskManager:
         """
         Create a task list from JSON.
         Parameters:
-            tasks_json: JSON format task list, format:
-                [{"id": "1", "description": "Task description", "dependencies": ["dependent task id"]}]
+            tasks_json: JSON array of id/description/dependencies objects.
         """
         logger.debug("(create_todo_list)")
         try:
             tasks_data = json.loads(tasks_json)
             if not isinstance(tasks_data, list):
                 return f"Error: Expected a JSON array, got {type(tasks_data).__name__}"
+            validation_error = self._validate_tasks_data(tasks_data)
+            if validation_error:
+                return f"Error: {validation_error}"
             self.tasks.clear()
             self.task_order.clear()
             
             for task_data in tasks_data:
-                task_id = str(task_data.get("id", len(self.tasks) + 1))
+                task_id = str(task_data.get("id", len(self.tasks) + 1)).strip()
                 task = Task(
                     id=task_id,
                     description=task_data.get("description", ""),
-                    dependencies=task_data.get("dependencies", [])
+                    dependencies=[str(d).strip() for d in task_data.get("dependencies", [])]
                 )
                 self.tasks[task_id] = task
                 self.task_order.append(task_id)
@@ -71,6 +75,58 @@ class TaskManager:
             return self._format_todo_list()
         except Exception as e:
             return f"Error: Failed to create task list - {e}"
+
+    def _validate_tasks_data(self, tasks_data: list) -> str:
+        seen: set[str] = set()
+        deps_by_id: dict[str, list[str]] = {}
+        for i, task_data in enumerate(tasks_data):
+            if not isinstance(task_data, dict):
+                return f"task #{i + 1} must be an object"
+            task_id = str(task_data.get("id", i + 1)).strip()
+            if not task_id:
+                return f"task #{i + 1} id must not be empty"
+            if task_id in seen:
+                return f"duplicate task id: {task_id}"
+            seen.add(task_id)
+            desc = str(task_data.get("description", "")).strip()
+            if not desc:
+                return f"task {task_id} description must not be empty"
+            raw_deps = task_data.get("dependencies", [])
+            if not isinstance(raw_deps, list):
+                return f"task {task_id} dependencies must be an array"
+            deps = [str(d).strip() for d in raw_deps]
+            if any(not d for d in deps):
+                return f"task {task_id} dependencies must not contain empty ids"
+            deps_by_id[task_id] = deps
+
+        for task_id, deps in deps_by_id.items():
+            for dep_id in deps:
+                if dep_id not in seen:
+                    return f"task {task_id} has unknown dependency: {dep_id}"
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(task_id: str, path: list[str]) -> str | None:
+            if task_id in visited:
+                return None
+            if task_id in visiting:
+                cycle = " -> ".join(path + [task_id])
+                return f"dependency cycle detected: {cycle}"
+            visiting.add(task_id)
+            for dep_id in deps_by_id.get(task_id, []):
+                err = visit(dep_id, path + [task_id])
+                if err:
+                    return err
+            visiting.remove(task_id)
+            visited.add(task_id)
+            return None
+
+        for task_id in deps_by_id:
+            err = visit(task_id, [])
+            if err:
+                return err
+        return ""
     
     def _format_todo_list(self) -> str:
         """Format and output the Todo List"""
@@ -84,8 +140,9 @@ class TaskManager:
                 TaskStatus.PENDING: "⬜",
                 TaskStatus.IN_PROGRESS: "🔄",
                 TaskStatus.COMPLETED: "✅",
-                TaskStatus.FAILED: "❌"
-            }.get(task.status, "⬜")
+                TaskStatus.FAILED: "❌",
+                TaskStatus.PENDING_CONFIRMATION: "⏸"
+            }[task.status]
             
             line = f"{status_icon} [{task.id}] {task.description}"
             if task.dependencies:
@@ -97,42 +154,29 @@ class TaskManager:
         completed = sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
         total = len(self.tasks)
         lines.append("=" * 40)
-        lines.append(f"Progress: {completed}/{total} ({completed/total*100:.1f}%)" if total > 0 else "Progress: 0/0")
+        lines.append(f"Progress: {completed}/{total} ({completed/total*100:.1f}%)")
         todo_list = "\n".join(lines)
         
         return todo_list
     
-    def get_all_ready_tasks(self) -> List[Task]:
+    def get_all_ready_tasks(self) -> list[Task]:
         """获取所有可以并行执行的任务（依赖已满足且状态为PENDING）"""
-        ready = []
-        for task_id in self.task_order:
-            task = self.tasks[task_id]
-            if task.status != TaskStatus.PENDING:
-                continue
-            deps_satisfied = True
-            for dep_id in task.dependencies:
-                if dep_id not in self.tasks:
-                    continue
-                if self.tasks[dep_id].status != TaskStatus.COMPLETED:
-                    deps_satisfied = False
-                    break
-            if deps_satisfied:
-                ready.append(task)
-        return ready
-    
-    def mark_task_in_progress(self, task_id: str) -> str:
-        """Mark a task as in progress"""
-        if task_id not in self.tasks:
-            return f"Error: Task {task_id} does not exist"
-        self.tasks[task_id].status = TaskStatus.IN_PROGRESS
-        return f"Task {task_id} has started execution"
+        return [
+            self.tasks[task_id]
+            for task_id in self.task_order
+            if self.tasks[task_id].status == TaskStatus.PENDING
+            and all(
+                self.tasks[dep_id].status == TaskStatus.COMPLETED
+                for dep_id in self.tasks[task_id].dependencies
+            )
+        ]
     
     def mark_task_complete(self, task_id: str, result: str = "") -> str:
         """
         Mark a task as completed.
         Parameters:
             task_id: Task ID
-            result: Task execution result
+            result: Task result
         """
         logger.debug(f"(mark_task_complete {task_id})")
         if task_id not in self.tasks:
@@ -146,7 +190,7 @@ class TaskManager:
     
     def mark_task_failed(self, task_id: str, reason: str) -> str:
         """
-        Record task failure and increment retry count.
+        Record a task failure and schedule retry while attempts remain.
         Parameters:
             task_id: Task ID
             reason: Failure reason
@@ -173,24 +217,48 @@ class TaskManager:
         """Get current Todo List status. """
         logger.debug("(get_todo_list)")
         return self._format_todo_list()
-    
-    def is_all_completed(self) -> bool:
-        """Check if all tasks are completed"""
-        return all(
-            task.status == TaskStatus.COMPLETED 
-            for task in self.tasks.values()
-        )
-    
-    def has_failed_tasks(self) -> bool:
-        """Check if there are any failed tasks"""
-        return any(
-            task.status == TaskStatus.FAILED 
-            for task in self.tasks.values()
-        )
+
+    def structured_status(self) -> str:
+        if not self.tasks:
+            return "Task Status\n(no tasks)"
+        lines = ["Task Status"]
+        for task_id in self.task_order:
+            task = self.tasks[task_id]
+            blocked = self._blocked_reason(task)
+            lines.append(
+                f"[{task.status.value}] {task.id}: {task.description}"
+                f" deps={task.dependencies or []} retries={task.retry_count}/{task.max_retries}"
+            )
+            if blocked:
+                lines.append(f"  blocked_reason: {blocked}")
+            if task.failure_history:
+                lines.append(f"  last_failure: {task.failure_history[-1]}")
+            if task.artifacts:
+                lines.append(f"  artifacts: {', '.join(task.artifacts)}")
+            if task.tool_summaries:
+                lines.append(f"  tools: {'; '.join(task.tool_summaries[-3:])}")
+        return "\n".join(lines)
+
+    def _blocked_reason(self, task: Task) -> str:
+        if task.status != TaskStatus.PENDING:
+            return ""
+        missing = [d for d in task.dependencies if d not in self.tasks]
+        if missing:
+            return f"unknown dependencies: {', '.join(missing)}"
+        incomplete = [
+            d
+            for d in task.dependencies
+            if self.tasks[d].status != TaskStatus.COMPLETED
+        ]
+        if incomplete:
+            return f"waiting for dependencies: {', '.join(incomplete)}"
+        return ""
     
     def get_final_summary(self) -> str:
         """Generate the final task execution summary report."""
         logger.debug("(get_final_summary)")
+        if not self.tasks:
+            return "Manager did not create executable tasks."
         lines = [
             "=" * 50,
             "📊 Task Execution Summary Report",
@@ -198,15 +266,9 @@ class TaskManager:
             ""
         ]
         
-        completed_tasks = []
-        failed_tasks = []
-        
-        for task_id in self.task_order:
-            task = self.tasks[task_id]
-            if task.status == TaskStatus.COMPLETED:
-                completed_tasks.append(task)
-            elif task.status == TaskStatus.FAILED:
-                failed_tasks.append(task)
+        ordered_tasks = [self.tasks[task_id] for task_id in self.task_order]
+        completed_tasks = [t for t in ordered_tasks if t.status == TaskStatus.COMPLETED]
+        failed_tasks = [t for t in ordered_tasks if t.status == TaskStatus.FAILED]
 
         lines.append(f"✅ Completed Tasks: {len(completed_tasks)}/{len(self.tasks)}")
         lines.append("-" * 40)
@@ -229,9 +291,9 @@ class TaskManager:
         lines.append("")
         lines.append("=" * 50)
 
-        if self.is_all_completed():
+        if len(completed_tasks) == len(self.tasks):
             lines.append("All tasks completed successfully!")
-        elif self.has_failed_tasks():
+        elif failed_tasks:
             lines.append("⚠️ Some tasks failed. Please review the failure reasons.")
         else:
             lines.append("Tasks in progress...")

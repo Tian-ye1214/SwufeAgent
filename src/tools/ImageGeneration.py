@@ -1,11 +1,12 @@
-import logger
+from infra import logger
+import asyncio
 import requests
 import time
 
-from app_config import get_env
+from config.app_config import get_env
 
 
-def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> str:
+async def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300):
     """
     Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
 
@@ -21,8 +22,8 @@ def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024,
         max_wait_time: Maximum wait time in seconds. Default: 300 (5 minutes).
 
     Returns:
-        Success: Returns the image URL and generation details.
-        Failure: Returns an error message.
+        Success: Returns a tuple (image_bytes, mime_type, info_text).
+        Failure: Returns an error message string.
     """
     bfl_base_url = get_env("BFL_BASE_URL", warn=False)
     bfl_api_key = get_env("BFL_API_KEY", warn=False)
@@ -31,7 +32,8 @@ def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024,
 
     try:
         logger.info(f"正在提交图像生成请求: {prompt[:50]}...")
-        response = requests.post(
+        response = await asyncio.to_thread(
+            requests.post,
             bfl_base_url,
             headers={
                 "accept": "application/json",
@@ -69,7 +71,8 @@ def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024,
             if poll_count % 10 == 0:
                 logger.info(f"仍在等待中... (已等待 {elapsed_time:.1f} 秒)")
 
-            result_response = requests.get(
+            result_response = await asyncio.to_thread(
+                requests.get,
                 polling_url,
                 headers={
                     "accept": "application/json",
@@ -87,7 +90,12 @@ def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024,
                 if image_url:
                     logger.info("图像生成成功！")
                     logger.info(f"图像URL: {image_url}")
-                    return f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}\nDimensions: {width}x{height}"
+                    img_response = await asyncio.to_thread(requests.get, image_url, timeout=30)
+                    img_response.raise_for_status()
+                    image_bytes = img_response.content
+                    mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+                    info_text = f"Image generated successfully!\nImage URL: {image_url}\nPrompt: {prompt}\nDimensions: {width}x{height}"
+                    return image_bytes, mime_type, info_text
                 else:
                     return f"Error: Image generation completed but no image URL found in response. Response: {result}"
 
@@ -96,7 +104,7 @@ def generate_image_from_flux(prompt: str, width: int = 1024, height: int = 1024,
                 logger.error(f"图像生成失败: {error_msg}")
                 return f"Error: Image generation failed - {error_msg}"
 
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API请求错误: {e}")

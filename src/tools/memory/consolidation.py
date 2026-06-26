@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
-from app_config import settings
+from config.app_config import settings
 
 
 def long_term_memory_consolidation_params(**kwargs: Any) -> dict[str, int | float]:
@@ -16,6 +16,16 @@ def long_term_memory_consolidation_params(**kwargs: Any) -> dict[str, int | floa
         "merge_max_len_ratio": float(cfg["merge_max_len_ratio"]),
         "merge_min_len_ratio": float(cfg["merge_min_len_ratio"]),
         "merge_len_check_min_old_chars": int(cfg["merge_len_check_min_old_chars"]),
+    }
+    out.update(kwargs)
+    return out
+
+
+def long_term_memory_debounce_params(**kwargs: Any) -> dict[str, float]:
+    cfg = settings()["long_term_memory"]["consolidation"].get("debounce", {})
+    out = {
+        "min_new_turns": int(cfg.get("min_new_turns", 3)),
+        "min_interval_sec": float(cfg.get("min_interval_sec", 120)),
     }
     out.update(kwargs)
     return out

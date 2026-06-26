@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
-import logger
+from infra import logger
+from infra.paths import skills_dir as default_skills_dir
 
 
 @dataclass
@@ -24,10 +25,6 @@ class Skill:
     metadata: SkillMetadata
     instructions: str = ""
     resources: Dict[str, str] = field(default_factory=dict)
-
-    @property
-    def name(self) -> str:
-        return self.metadata.name
 
     @property
     def description(self) -> str:
@@ -48,10 +45,11 @@ class SkillsManager:
         re.DOTALL,
     )
     SKILL_FILENAME = "SKILL.md"
+    IGNORED_RESOURCE_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
 
     def __init__(self, skills_dir: str | Path | None = None):
         if skills_dir is None:
-            skills_dir = Path(__file__).resolve().parent.parent / "skills"
+            skills_dir = default_skills_dir()
         self.skills_dir = Path(skills_dir)
         self.skills: Dict[str, Skill] = {}
 
@@ -116,6 +114,16 @@ class SkillsManager:
             result = self._parse_skill_file(skill_file)
             if result:
                 metadata, instructions = result
+                if not metadata.name:
+                    logger.warning(
+                        f"Skill {skill_file} 缺少 name，回退使用文件夹名 '{item.name}'"
+                    )
+                    metadata.name = item.name
+                if metadata.name in target:
+                    logger.warning(
+                        f"Skill 名称冲突: '{metadata.name}' 已存在，"
+                        f"目录 '{item.name}' 将覆盖之前的同名技能"
+                    )
                 target[metadata.name] = Skill(
                     metadata=metadata,
                     instructions=instructions,
@@ -153,9 +161,9 @@ class SkillsManager:
         if resource_name in skill.resources:
             return skill.resources[resource_name]
 
-        resource_path = skill.path / resource_name
-        if not resource_path.exists():
-            logger.warning(f"Skill {skill_name} 的资源 {resource_name} 不存在")
+        resource_path = self._resolve_within(skill.path, resource_name)
+        if resource_path is None or not resource_path.exists():
+            logger.warning(f"Skill {skill_name} 的资源 {resource_name} 不存在或越界")
             return None
 
         try:
@@ -175,25 +183,45 @@ class SkillsManager:
         resources = []
         skill_dir = skill.path
         for item in skill_dir.rglob("*"):
-            if item.is_file() and item.name != self.SKILL_FILENAME:
-                rel_path = item.relative_to(skill_dir)
-                resources.append(str(rel_path))
+            if not item.is_file() or item.name == self.SKILL_FILENAME:
+                continue
+            rel_path = item.relative_to(skill_dir)
+            if any(part in self.IGNORED_RESOURCE_DIRS for part in rel_path.parts):
+                continue
+            resources.append(str(rel_path))
         return resources
 
-    def execute_skill_script(self, skill_name: str, script_name: str, args: str = "") -> str:
+    @staticmethod
+    def _resolve_within(skill_dir: Path, relative: str) -> Optional[Path]:
+        """把 relative 解析到 skill_dir 内；绝对路径或 .. 逃逸出目录则返回 None。"""
+        base = skill_dir.resolve()
+        try:
+            target = (base / relative).resolve()
+        except Exception:
+            return None
+        return target if target.is_relative_to(base) else None
+
+    async def execute_skill_script(
+        self, skill_name: str, script_name: str, args: str = "", timeout: float = 300
+    ) -> str:
+        import sys
         import subprocess
+        from infra.subprocess_runner import run_subprocess
 
         skill = self.skills.get(skill_name)
         if not skill:
             return f"错误: Skill '{skill_name}' 不存在"
 
-        script_path = skill.path / script_name
+        script_path = self._resolve_within(skill.path, script_name)
+        if script_path is None:
+            return f"错误: 脚本路径越界: '{script_name}'"
         if not script_path.exists():
             return f"错误: 脚本 '{script_name}' 不存在"
 
         ext = script_path.suffix.lower()
+        py_exec = "python" if getattr(sys, "frozen", False) else sys.executable
         executors = {
-            ".py": ["python"],
+            ".py": [py_exec],
             ".sh": ["bash"],
             ".bat": ["cmd", "/c"],
             ".ps1": ["powershell", "-File"],
@@ -207,37 +235,16 @@ class SkillsManager:
             cmd.extend(args.split())
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                cwd=str(skill.path),
+            stdout, stderr, return_code = await run_subprocess(
+                cmd, shell=False, cwd=str(skill.path), timeout=timeout
             )
-            output = result.stdout + result.stderr
+            output = stdout + stderr
             return (
-                f"返回码: {result.returncode}\n输出:\n{output}"
+                f"返回码: {return_code}\n输出:\n{output}"
                 if output
-                else f"执行完成，返回码: {result.returncode}"
+                else f"执行完成，返回码: {return_code}"
             )
         except subprocess.TimeoutExpired:
-            return "错误: 脚本执行超时 (60秒)"
+            return f"错误: 脚本执行超时 ({timeout}秒)"
         except Exception as e:
             return f"执行错误: {e}"
-
-    def match_skill(self, query: str) -> Optional[Skill]:
-        query_lower = query.lower()
-
-        for skill in self.skills.values():
-            if skill.name in query_lower:
-                return skill
-
-            desc_words = skill.description.lower().split()
-            query_words = query_lower.split()
-            matches = sum(1 for w in query_words if any(w in dw for dw in desc_words))
-            if matches >= 2:
-                return skill
-
-        return None

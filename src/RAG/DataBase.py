@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import lancedb
-import logger
+from infra import logger
 from lancedb.pydantic import LanceModel, Vector
 from RAG.storage_path import resolve_lancedb_dir
 
@@ -63,13 +63,20 @@ class EmbedDataBase:
     def _table_lance_dir(self) -> Path:
         return Path(self.db_path) / f"{self.table_name}.lance"
 
+    def _table_names_sync(self, db) -> list[str]:
+        if hasattr(db, "list_tables"):
+            raw = db.list_tables()
+            tables = getattr(raw, "tables", raw)
+            return [str(name) for name in tables]
+        return list(db.table_names())
+
     def _remove_orphan_table_dir_sync(self) -> None:
         d = self._table_lance_dir()
         if d.is_dir():
             shutil.rmtree(d)
 
     def _open_table_sync(self, db) -> Any | None:
-        names = db.table_names()
+        names = self._table_names_sync(db)
         if self.table_name not in names:
             if self._table_lance_dir().is_dir():
                 self._remove_orphan_table_dir_sync()
@@ -107,6 +114,12 @@ class EmbedDataBase:
             raise RuntimeError("数据库未连接，请先调用 await connect()")
         return self._db
 
+    def _ensure_table_sync(self, db) -> Any | None:
+        if self._table is not None:
+            return self._table
+        self._table = self._open_table_sync(db)
+        return self._table
+
     def _row_to_pydantic(self, r: dict[str, Any]):
         if self._extended_schema:
             return self._schema(
@@ -134,9 +147,8 @@ class EmbedDataBase:
             db = self._require_db()
             pydantic_rows = [self._row_to_pydantic(r) for r in rows]
             if self._table is None:
-                opened = self._open_table_sync(db)
+                opened = self._ensure_table_sync(db)
                 if opened is not None:
-                    self._table = opened
                     self._table.add(pydantic_rows)
                 else:
                     if self._table_lance_dir().is_dir():
@@ -159,14 +171,41 @@ class EmbedDataBase:
         await self.ensure_connected()
 
         def _count() -> int:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-                if self._table is None:
-                    return 0
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return 0
             return int(self._table.count_rows())
 
         return await asyncio.to_thread(_count)
+
+    async def drop_table(self) -> None:
+        """Drop the configured table and clear any orphaned Lance directory."""
+        await self.ensure_connected()
+
+        def _drop() -> None:
+            db = self._require_db()
+            try:
+                if self.table_name in self._table_names_sync(db):
+                    db.drop_table(self.table_name)
+            finally:
+                self._table = None
+                self._rows_since_index = 0
+                self._remove_orphan_table_dir_sync()
+
+        await asyncio.to_thread(_drop)
+
+    async def delete_where(self, where: str) -> None:
+        """按 SQL 谓词删除行（如 source LIKE 'x%' ESCAPE '\\'）。表不存在则 no-op。"""
+        await self.ensure_connected()
+
+        def _del() -> None:
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return
+            self._table.delete(where)
+
+        await asyncio.to_thread(_del)
+        logger.debug("RAG DB: delete_where table=%s where=%s", self.table_name, where)
 
     async def ensure_vector_index(self) -> bool:
         """达阈值后创建 IVF_PQ 索引；返回是否触发了建索引。"""
@@ -187,11 +226,9 @@ class EmbedDataBase:
         num_sub_vectors = max(1, self.vector_dim // 8)
 
         def _build() -> None:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-                if self._table is None:
-                    return
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return
             self._table.create_index(
                 metric=metric,
                 vector_column_name="vector",
@@ -213,11 +250,9 @@ class EmbedDataBase:
         return True
 
     def _has_vector_index_sync(self) -> bool:
-        if self._table is None:
-            db = self._require_db()
-            self._table = self._open_table_sync(db)
-            if self._table is None:
-                return False
+        db = self._require_db()
+        if self._ensure_table_sync(db) is None:
+            return False
         try:
             indices = self._table.list_indices()
             return len(indices) > 0
@@ -231,14 +266,13 @@ class EmbedDataBase:
 
         await self.ensure_connected()
         await self.ensure_vector_index()
+        metric = str((self._index_config or {}).get("metric") or "cosine")
 
         def _search() -> list[dict[str, Any]]:
-            if self._table is None:
-                db = self._require_db()
-                self._table = self._open_table_sync(db)
-            if self._table is None:
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
                 return []
-            df = self._table.search(query_embedding).limit(top_k).to_pandas()
+            df = self._table.search(query_embedding).metric(metric).limit(top_k).to_pandas()
             out: list[dict[str, Any]] = []
             for _, row in df.iterrows():
                 dist = row.get("_distance")
@@ -246,6 +280,7 @@ class EmbedDataBase:
                     {
                         "text": row.get("text", ""),
                         "source": row.get("source", "") or "",
+                        "created_at": row.get("created_at", "") or "",
                         "_distance": float(dist) if dist is not None and dist == dist else None,
                     }
                 )
@@ -254,17 +289,6 @@ class EmbedDataBase:
         out = await asyncio.to_thread(_search)
         logger.debug("RAG DB: vector_search top_k=%s, results=%d", top_k, len(out))
         return out
-
-    async def drop_table(self) -> None:
-        await self.ensure_connected()
-
-        def _drop() -> None:
-            db = self._require_db()
-            if self.table_name in db.table_names():
-                db.drop_table(self.table_name)
-            self._table = None
-
-        await asyncio.to_thread(_drop)
 
     async def close(self) -> None:
         def _close() -> None:

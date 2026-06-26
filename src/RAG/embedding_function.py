@@ -1,22 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any
 
 import httpx
-import logger
+from infra import logger
+from config.app_config import get_env, settings
+from infra.shared_http import get_client
 
-try:
-    from app_config import get_env, settings
-except ModuleNotFoundError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from app_config import get_env, settings
-
-_http_state: tuple[httpx.AsyncClient, str] | None = None
-_HTTP_LOCK = asyncio.Lock()
-
+_HTTP_KEY = "rag"
 
 def _require_rag_model(role: str) -> str:
     m = settings().get("RAG_models")
@@ -28,49 +20,24 @@ def _require_rag_model(role: str) -> str:
     return name
 
 
-async def _get_http_client() -> httpx.AsyncClient:
-    global _http_state
+def _client_kwargs(timeout: float) -> dict[str, Any]:
     base = get_env("SILICONFLOW_BASE", warn=False).strip().rstrip("/")
-    if _http_state is not None and _http_state[1] == base:
-        return _http_state[0]
-    async with _HTTP_LOCK:
-        if _http_state is not None and _http_state[1] == base:
-            return _http_state[0]
-        if _http_state is not None:
-            await _http_state[0].aclose()
-        client = httpx.AsyncClient(
-            base_url=base,
-            http2=True,
-            timeout=httpx.Timeout(60.0),
-        )
-        _http_state = (client, base)
-    return _http_state[0]
+    return {
+        "base_url": base,
+        "http2": True,
+        "timeout": httpx.Timeout(timeout),
+    }
 
 
-async def close_http_client() -> None:
-    """进程退出时关闭全局 embedding/rerank HTTP 客户端。"""
-    global _http_state
-    async with _HTTP_LOCK:
-        if _http_state is None:
-            return
-        await _http_state[0].aclose()
-        _http_state = None
+def _get_shared_client() -> httpx.AsyncClient:
+    """进程级共享 embedding/rerank 客户端：复用连接池，免去每次请求的 TLS/HTTP2 握手。"""
+    return get_client(_HTTP_KEY, lambda: httpx.AsyncClient(**_client_kwargs(60.0)))
 
 
-async def embed_texts(
-    texts: str | list[str],
-    *,
-    timeout: float = 60.0,
-) -> list[list[float]]:
-    """异步获取文本向量；支持单条字符串或多条批量。"""
-    if isinstance(texts, str):
-       texts = [texts]
-    logger.debug("RAG embed: batch_size=%d", len(texts))
-    model = _require_rag_model("embedding")
-    body = {"model": model, "input": texts}
-    client = await _get_http_client()
-    response = await client.post(
-        "/embeddings",
+async def _rag_api_post(endpoint: str, body: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    """RAG 接口统一 POST：构造鉴权头、校验状态、解析 JSON。"""
+    response = await _get_shared_client().post(
+        endpoint,
         headers={
             "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
             "Content-Type": "application/json",
@@ -79,13 +46,32 @@ async def embed_texts(
         timeout=timeout,
     )
     response.raise_for_status()
-    data = response.json()
+    return response.json()
 
-    items = data.get("data") or []
-    n = len(items)
-    if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
-        items = sorted(items, key=lambda x: x.get("index", 0))
-    return [row["embedding"] for row in items]
+
+_EMBED_MAX_BATCH = 32
+
+
+async def embed_texts(
+    texts: str | list[str],
+    *,
+    timeout: float = 60.0,
+) -> list[list[float]]:
+    """异步获取文本向量；支持单条字符串或多条批量，超过上限自动分批请求。"""
+    if isinstance(texts, str):
+        texts = [texts]
+    logger.debug("RAG embed: batch_size=%d", len(texts))
+    model = _require_rag_model("embedding")
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_MAX_BATCH):
+        body = {"model": model, "input": texts[start:start + _EMBED_MAX_BATCH]}
+        data = await _rag_api_post("/embeddings", body, timeout=timeout)
+        items = data.get("data") or []
+        n = len(items)
+        if n > 1 and [x.get("index", 0) for x in items] != list(range(n)):
+            items = sorted(items, key=lambda x: x.get("index", 0))
+        vectors.extend(row["embedding"] for row in items)
+    return vectors
 
 
 async def rerank_documents(
@@ -109,18 +95,7 @@ async def rerank_documents(
     if top_n is not None:
         body["top_n"] = top_n
 
-    client = await _get_http_client()
-    response = await client.post(
-        "/rerank",
-        headers={
-            "Authorization": f"Bearer {get_env('SILICONFLOW_KEY', warn=False).strip()}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    data = response.json()
+    data = await _rag_api_post("/rerank", body, timeout=timeout)
 
     out: list[dict[str, Any]] = []
     for row in data.get("results", []):
@@ -139,16 +114,3 @@ async def rerank_documents(
             }
         )
     return out
-
-if __name__ == "__main__":
-    async def _demo() -> None:
-        text = "Silicon flow embedding online: fast, affordable, and high-quality embedding services. come try it out!"
-        embedding = await embed_texts(text)
-        print(embedding)
-
-        query = "Apple"
-        documents = ["apple", "banana", "fruit", "vegetable"]
-        result = await rerank_documents(query, documents)
-        print(result)
-
-    asyncio.run(_demo())

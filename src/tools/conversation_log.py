@@ -3,24 +3,32 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-from app_config import settings
-from persist_utils import atomic_write_json
-import logger
+from config.app_config import settings
+from infra.persist_utils import atomic_write_json, iso_utc_now, safe_name
+from infra import logger
+from workspace.workspace import (
+    MODEL_MESSAGES_SUFFIX,
+    conversations_root,
+    snapshot_base_from_loadable,
+    snapshot_basename,
+)
+
+_PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _safe_segment(s: str, max_len: int = 80) -> str:
     s = (s or "").strip().replace("\n", " ")
-    return ("".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in s)[:max_len]) or "default"
+    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:
-    """从 `*.model_messages.json` 读取 `model_messages`，校验并还原为 pydantic-ai 消息对象。"""
+    """从 `*_ModelMessages.json` 读取 `model_messages`，校验并还原为 pydantic-ai 消息对象。"""
     path = Path(path)
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
@@ -33,38 +41,83 @@ def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any
     return messages, meta
 
 
-class ConversationLog:
-    """对话落盘。save() 写入两份文件：人类可读的 .json 与可加载历史的 .model_messages.json。"""
+def dump_validated_model_messages(model_messages: list[Any]) -> list[dict[str, Any]]:
+    raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
+    ModelMessagesTypeAdapter.validate_python(raw)
+    return raw
 
-    def __init__(self, name: str, date: str, topic: str, *, sub_id: str | None = None, existing_run_base: Path | None = None) -> None:
+
+async def drain_pending_saves(timeout: float = 10.0) -> bool:
+    tasks = [t for t in list(_PENDING_SAVE_TASKS) if not t.done()]
+    if not tasks:
+        return True
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("conversation_log drain timed out after %.1fs", timeout)
+        return False
+
+
+class ConversationLog:
+    """对话落盘。save() 写入工作区 .redlotus 下两份文件：可读 .json 与 *_ModelMessages.json。"""
+
+    def __init__(
+        self,
+        name: str,
+        date: str | None,
+        topic: str | None,
+        *,
+        sub_id: str | None = None,
+        existing_run_base: Path | None = None,
+    ) -> None:
         self._name = _safe_segment(name, 40)
-        self._date = _safe_segment(date, 16)
-        self._topic = _safe_segment(topic, 80)
-        path = logger.LOG_DIR / "conversations" / self._name / self._date / self._topic
-        if sub_id:
-            path = path / _safe_segment(sub_id, 60)
-        self._dir = path
+        self._date = _safe_segment(date or "", 16)
+        self._topic = _safe_segment(topic or "", 80)
+        self._sub_id = _safe_segment(sub_id, 60) if sub_id else None
+        self._root = conversations_root()
         self._run_base: Path | None = existing_run_base
         self._init_lock = threading.Lock()
         self._write_lock: asyncio.Lock | None = None
 
     def _write_lock_for_loop(self) -> asyncio.Lock:
         if self._write_lock is None:
-            self._write_lock = asyncio.Lock()
+            with self._init_lock:
+                if self._write_lock is None:
+                    self._write_lock = asyncio.Lock()
         return self._write_lock
+
+    def _snapshot_paths(self, base: Path) -> tuple[Path, Path]:
+        return (
+            base.parent / f"{base.name}.json",
+            base.parent / f"{base.name}{MODEL_MESSAGES_SUFFIX}",
+        )
 
     def model_messages_path(self) -> Path | None:
         if self._run_base is None:
             return None
-        return self._run_base.with_suffix(".model_messages.json")
+        return self._snapshot_paths(self._run_base)[1]
 
     def save(self, model_messages: list[Any], *, extra: dict[str, Any] | None = None) -> None:
         """模型返回后调用；异步落盘，不阻塞事件循环。同一会话多次调用覆盖同一对文件。"""
         with self._init_lock:
             if self._run_base is None:
-                self._dir.mkdir(parents=True, exist_ok=True)
-                self._run_base = self._dir / f"messages_{datetime.now().strftime('%H%M%S')}"
+                if not self._date or not self._topic:
+                    return
+                self._root.mkdir(parents=True, exist_ok=True)
+                stem = snapshot_basename(
+                    self._name,
+                    self._date,
+                    self._topic,
+                    sub_id=self._sub_id,
+                )
+                self._run_base = self._root / stem
         base = self._run_base
+        if base is None:
+            return
         snap = list(model_messages)
 
         async def _job() -> None:
@@ -75,18 +128,25 @@ class ConversationLog:
                 logger.error("conversation_log 写入失败: %s", e)
 
         try:
-            asyncio.get_running_loop().create_task(_job())
+            task = asyncio.get_running_loop().create_task(_job())
+            _PENDING_SAVE_TASKS.add(task)
+            task.add_done_callback(_PENDING_SAVE_TASKS.discard)
         except RuntimeError:
             pass
 
     def _write(self, base: Path, model_messages: list[Any], extra: dict[str, Any] | None) -> None:
-        raw = ModelMessagesTypeAdapter.dump_python(model_messages, mode="json")
-        saved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        raw = dump_validated_model_messages(model_messages)
+        saved_at = iso_utc_now()
         meta: dict[str, Any] = {"agent": self._name, "date": self._date, "topic": self._topic}
+        if self._sub_id:
+            if self._name == "worker":
+                meta["sub_id"] = self._sub_id
+            else:
+                meta["session_id"] = self._sub_id
         if extra:
             meta.update(extra)
-        readable_path = base.with_suffix(".json")
-        model_path = base.with_suffix(".model_messages.json")
+        readable_path, model_path = self._snapshot_paths(base)
+        readable_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(
             readable_path,
             {"saved_at": saved_at, "meta": meta, "messages": self._to_readable(raw)},
@@ -166,7 +226,7 @@ class SessionConversationLogs:
     on_reset()               -- reset() 时调用
     """
 
-    __slots__ = ("_date", "_topic", "_logs", "_on_activate", "_on_reset")
+    __slots__ = ("_date", "_topic", "_session_id", "_logs", "_on_activate", "_on_reset")
 
     def __init__(
         self,
@@ -175,6 +235,7 @@ class SessionConversationLogs:
     ) -> None:
         self._date: str | None = None
         self._topic: str | None = None
+        self._session_id: str | None = None
         self._logs: dict[str, ConversationLog] = {}
         self._on_activate = on_activate
         self._on_reset = on_reset
@@ -185,12 +246,14 @@ class SessionConversationLogs:
             return
         self._date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
         self._topic = _safe_segment((topic_hint.strip() or "default")[:200], 80)
+        self._session_id = _safe_segment(datetime.now().strftime("%H%M%S%f"), 16)
         if self._on_activate:
             self._on_activate(self._date, self._topic)
 
     def reset(self) -> None:
         self._date = None
         self._topic = None
+        self._session_id = None
         self._logs.clear()
         if self._on_reset:
             self._on_reset()
@@ -198,21 +261,25 @@ class SessionConversationLogs:
     def bind_loaded_snapshot(self, agent_name: str, load_path: Path, meta: dict[str, Any]) -> None:
         """将会话日志绑定到 /load 的原始快照文件，后续保存继续覆盖该文件。"""
         p = Path(load_path)
-        base = p.with_suffix("")
+        base = snapshot_base_from_loadable(p)
         date = _safe_segment(str(meta.get("date") or ""), 16)
         topic = _safe_segment(str(meta.get("topic") or ""), 80)
         if not date:
             date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
         if not topic:
-            topic = _safe_segment(p.stem.replace(".model_messages", ""), 80)
+            topic = _safe_segment(base.name, 80)
         self._date = date
         self._topic = topic
         self._logs.clear()
         key = _safe_segment(agent_name, 40)
+        instance_raw = meta.get("session_id") or meta.get("sub_id")
+        instance_id = _safe_segment(str(instance_raw), 60) if instance_raw else None
+        self._session_id = instance_id
         self._logs[key] = ConversationLog(
             key,
             self._date,
             self._topic,
+            sub_id=instance_id,
             existing_run_base=base,
         )
         if self._on_activate:
@@ -226,5 +293,10 @@ class SessionConversationLogs:
     def for_agent(self, name: str) -> ConversationLog:
         key = _safe_segment(name, 40)
         if key not in self._logs:
-            self._logs[key] = ConversationLog(key, self._date, self._topic)
+            self._logs[key] = ConversationLog(
+                key,
+                self._date,
+                self._topic,
+                sub_id=self._session_id,
+            )
         return self._logs[key]

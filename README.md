@@ -3,7 +3,7 @@
 > 一个好的 Agent 项目，从来不需要过度设计。  
 > 但它需要记得你说过的话、会叫帮手、还能在 QQ 里回你。
 
-**红莲**是一朵会自己长技能的 AI：终端里和你对话，复杂事丢给 Worker，乱局交给 Coordinator 收拾；聊过的写进短时记忆，重要的烙进长期记忆；量化、回测、爬网页、读 PDF……靠 `skills/` 里挂载的能力现学现用，而不是堆一层又一层的框架。
+**红莲**是一朵会自己长技能的 AI：终端里和你对话，复杂事丢给 Worker，乱局交给 Coordinator 收拾；聊过的写进短时记忆，重要的烙进长期记忆；内置文件提取能读 PDF 的文本、表格、图片和页面结构，量化、回测、爬网页等领域能力则靠 `skills/` 现学现用，而不是堆一层又一层的框架。
 
 ---
 
@@ -47,6 +47,8 @@ python main.py                  # 终端见真章
 cd src && python -m API.QQ      # 需配置 QQBOT 等环境变量
 cd src && python -m API.WeChat   # 扫码登录
 ```
+
+QQ 机器人前置：先装好并运行 [NapCat](https://github.com/NapNeko/NapCatQQ)（提供 OneBot WebSocket 接口）。配置文件 `config.yaml` 须放在 `src/API/` 下（已随仓库附带模板），其中填好 `bt_uin`（机器人 QQ 号，也可用环境变量 `QQBOT_ID` 覆盖）与 `napcat.webui_token`（需为强密码：至少 12 位且含数字、大小写字母与特殊符号）。配置缺失或无效时启动会直接报错退出，不会静默卡住。
 
 ---
 

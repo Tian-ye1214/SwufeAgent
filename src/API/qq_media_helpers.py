@@ -4,14 +4,16 @@ import os
 import re
 import html
 import base64
+import ipaddress
 import mimetypes
+import socket
 from typing import Any
 
 import httpx
 from ncatbot.core import BaseMessageEvent, GroupMessageEvent
 from pydantic_ai import BinaryContent
 
-import logger
+from infra import logger
 
 
 def norm_url(url: str) -> str:
@@ -55,16 +57,62 @@ def pick_ct(url: str, header_ct: str, raw: bytes, filename: str = "") -> str:
     return mm if mm else "application/octet-stream"
 
 
+_MAX_REDIRECTS = 5
+
+
+def _resolve_public_addr(host: str) -> str | None:
+    """解析主机名并校验：仅当所有解析结果都是公网地址时，返回首个已校验 IP（否则 None）。
+
+    返回已校验的 IP 供调用方直接拨号，使「校验」与「连接」共用同一次解析结果，
+    杜绝 DNS rebinding（校验时返回公网 IP、连接时改返内网 IP）的 TOCTOU 绕过。
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None
+    chosen: str | None = None
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return None
+        if (not ip.is_global or ip.is_private or ip.is_loopback
+                or ip.is_link_local or ip.is_reserved or ip.is_multicast):
+            return None
+        if chosen is None:
+            chosen = addr
+    return chosen
+
+
 def download_to_binary(url: str, filename: str = "") -> BinaryContent | None:
     url = norm_url(url)
-    if not url.startswith("http"):
-        return None
     try:
-        resp = httpx.get(url, timeout=30, follow_redirects=True)
-        resp.raise_for_status()
-        hc = resp.headers.get("content-type", "").split(";")[0].strip()
-        raw = resp.content
-        return BinaryContent(data=raw, media_type=pick_ct(url, hc, raw, filename=filename))
+        with httpx.Client(timeout=30, follow_redirects=False) as client:
+            for _ in range(_MAX_REDIRECTS + 1):
+                parsed = httpx.URL(url)
+                if parsed.scheme not in ("http", "https") or not parsed.host:
+                    return None
+                ip = _resolve_public_addr(parsed.host)
+                if ip is None:
+                    logger.warning(f"[QQ] 拒绝下载非公网媒体地址 {url[:80]}")
+                    return None
+                host_header = parsed.host if parsed.port is None else f"{parsed.host}:{parsed.port}"
+                resp = client.get(
+                    parsed.copy_with(host=ip),
+                    headers={"Host": host_header},
+                    extensions={"sni_hostname": parsed.host},
+                )
+                location = resp.headers.get("location")
+                if resp.is_redirect and location:
+                    url = str(parsed.join(location))
+                    continue
+                resp.raise_for_status()
+                hc = resp.headers.get("content-type", "").split(";")[0].strip()
+                raw = resp.content
+                return BinaryContent(data=raw, media_type=pick_ct(url, hc, raw, filename=filename))
+        logger.warning(f"[QQ] 重定向次数过多 {url[:80]}")
+        return None
     except Exception as e:
         logger.warning(f"[QQ] 下载媒体失败 {url[:80]}: {e}")
         return None
