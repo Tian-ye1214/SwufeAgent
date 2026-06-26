@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 import httpx
 import json_repair
 from infra import logger
-from infra.persist_utils import atomic_write_text, file_lock
+from infra.persist_utils import atomic_write_text, file_lock, iso_utc_now, update_locked_json
 from config.app_config import (
     chat_completion_inference_request_fields,
     get_env,
@@ -16,8 +17,10 @@ from config.app_config import (
 )
 from tools.memory.consolidation import (
     long_term_memory_consolidation_params,
+    long_term_memory_debounce_params,
     merge_looks_like_unrelated_rewrite,
 )
+from tools.memory.hygiene import should_consolidate, _parse_iso
 from tools.memory.message_text import user_prompts_to_text
 from infra.shared_http import get_client
 
@@ -52,6 +55,20 @@ class LongTermMemory:
     _MD_H1_SOUL = re.compile(r"^#\s*SOUL\s*$", re.IGNORECASE)
     _MD_H1_USER = re.compile(r"^#\s*USER\s*$", re.IGNORECASE)
     _GLOBAL_WRITE_LOCK = asyncio.Lock()
+    _CONSOLIDATION_STATE_FILE = "consolidation_state.json"
+
+    def _consolidation_state_path(self):
+        return self._MEMORY_DIR / self._CONSOLIDATION_STATE_FILE
+
+    def _read_consolidation_state_sync(self) -> dict:
+        import json
+        p = self._consolidation_state_path()
+        if not p.is_file():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
 
     def __init__(self):
         self._guidance_text: str = ""
@@ -322,8 +339,36 @@ class LongTermMemory:
             if not transcript:
                 return
 
+            fingerprint = hashlib.sha1(transcript.encode("utf-8")).hexdigest()
+            last = await asyncio.to_thread(self._read_consolidation_state_sync)
+            params = long_term_memory_debounce_params()
+            now_iso = iso_utc_now()
+            last_at = _parse_iso(last.get("last_run_at"))
+            now_dt = _parse_iso(now_iso)
+            secs = (now_dt - last_at).total_seconds() if (last_at and now_dt) else None
+            new_turns = len(messages) - int(last.get("turn_count", 0))
+            ok, reason = should_consolidate(
+                fingerprint=fingerprint,
+                last_fingerprint=last.get("last_fingerprint"),
+                new_turn_count=new_turns,
+                seconds_since_last_run=secs,
+                params=params,
+            )
+            if not ok:
+                logger.debug("长期记忆合并已跳过(debounce): %s", reason)
+                return
+
             parsed = await self._consolidation_chat_and_parse(template, transcript)
-            if await self._apply_consolidation_parsed(parsed):
+            changed = await self._apply_consolidation_parsed(parsed)
+
+            def _save_state(state: dict) -> None:
+                state["last_fingerprint"] = fingerprint
+                state["last_run_at"] = now_iso
+                state["turn_count"] = len(messages)
+            await asyncio.to_thread(
+                lambda: update_locked_json(self._consolidation_state_path(), 1, _save_state)
+            )
+            if changed:
                 logger.warning("📝 长期记忆已根据你的输入更新（SOUL/USER）。")
 
         except Exception as e:

@@ -21,6 +21,16 @@ def long_term_memory_consolidation_params(**kwargs: Any) -> dict[str, int | floa
     return out
 
 
+def long_term_memory_debounce_params(**kwargs: Any) -> dict[str, float]:
+    cfg = settings()["long_term_memory"]["consolidation"].get("debounce", {})
+    out = {
+        "min_new_turns": int(cfg.get("min_new_turns", 3)),
+        "min_interval_sec": float(cfg.get("min_interval_sec", 120)),
+    }
+    out.update(kwargs)
+    return out
+
+
 def merge_looks_like_unrelated_rewrite(old_body: str, new_body: str, **kwargs: Any) -> bool:
     cfg = long_term_memory_consolidation_params(**kwargs)
     o = (old_body or "").strip()
