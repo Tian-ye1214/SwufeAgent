@@ -239,9 +239,9 @@ class ShortTermMemory:
 
     def _persist_ingested(self, log_key: str, hashes: set[str]) -> None:
         def mut(state: dict) -> None:
-            state.setdefault("version", 2)
+            state.setdefault("version", self._STATE_VERSION)
             state.setdefault("sources", {})[log_key] = {"ingested": sorted(hashes)}
-        update_locked_json(self._stm_state_path(), 2, mut)
+        update_locked_json(self._stm_state_path(), self._STATE_VERSION, mut)
 
     async def _ingest_pending_turns(
         self,
@@ -252,17 +252,11 @@ class ShortTermMemory:
         session_key: str,
         rag: Any,
     ) -> None:
-        """Ingest 未记账的 turn；删除 ingested-live 的孤儿行（编辑/压缩遗留）。"""
+        """Ingest turns whose fingerprint isn't recorded yet; prune the set to
+        live. Rows of compaction-dropped turns are KEPT (STM exists to retrieve
+        content that has left the live context) — never delete here."""
         live = {_turn_hash(e.text) for e in turn_entries}
-        ingested_set = set(ingested)
-
-        orphans = ingested_set - live
-        if orphans:
-            for h in sorted(orphans):
-                await rag.delete_by_source_prefix(f"{log_key}#{h}")
-            await asyncio.to_thread(self._persist_ingested, log_key, ingested_set & live)
-
-        done = ingested_set & live
+        done = set(ingested) & live
         for entry in turn_entries:
             h = _turn_hash(entry.text)
             if h in done:

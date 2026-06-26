@@ -58,14 +58,15 @@ async def test_reingest_same_turns_no_new_embeddings(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edited_turn_deletes_old_row(tmp_path, monkeypatch):
+async def test_edited_turn_ingests_new_and_keeps_old(tmp_path, monkeypatch):
     stm = ShortTermMemory(_cfg(tmp_path))
     fake = FakeRAG()
     monkeypatch.setattr("tools.memory.stm._stm_rag_from_config", lambda cfg: fake)
-
     await stm.ingest_after_turn(_msgs(["原文"]), "lk", "coordinator", "d/t")
+    n1 = fake.embed_calls
     await stm.ingest_after_turn(_msgs(["改过的文"]), "lk", "coordinator", "d/t")
-    assert fake.deleted, "编辑后的 turn 应触发旧行删除"
+    assert fake.embed_calls > n1     # edited turn ingested as a new row
+    assert fake.deleted == []        # old row NOT deleted (kept for retrieval)
 
 
 @pytest.mark.asyncio
