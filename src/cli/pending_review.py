@@ -74,22 +74,26 @@ class PendingReviewStore:
         self._on_change: Callable[[], None] | None = None
 
     def activate(self, on_change: Callable[[], None]) -> None:
-        self._on_change = on_change
+        with self._lock:
+            self._on_change = on_change
 
     def deactivate(self) -> None:
-        self._on_change = None
         with self._lock:
+            self._on_change = None
             self._entries.clear()
 
     def register(self, path: Path, *, name: str, baseline: str, snapshot: str) -> None:
-        if self._on_change is None or baseline == snapshot:
+        if baseline == snapshot:
             return
         key = str(path)
         with self._lock:
+            cb = self._on_change
+            if cb is None:
+                return
             existing = self._entries.get(key)
             base = existing.baseline if existing is not None else baseline
             self._entries[key] = ReviewEntry(Path(path), name, base, snapshot)
-        self._notify()
+        self._notify(cb)
 
     def entries(self) -> list[ReviewEntry]:
         with self._lock:
@@ -116,9 +120,9 @@ class PendingReviewStore:
     def finish(self, key: str) -> None:
         with self._lock:
             self._entries.pop(key, None)
-        self._notify()
+            cb = self._on_change
+        self._notify(cb)
 
-    def _notify(self) -> None:
-        cb = self._on_change
+    def _notify(self, cb: Callable[[], None] | None) -> None:
         if cb is not None:
             cb()
