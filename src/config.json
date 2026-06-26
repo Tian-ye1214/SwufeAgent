@@ -33,9 +33,9 @@
       "thinking": "enabled"
     },
     "compressor": {
-      "name": "deepseek-v4-flash",
+      "name": "deepseek-v4-pro",
       "temperature": 0.2,
-      "max_tokens": 2048,
+      "max_tokens": 4096,
       "top_p": 1.0,
       "reasoning_effort": "xhigh",
       "thinking": "enabled"
@@ -49,21 +49,21 @@
     "coordinator": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
       "head_turns": 2
     },
     "manager": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
       "head_turns": 2
     },
     "worker": {
       "max_context_tokens": null,
       "default_context_tokens": 393216,
-      "auto_compress_ratio": 0.5,
+      "auto_compress_ratio": 0.8,
       "tail_turns": 2,
       "head_turns": 2
     }
@@ -82,7 +82,7 @@
     "table_name": "conversation_turns",
     "vector_search_limit": 30,
     "final_top_k": 8,
-    "use_rerank": false,
+    "use_rerank": true,
     "min_similarity": 0.3,
     "reconcile_on_query": true,
     "turn_token_limit": 8192,

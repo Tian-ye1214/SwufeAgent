@@ -37,6 +37,7 @@ class BasicToolkit:
     ):
         self._base_dir: Path = self._WORK_DATABASE_ROOT
         self._file_lock = threading.Lock()
+        self._command_lock = asyncio.Lock()
         self._review_store = PendingReviewStore(self._file_lock)
         self._extra_worker_tools: list = list(extra_worker_tools or [])
         self._ask_user_handler = None
@@ -492,25 +493,26 @@ class BasicToolkit:
                 return f"已取消执行（用户未确认）: {danger}"
 
         try:
-            policy = get_agent_run_policy()
-            timeout = policy.clamp_command_timeout(timeout)
-            use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
-            if use_shell and re.search(r"\b(start|nohup|setsid)\b|&\s*$", command, re.I):
-                return "Security error: background shell processes are not allowed"
-            cwd = str(self._base_dir.resolve())
-            env = None
-            if re.search(r"\bclawhub\b", command, re.I):
-                cwd = str(_REPO_ROOT)
-                if "--workdir" not in command:
-                    env = os.environ | {"CLAWHUB_WORKDIR": cwd}
+            async with self._command_lock:
+                policy = get_agent_run_policy()
+                timeout = policy.clamp_command_timeout(timeout)
+                use_shell = any(c in command for c in ['|', '>', '<', '&&', '||', ';', '*', '?'])
+                if use_shell and re.search(r"\b(start|nohup|setsid)\b|&\s*$", command, re.I):
+                    return "Security error: background shell processes are not allowed"
+                cwd = str(self._base_dir.resolve())
+                env = None
+                if re.search(r"\bclawhub\b", command, re.I):
+                    cwd = str(_REPO_ROOT)
+                    if "--workdir" not in command:
+                        env = os.environ | {"CLAWHUB_WORKDIR": cwd}
 
-            shell = use_shell or _platform.system() == "Windows"
-            args = command if shell else shlex.split(command)
-            stdout, stderr, return_code = await run_subprocess(
-                args, shell=shell, cwd=cwd, env=env, timeout=timeout
-            )
-            output = stdout + stderr
-            return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
+                shell = use_shell or _platform.system() == "Windows"
+                args = command if shell else shlex.split(command)
+                stdout, stderr, return_code = await run_subprocess(
+                    args, shell=shell, cwd=cwd, env=env, timeout=timeout
+                )
+                output = stdout + stderr
+                return f"Return code: {return_code}\nOutput:\n{output}" if output else f"Execution completed, return code: {return_code}"
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({timeout} seconds)"
         except Exception as e:
