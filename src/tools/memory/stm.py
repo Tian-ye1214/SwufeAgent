@@ -483,6 +483,9 @@ class ShortTermMemory:
         if not root.is_dir():
             return
 
+        state0 = await asyncio.to_thread(self._load_stm_state_sync)
+        await asyncio.to_thread(self._migrate_state_if_needed, state0)
+
         files = sorted(root.glob(MODEL_MESSAGES_GLOB), key=str)
         rag: Any | None = None
         for fp in files:

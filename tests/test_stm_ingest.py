@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from tools.memory.stm import ShortTermMemory
@@ -77,3 +79,20 @@ async def test_per_turn_ingest_capped(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.memory.stm._stm_rag_from_config", lambda cfg: fake)
     await stm.ingest_after_turn(_msgs(["a", "b", "c"]), "lk", "coordinator", "d/t")
     assert fake.embed_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_reconcile_triggers_migration(tmp_path, monkeypatch):
+    stm = ShortTermMemory(_cfg(tmp_path))
+    # make the reconcile root exist (empty) so _reconcile_from_logs proceeds past the dir guard
+    root = tmp_path / "convroot"
+    root.mkdir()
+    monkeypatch.setattr(stm, "_log_root_resolved", lambda: root)
+    # pre-write a legacy version-2 state file (pre-upgrade shape)
+    sp = stm._stm_state_path()
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(json.dumps({"version": 2, "sources": {}}), encoding="utf-8")
+    await stm._reconcile_from_logs()
+    after = json.loads(sp.read_text(encoding="utf-8"))
+    assert after["version"] == stm._STATE_VERSION      # migrated
+    assert "soft_forget_since" in after                # migration stamped the boundary
