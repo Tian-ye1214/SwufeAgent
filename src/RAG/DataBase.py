@@ -194,6 +194,19 @@ class EmbedDataBase:
 
         await asyncio.to_thread(_drop)
 
+    async def delete_where(self, where: str) -> None:
+        """按 SQL 谓词删除行（如 source LIKE 'x%' ESCAPE '\\'）。表不存在则 no-op。"""
+        await self.ensure_connected()
+
+        def _del() -> None:
+            db = self._require_db()
+            if self._ensure_table_sync(db) is None:
+                return
+            self._table.delete(where)
+
+        await asyncio.to_thread(_del)
+        logger.debug("RAG DB: delete_where table=%s where=%s", self.table_name, where)
+
     async def ensure_vector_index(self) -> bool:
         """达阈值后创建 IVF_PQ 索引；返回是否触发了建索引。"""
         if not self._index_config:
@@ -267,6 +280,7 @@ class EmbedDataBase:
                     {
                         "text": row.get("text", ""),
                         "source": row.get("source", "") or "",
+                        "created_at": row.get("created_at", "") or "",
                         "_distance": float(dist) if dist is not None and dist == dist else None,
                     }
                 )
