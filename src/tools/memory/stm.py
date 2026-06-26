@@ -17,7 +17,7 @@ from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
 from workspace.workspace import MODEL_MESSAGES_GLOB, conversations_root, stm_log_key
 from tools.memory.message_text import TurnMemoryEntry, turn_entries_from_messages
-from tools.memory.hygiene import turn_key_hash, normalize_for_storage
+from tools.memory.hygiene import turn_key_hash, normalize_for_storage, apply_soft_forget
 
 _turn_hash = turn_key_hash  # 内容指纹：跨压缩/空白/IME 漂移稳定
 
@@ -77,6 +77,11 @@ class ShortTermMemory:
         self._turn_token_limit = max(1, int(self._cfg.get("turn_token_limit", 8192)))
         overlap = max(0, int(self._cfg.get("turn_chunk_overlap_tokens", 512)))
         self._turn_chunk_overlap = min(overlap, max(0, self._turn_token_limit - 1))
+        self._soft_cfg = dict(self._cfg.get("soft_forget", {}) or {})
+        self._soft_meta: dict[str, dict] = {}        # 已落盘 meta 的进程缓存
+        self._soft_meta_deltas: dict[str, dict] = {} # 待落盘增量
+        self._soft_since: str | None = None
+        self._soft_loaded = False
 
     def _get_rag(self) -> Any:
         if self._rag is None:
@@ -237,10 +242,44 @@ class ShortTermMemory:
             )
         return rows
 
+    def _load_soft_state_sync(self) -> None:
+        state = self._load_stm_state_sync()
+        self._soft_meta = dict(state.get("meta", {}) or {})
+        self._soft_since = state.get("soft_forget_since")
+        self._soft_loaded = True
+
+    def _merged_meta(self) -> dict[str, dict]:
+        merged = {k: dict(v) for k, v in self._soft_meta.items()}
+        for src, d in self._soft_meta_deltas.items():
+            m = merged.setdefault(src, {"hit": 0, "last_accessed": ""})
+            m["hit"] = int(m.get("hit", 0)) + int(d.get("hit", 0))
+            if d.get("last_accessed", "") > m.get("last_accessed", ""):
+                m["last_accessed"] = d["last_accessed"]
+        return merged
+
+    def _bump_hits(self, sources: list[str], now: str) -> None:
+        for src in sources:
+            d = self._soft_meta_deltas.setdefault(src, {"hit": 0, "last_accessed": ""})
+            d["hit"] = int(d.get("hit", 0)) + 1
+            d["last_accessed"] = now
+
+    def _flush_soft_meta(self, state: dict) -> None:
+        """把命中增量并入 state['meta']（在 update_locked_json 的 mutate 内调用）。"""
+        if not self._soft_meta_deltas:
+            return
+        meta = state.setdefault("meta", {})
+        for src, d in self._soft_meta_deltas.items():
+            m = meta.setdefault(src, {"hit": 0, "last_accessed": ""})
+            m["hit"] = int(m.get("hit", 0)) + int(d.get("hit", 0))
+            if d.get("last_accessed", "") > m.get("last_accessed", ""):
+                m["last_accessed"] = d["last_accessed"]
+        self._soft_meta_deltas = {}
+
     def _persist_ingested(self, log_key: str, hashes: set[str]) -> None:
         def mut(state: dict) -> None:
             state.setdefault("version", self._STATE_VERSION)
             state.setdefault("sources", {})[log_key] = {"ingested": sorted(hashes)}
+            self._flush_soft_meta(state)
         update_locked_json(self._stm_state_path(), self._STATE_VERSION, mut)
 
     async def _ingest_pending_turns(
@@ -349,6 +388,12 @@ class ShortTermMemory:
             return False
 
     async def close(self) -> None:
+        if self._soft_meta_deltas:
+            await asyncio.to_thread(
+                lambda: update_locked_json(
+                    self._stm_state_path(), self._STATE_VERSION, self._flush_soft_meta
+                )
+            )
         if self._rag is not None:
             await self._rag.close()
 
@@ -487,6 +532,23 @@ class ShortTermMemory:
             rag = self._get_rag()
             await rag.connect()
             hits = await rag.retrieve(q)
+            if hits and self._soft_cfg.get("enabled", False):
+                if not self._soft_loaded:
+                    if self._soft_since is None and not self._soft_meta:
+                        await asyncio.to_thread(self._load_soft_state_sync)
+                    else:
+                        self._soft_loaded = True
+                now = iso_utc_now()
+                max_age = float(self._soft_cfg.get("max_age_days", 30)) * 86400.0
+                hits = apply_soft_forget(
+                    hits,
+                    meta=self._merged_meta(),
+                    soft_forget_since=self._soft_since,
+                    max_age_seconds=max_age,
+                    now_iso=now,
+                    grace_until_first_use=bool(self._soft_cfg.get("grace_until_first_use", True)),
+                )
+                self._bump_hits([h.get("source", "") for h in hits], now)
             if hits:
                 inner = "\n\n".join(
                     f"[{i + 1}] (source: {h.get('source', '')})\n{h.get('text', '')}"
