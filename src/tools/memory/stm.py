@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import math
 import threading
@@ -11,16 +10,16 @@ from typing import Any
 
 from infra import logger
 from config.app_config import get_env
-from infra.persist_utils import iso_utc_now, load_json_state, save_locked_json
+from infra.persist_utils import (
+    iso_utc_now, load_json_state, save_locked_json, update_locked_json,
+)
 from RAG.RAG import RAG as RAGEngineCls
 from tools.conversation_log import read_saved_model_messages_file
 from workspace.workspace import MODEL_MESSAGES_GLOB, conversations_root, stm_log_key
 from tools.memory.message_text import TurnMemoryEntry, turn_entries_from_messages
+from tools.memory.hygiene import turn_key_hash, normalize_for_storage
 
-
-def _turn_hash(text: str) -> str:
-    """turn 内容指纹：跨压缩（历史被重排/截断）稳定标识一个 turn，替代易错的位置游标。"""
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+_turn_hash = turn_key_hash  # 内容指纹：跨压缩/空白/IME 漂移稳定
 
 
 def _stm_rag_from_config(cfg: dict[str, Any]) -> Any:
@@ -60,6 +59,8 @@ class _AsyncThreadLock:
 class ShortTermMemory:
     """Short-term memory for complete user turns, split into chunk rows when needed."""
 
+    _shared_lock = _AsyncThreadLock()
+
     def __init__(
         self,
         stm_config: dict[str, Any],
@@ -69,7 +70,7 @@ class ShortTermMemory:
         self._cfg = dict(stm_config)
         self._rag = rag
         self._log_root = log_root
-        self._lock = _AsyncThreadLock()
+        self._lock = ShortTermMemory._shared_lock
         self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._reconcile_on_query = bool(self._cfg["reconcile_on_query"])
@@ -216,7 +217,8 @@ class ShortTermMemory:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         now = iso_utc_now()
-        chunks = self._split_turn_text(entry.text, entry.token_reference)
+        chunks = [normalize_for_storage(c) for c in self._split_turn_text(entry.text, entry.token_reference)]
+        chunks = [c for c in chunks if c]
         for chunk_index, chunk in enumerate(chunks):
             source = (
                 f"{log_key}#{turn_hash}"
@@ -235,6 +237,12 @@ class ShortTermMemory:
             )
         return rows
 
+    def _persist_ingested(self, log_key: str, hashes: set[str]) -> None:
+        def mut(state: dict) -> None:
+            state.setdefault("version", 2)
+            state.setdefault("sources", {})[log_key] = {"ingested": sorted(hashes)}
+        update_locked_json(self._stm_state_path(), 2, mut)
+
     async def _ingest_pending_turns(
         self,
         log_key: str,
@@ -244,13 +252,17 @@ class ShortTermMemory:
         session_key: str,
         rag: Any,
     ) -> None:
-        """Ingest turns whose content fingerprint isn't recorded yet; persist per turn.
-
-        指纹集每次入库都裁剪到当前存活的 turn（压缩丢弃的 turn 不会再出现），
-        既避免重复入库，也避免压缩后新增 turn 被位置游标漏记。
-        """
+        """Ingest 未记账的 turn；删除 ingested-live 的孤儿行（编辑/压缩遗留）。"""
         live = {_turn_hash(e.text) for e in turn_entries}
-        done = set(ingested) & live
+        ingested_set = set(ingested)
+
+        orphans = ingested_set - live
+        if orphans:
+            for h in sorted(orphans):
+                await rag.delete_by_source_prefix(f"{log_key}#{h}")
+            await asyncio.to_thread(self._persist_ingested, log_key, ingested_set & live)
+
+        done = ingested_set & live
         for entry in turn_entries:
             h = _turn_hash(entry.text)
             if h in done:
@@ -266,16 +278,11 @@ class ShortTermMemory:
                         )
                     raise
             done.add(h)
-            state = await asyncio.to_thread(self._load_stm_state_sync)
-            sources = state.setdefault("sources", {})
-            sources[log_key] = {"ingested": sorted(done)}
-            await asyncio.to_thread(self._save_stm_state_sync, state)
+            await asyncio.to_thread(self._persist_ingested, log_key, done)
             if self._verbose_ingest:
                 logger.info(
                     "STM ingest: log_key=%s turns=%d new_rows=%d",
-                    log_key,
-                    len(done),
-                    len(rows),
+                    log_key, len(done), len(rows),
                 )
 
     async def ingest_after_turn(
@@ -292,6 +299,7 @@ class ShortTermMemory:
             async with self._lock:
                 turn_entries = turn_entries_from_messages(messages)
                 state = await asyncio.to_thread(self._load_stm_state_sync)
+                state = await asyncio.to_thread(self._migrate_state_if_needed, state)
                 sources = state.setdefault("sources", {})
                 ingested = self._ingested_for_key(sources, log_key, turn_entries)
                 if all(_turn_hash(e.text) in ingested for e in turn_entries):
@@ -382,6 +390,21 @@ class ShortTermMemory:
                 self._rag = None
             await asyncio.to_thread(self._save_stm_state_sync, state)
 
+    _STATE_VERSION = 3  # 3 = 新哈希方案(hygiene) + soft_forget_since
+
+    def _migrate_state_if_needed(self, state: dict) -> dict:
+        """旧状态(version<3)：用新哈希从磁盘 logs 重算 ingested(不重嵌、不删行)，
+        并写入 soft_forget_since 标记上线时刻；历史 LanceDB 行 created_at 早于此值
+        故被软遗忘豁免。"""
+        if int(state.get("version", 0)) >= self._STATE_VERSION:
+            return state
+        rebuilt = self._current_log_sources_state_sync()  # 用新 _turn_hash 重算
+        rebuilt["version"] = self._STATE_VERSION
+        rebuilt["soft_forget_since"] = iso_utc_now()
+        rebuilt.setdefault("meta", {})
+        self._save_stm_state_sync(rebuilt)
+        return rebuilt
+
     def _current_log_sources_state_sync(self) -> dict[str, Any]:
         root = self._log_root_resolved()
         sources: dict[str, Any] = {}
@@ -392,7 +415,7 @@ class ShortTermMemory:
                 sources[self._stm_source_key(fp)] = {
                     "ingested": sorted(_turn_hash(e.text) for e in entries)
                 }
-        return {"version": 2, "sources": sources}
+        return {"version": self._STATE_VERSION, "sources": sources, "meta": {}}
 
     def _sync_reconcile_file(
         self,
