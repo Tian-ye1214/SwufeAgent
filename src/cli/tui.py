@@ -347,7 +347,7 @@ class RedLotusTui(App[None]):
         _ASK_TIMEOUT = 60  # 用户回复超时（秒）
 
         def ask_user_bridge(question: str) -> str:
-            result_queue: queue.Queue[str | Exception] = queue.Queue()
+            result_queue: queue.Queue[str] = queue.Queue()
             who = current_short_agent_id()  # 在提问 agent 的上下文（worker 线程）内读取
             tagged = f"[{who}] {question}" if who else question
 
@@ -371,18 +371,7 @@ class RedLotusTui(App[None]):
             except RuntimeError:
                 raise RuntimeError("Textual app is no longer running, cannot ask user")
 
-            if self.system.has_current_goal_turn:
-                result = result_queue.get()
-            else:
-                try:
-                    result = result_queue.get(timeout=_ASK_TIMEOUT)
-                except queue.Empty:
-                    raise RuntimeError(
-                        f"ask_user timed out after {_ASK_TIMEOUT}s (no reply from TUI)"
-                    )
-
-            if isinstance(result, Exception):
-                raise result
+            result = result_queue.get(timeout=_ASK_TIMEOUT)
             return result
 
         return ask_user_bridge
