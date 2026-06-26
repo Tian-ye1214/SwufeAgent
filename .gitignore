@@ -19,6 +19,8 @@ data/
 .codegraph/
 .redlotus/*
 tests/*
+!tests/*.py
+/config.json
 src/prompts/LongTermMemory/SOUL.md
 src/prompts/LongTermMemory/USER.md
 src/prompts/LongTermMemory/log_sources_state.json

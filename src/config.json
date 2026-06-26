@@ -91,6 +91,11 @@
       "min_rows": 256,
       "metric": "cosine",
       "rebuild_every_n_adds": 100
+    },
+    "soft_forget": {
+      "enabled": true,
+      "max_age_days": 30,
+      "grace_until_first_use": true
     }
   },
   "long_term_memory": {
@@ -101,7 +106,8 @@
       "merge_min_similarity": 0.35,
       "merge_max_len_ratio": 2.6,
       "merge_min_len_ratio": 0.35,
-      "merge_len_check_min_old_chars": 200
+      "merge_len_check_min_old_chars": 200,
+      "debounce": { "min_new_turns": 3, "min_interval_sec": 120 }
     }
   },
   "request_limit": null,
