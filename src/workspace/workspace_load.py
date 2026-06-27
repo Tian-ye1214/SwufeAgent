@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from cli.render import print_error, print_success, print_warning
 from infra import logger

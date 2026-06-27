@@ -10,7 +10,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from infra import logger
 from workspace.workspace import conversations_root
 from ModelGateway.usage_accounting import (
     MODEL_MESSAGES_GLOB,

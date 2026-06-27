@@ -78,8 +78,7 @@ class EmbedDataBase:
     def _open_table_sync(self, db) -> Any | None:
         names = self._table_names_sync(db)
         if self.table_name not in names:
-            if self._table_lance_dir().is_dir():
-                self._remove_orphan_table_dir_sync()
+            self._remove_orphan_table_dir_sync()
             return None
         try:
             return db.open_table(self.table_name)
@@ -151,8 +150,7 @@ class EmbedDataBase:
                 if opened is not None:
                     self._table.add(pydantic_rows)
                 else:
-                    if self._table_lance_dir().is_dir():
-                        self._remove_orphan_table_dir_sync()
+                    self._remove_orphan_table_dir_sync()
                     self._table = db.create_table(
                         self.table_name,
                         data=pydantic_rows,

@@ -21,7 +21,6 @@ def get_client(
 
 
 async def close_client(key: str) -> None:
-    global _clients
     client = _clients.pop(key, None)
     if client is not None and not client.is_closed:
         try:

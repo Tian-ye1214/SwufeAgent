@@ -6,18 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from infra.persist_utils import safe_name
+from infra.persist_utils import safe_segment
 
 MODEL_MESSAGES_SUFFIX = "_ModelMessages.json"
 MODEL_MESSAGES_GLOB = f"*{MODEL_MESSAGES_SUFFIX}"
 LOADABLE_ROLES = frozenset({"coordinator", "manager"})
 
 _workspace: Path | None = None
-
-
-def _safe_segment(s: str, max_len: int = 80) -> str:
-    s = (s or "").strip().replace("\n", " ")
-    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def current_workspace() -> Path:
@@ -44,34 +39,10 @@ def snapshot_basename(
     *,
     sub_id: str | None = None,
 ) -> str:
-    parts = [_safe_segment(role, 40), _safe_segment(date, 16), _safe_segment(topic, 80)]
+    parts = [safe_segment(role, 40), safe_segment(date, 16), safe_segment(topic, 80)]
     if sub_id:
-        parts.append(_safe_segment(sub_id, 60))
+        parts.append(safe_segment(sub_id, 60))
     return "_".join(parts)
-
-
-def readable_path(
-    role: str,
-    date: str,
-    topic: str,
-    *,
-    sub_id: str | None = None,
-    root: Path | None = None,
-) -> Path:
-    base = snapshot_basename(role, date, topic, sub_id=sub_id)
-    return (root or conversations_root()) / f"{base}.json"
-
-
-def loadable_path(
-    role: str,
-    date: str,
-    topic: str,
-    *,
-    sub_id: str | None = None,
-    root: Path | None = None,
-) -> Path:
-    base = snapshot_basename(role, date, topic, sub_id=sub_id)
-    return (root or conversations_root()) / f"{base}{MODEL_MESSAGES_SUFFIX}"
 
 
 def snapshot_base_from_loadable(path: Path) -> Path:

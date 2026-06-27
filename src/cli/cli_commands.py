@@ -37,7 +37,6 @@ from workspace.workspace_load import enter_workspace
 from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
 from cli.panel import build_panel_snapshot, render_panel
 from cli.completion import EFFORT_VALUES
-from infra import logger
 
 
 def _out(text: str = "") -> None:
@@ -327,8 +326,6 @@ async def _print_context_usage(
     coordinator_history: ChatHistory | None,
     manager_history: ChatHistory | None,
 ) -> None:
-    skills_manager = system._skills_manager
-    memory_injection = system._injection_for_session()
     roles = [
         ("coordinator", "Coordinator", coordinator_history),
         ("manager", "Manager", manager_history),
@@ -340,8 +337,6 @@ async def _print_context_usage(
             context_usage_breakdown,
             role,
             messages,
-            skills_manager=skills_manager,
-            memory_injection=memory_injection,
         )
         lines.append(
             f"{label}: {bd['percent']:.0f}%  "
@@ -433,7 +428,6 @@ SlashHandler = Callable[["SlashCommandContext"], Awaitable[bool | None]]
 class SlashCommandContext:
     raw: str
     parts: list[str]
-    cmd: str
     skills_manager: SkillsManager
     coordinator_history: ChatHistory | None
     manager_history: ChatHistory | None
@@ -534,10 +528,11 @@ async def _cmd_pwd(ctx: SlashCommandContext) -> bool | None:
 
 
 async def _cmd_cd(ctx: SlashCommandContext) -> bool | None:
-    if len(ctx.parts) < 2:
+    rest = ctx.raw.strip().split(maxsplit=1)
+    if len(rest) < 2:
         print_error("用法：/cd <path>")
         return None
-    target = Path(ctx.parts[1].strip()).expanduser()
+    target = Path(_strip_quotes(rest[1])).expanduser()
     if not target.is_absolute():
         target = (Path.cwd() / target).resolve()
     if not target.is_dir():
@@ -684,6 +679,9 @@ async def _cmd_agent(ctx: SlashCommandContext) -> bool | None:
         print_error(f"用法: /agent <{role_text}> <模型名称>")
         return None
     role = ctx.parts[1].lower()
+    if role not in roles:
+        print_error(f"未知角色: {role}（可选: {role_text}）")
+        return None
     model_name = ctx.parts[2].strip()
     try:
         set_model_name(role, model_name)
@@ -825,7 +823,6 @@ async def handle_slash_command(
     ctx = SlashCommandContext(
         raw=raw,
         parts=parts,
-        cmd=cmd,
         skills_manager=skills_manager,
         coordinator_history=coordinator_history,
         manager_history=manager_history,

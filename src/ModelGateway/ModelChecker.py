@@ -67,9 +67,6 @@ class CompressionValidationError(RuntimeError):
 def context_usage_breakdown(
     role: str,
     history_messages: list,
-    *,
-    skills_manager: Any,
-    memory_injection: str,
 ) -> dict[str, Any]:
     """基于最近一次真实模型 usage 的上下文占用。没有真实 usage 时不回退估算。"""
     ctx = get_context_config(role)

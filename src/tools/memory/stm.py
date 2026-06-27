@@ -65,11 +65,9 @@ class ShortTermMemory:
         self,
         stm_config: dict[str, Any],
         rag: Any | None = None,
-        log_root: Path | None = None,
     ):
         self._cfg = dict(stm_config)
         self._rag = rag
-        self._log_root = log_root
         self._lock = ShortTermMemory._shared_lock
         self._verbose_ingest = bool(self._cfg.get("verbose_ingest", False))
         self._pending_tasks: set[asyncio.Task[None]] = set()
@@ -110,9 +108,6 @@ class ShortTermMemory:
 
     def _failures_path(self) -> Path:
         return self._db_dir() / "conversation_stm_failures.jsonl"
-
-    def _rel_log_key(self, path: Path, root: Path) -> str:
-        return self._stm_source_key(path)
 
     def _load_stm_state_sync(self) -> dict[str, Any]:
         return load_json_state(self._stm_state_path(), 2)
@@ -459,12 +454,11 @@ class ShortTermMemory:
     def _sync_reconcile_file(
         self,
         fp: Path,
-        root: Path,
         state: dict[str, Any],
     ) -> tuple[list[TurnMemoryEntry], str, set[str], str, str]:
         """Read one saved model_messages log and return STM cursor context."""
         sources = state.setdefault("sources", {})
-        log_key = self._rel_log_key(fp, root)
+        log_key = self._stm_source_key(fp)
         messages, meta = read_saved_model_messages_file(fp)
         turn_entries = turn_entries_from_messages(messages)
         ingested = self._ingested_for_key(sources, log_key, turn_entries)
@@ -491,7 +485,7 @@ class ShortTermMemory:
         for fp in files:
             state = await asyncio.to_thread(self._load_stm_state_sync)
             turn_entries, log_key, ingested, agent, session_key = await asyncio.to_thread(
-                self._sync_reconcile_file, fp, root, state
+                self._sync_reconcile_file, fp, state
             )
             if all(_turn_hash(e.text) in ingested for e in turn_entries):
                 continue

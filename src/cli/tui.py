@@ -25,6 +25,7 @@ from cli.completion import (
     iter_agent_role_completions,
     iter_command_completions,
     iter_effort_value_completions,
+    iter_literal_choice_completions,
 )
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from cli.panel import PanelSnapshotCache, build_panel_snapshot, render_panel
@@ -74,6 +75,11 @@ class AgentInputSuggester(Suggester):
             for effort in iter_effort_value_completions(ctx.prefix):
                 if effort != ctx.prefix:
                     return value[: -len(ctx.prefix)] + effort if ctx.prefix else value + effort
+            return None
+        if ctx.kind == "literal_choice":
+            for choice in iter_literal_choice_completions(ctx.prefix, ctx.choices):
+                if choice != ctx.prefix:
+                    return value[: -len(ctx.prefix)] + choice if ctx.prefix else value + choice
             return None
         if ctx.kind == "file_path":
             return _complete_path_value(value, ctx.prefix)
@@ -154,10 +160,9 @@ class SnapshotPickScreen(ModalScreen[WorkspaceSnapshot | None]):
 
 
 class TextualOutputSink(OutputSink):
-    def __init__(self, app: "RedLotusTui", log: RichLog, status: Static) -> None:
+    def __init__(self, app: "RedLotusTui", log: RichLog) -> None:
         self._app = app
         self._log = log
-        self._status = status
         self._thread_id = threading.get_ident()
         self._ansi_decoder = AnsiDecoder()
 
@@ -305,8 +310,7 @@ class RedLotusTui(App[None]):
 
     async def on_mount(self) -> None:
         log = self.query_one("#output", RichLog)
-        status = self.query_one("#status", Static)
-        set_output_sink(TextualOutputSink(self, log, status))
+        set_output_sink(TextualOutputSink(self, log))
         self.system.set_ask_user_handler(self._make_ask_user_bridge())
         self._ui_thread_id = threading.get_ident()
         if self._run_mode == TuiRunMode.REVIEW:

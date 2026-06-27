@@ -37,12 +37,9 @@ class WeChatAgentBot(BotBase):
             logger.warning(f"[WeChat] 下载媒体失败: {e}")
             media = None
         if media is not None and getattr(media, "data", None):
-            mime = self.guess_download_mime(
-                filename=getattr(media, "file_name", None) or "",
-                media_type_key=(getattr(media, "type", None) or "").lower(),
-            )
             filename = getattr(media, "file_name", None) or ""
             mtype = (getattr(media, "type", None) or "").lower()
+            mime = self.guess_download_mime(filename=filename, media_type_key=mtype)
             if mtype == "image":
                 b64 = base64.standard_b64encode(media.data).decode("ascii")
                 attachments.append(ImageUrl(url=f"data:{mime};base64,{b64}"))

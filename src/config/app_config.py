@@ -94,8 +94,7 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
 
     raw: dict[str, Any] = dict(settings()["models"][role])
     name = str(raw.pop("name")).strip()
-    reff = raw.pop("reasoning_effort")
-    s = str(reff).strip().lower()
+    s = str(raw.pop("reasoning_effort")).strip().lower()
     if s in ("none", "off", "false"):
         raw["reasoning_effort"] = False
     elif s in ["minimal", "low", "medium", "high", "xhigh"] or s == "max":
@@ -211,11 +210,7 @@ def _merge_ctx(base: dict[str, Any], overlay: dict[str, Any], roles: tuple[str, 
 
 def get_agent_roles(**kwargs: Any) -> tuple[str, ...]:
     cfg = kwargs.pop("cfg", settings())
-    models = cfg.get("models")
-    roles: list[str] = []
-    for role in models.keys():
-        roles.append(role)
-    return tuple(roles)
+    return tuple(cfg.get("models").keys())
 
 
 def get_context_profile_roles() -> tuple[str, ...]:

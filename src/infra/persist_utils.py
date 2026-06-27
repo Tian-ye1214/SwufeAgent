@@ -57,18 +57,15 @@ def load_json_state(path: Path, version: int) -> dict[str, Any]:
     return data
 
 
-def rel_key(path: Path, root: Path) -> str:
-    """path 相对 root 的 posix 键；不在 root 之下时退化为绝对 posix 路径。"""
-    try:
-        return path.resolve().relative_to(root).as_posix()
-    except ValueError:
-        return path.resolve().as_posix()
-
-
 def safe_name(text: str, *, extra: str = "_-", max_len: int = 50, fallback: str = "default") -> str:
     """把任意字符串清洗成文件名/键安全形式：非字母数字且不在 extra 内的字符替换为 _。"""
     cleaned = "".join(c if c.isalnum() or c in extra else "_" for c in text)
     return cleaned[:max_len] or fallback
+
+
+def safe_segment(s: str, max_len: int = 80) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def iso_utc_now() -> str:

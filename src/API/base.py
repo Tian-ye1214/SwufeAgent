@@ -391,8 +391,6 @@ class BotBase(ABC):
         self,
         user_text: str,
         attachments: list,
-        *,
-        filename_attr: str = "",
     ) -> tuple[str, list]:
         """Inline supported document BinaryContent as text; keep other attachments unchanged."""
         out: list = []
@@ -400,12 +398,11 @@ class BotBase(ABC):
         for att in attachments:
             data = getattr(att, "data", b"") or b""
             media_type = getattr(att, "media_type", "") or ""
-            filename = getattr(att, filename_attr, "") if filename_attr else ""
             text, consumed = await self._inline_document_bytes(
                 text,
                 data,
                 media_type=media_type,
-                filename=filename or None,
+                filename=None,
             )
             if not consumed:
                 out.append(att)

@@ -104,8 +104,6 @@ def _markdown_table(rows: list[list]) -> str:
         [_escape_markdown_cell(row[i]) if i < len(row) else "" for i in range(width)]
         for row in rows
     ]
-    if not normalized:
-        return ""
     header = normalized[0]
     body = normalized[1:] or [["" for _ in range(width)]]
     lines = [

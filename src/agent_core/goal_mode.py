@@ -35,12 +35,6 @@ class GoalParseResult:
         return self.marker_count == 0
 
 
-@dataclass(frozen=True)
-class GoalLoopResult:
-    iterations: int
-    output: str
-
-
 def parse_goal_output(text: str) -> GoalParseResult:
     """Strip goal-mode sentinel markers and return the effective signal.
 
@@ -112,7 +106,7 @@ async def run_goal_loop(
     conversation_log_hint: str,
     take_queued_inputs: Callable[[], list[str]],
     set_iteration: Callable[[int], None] | None = None,
-) -> GoalLoopResult:
+) -> None:
     original_goal = message.text or ""
     previous_output = ""
     pending_updates: list[str] = []
@@ -164,4 +158,4 @@ async def run_goal_loop(
 
         pending_updates.extend(take_queued_inputs())
         if parsed.signal == GoalSignal.DONE and not pending_updates:
-            return GoalLoopResult(iterations=iteration, output=output)
+            return

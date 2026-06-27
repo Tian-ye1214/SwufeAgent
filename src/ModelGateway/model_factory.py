@@ -14,7 +14,6 @@ from pydantic_ai import ModelSettings, ModelProfile
 from pydantic_ai.profiles.deepseek import deepseek_model_profile
 from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
 from pydantic_ai.models import ModelRequestParameters, create_async_http_client
-from pydantic_ai.settings import ModelSettings as _ModelSettings
 import json_repair
 
 from infra import logger
@@ -44,7 +43,7 @@ class JsonRepairOpenAIChatModel(OpenAIChatModel):
     async def request(
         self,
         messages: list[ModelMessage],
-        model_settings: _ModelSettings | None,
+        model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         response = await super().request(messages, model_settings, model_request_parameters)

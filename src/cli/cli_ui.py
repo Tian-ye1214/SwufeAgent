@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from agent_core.input_messages import UserMessage
-from cli.output import emit_text
+from cli.output import emit_renderable
 
 
 def print_startup_logo() -> None:
@@ -62,7 +62,7 @@ def print_startup_logo() -> None:
             ):
                 canvas[shadow_row][shadow_col] = (shadow_char, shadow_color)
 
-    emit_text("")
+    emit_renderable("")
     for row in canvas:
         line_text = ""
         for ch, color in row:
@@ -70,15 +70,15 @@ def print_startup_logo() -> None:
                 line_text += ch
             else:
                 line_text += color_text(color[0], color[1], color[2], ch)
-        emit_text(line_text)
+        emit_renderable(line_text)
 
     if unicode_safe:
         tagline = "❦ ────  红莲极意  ·  RedLotus Agent  ──── ❦"
     else:
         tagline = "<>----  RedLotus Agent  ----<>"
     pad = max(0, (max_width + shadow_offset_col - len(tagline)) // 2)
-    emit_text(" " * pad + color_text(255, 165, 90, tagline))
-    emit_text("")
+    emit_renderable(" " * pad + color_text(255, 165, 90, tagline))
+    emit_renderable("")
 
 
 def format_user_log_text(message: UserMessage) -> str:

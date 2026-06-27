@@ -49,28 +49,14 @@ class UsageTotals:
     responses: int = 0
     missing_usage_responses: int = 0
     input_tokens: int = 0
-    cache_write_tokens: int = 0
-    cache_read_tokens: int = 0
     output_tokens: int = 0
-    input_audio_tokens: int = 0
-    cache_audio_read_tokens: int = 0
-    output_audio_tokens: int = 0
-    prompt_cache_hit_tokens: int = 0
-    prompt_cache_miss_tokens: int = 0
     reasoning_tokens: int = 0
     prompt_billable_tokens: int = 0
     completion_billable_tokens: int = 0
 
     def add_usage(self, usage: Any, billable: BillableTokens) -> None:
         self.input_tokens += _int_attr(usage, "input_tokens")
-        self.cache_write_tokens += _int_attr(usage, "cache_write_tokens")
-        self.cache_read_tokens += _int_attr(usage, "cache_read_tokens")
         self.output_tokens += _int_attr(usage, "output_tokens")
-        self.input_audio_tokens += _int_attr(usage, "input_audio_tokens")
-        self.cache_audio_read_tokens += _int_attr(usage, "cache_audio_read_tokens")
-        self.output_audio_tokens += _int_attr(usage, "output_audio_tokens")
-        self.prompt_cache_hit_tokens += _detail_int(usage, "prompt_cache_hit_tokens")
-        self.prompt_cache_miss_tokens += _detail_int(usage, "prompt_cache_miss_tokens")
         self.reasoning_tokens += _detail_int(usage, "reasoning_tokens")
         self.prompt_billable_tokens += billable.prompt_tokens
         self.completion_billable_tokens += billable.completion_tokens

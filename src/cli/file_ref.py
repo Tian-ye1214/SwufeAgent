@@ -190,19 +190,12 @@ def load_file_refs(
         if suffix in _BINARY_SUFFIXES:
             results.append(FileRefResult(path=ref, ok=False, error="不支持引用二进制文件"))
             continue
-        if suffix and suffix not in _TEXT_SUFFIXES:
-            # 无后缀或未知后缀：尝试按文本读取，失败则报错
-            pass
-
         try:
             content = _read_text_safely(path)
         except PermissionError:
             results.append(FileRefResult(path=ref, ok=False, error="无权限读取文件"))
             continue
-        except OSError as e:
-            results.append(FileRefResult(path=ref, ok=False, error=str(e)))
-            continue
-        except ValueError as e:
+        except (OSError, ValueError) as e:
             results.append(FileRefResult(path=ref, ok=False, error=str(e)))
             continue
 

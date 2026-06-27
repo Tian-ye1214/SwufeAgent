@@ -34,7 +34,13 @@ COMMANDS: tuple[str, ...] = (
 
 EFFORT_VALUES: tuple[str, ...] = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
-CompletionKind = Literal["command", "agent_role", "effort_value", "file_path"]
+CompletionKind = Literal["command", "agent_role", "effort_value", "literal_choice", "file_path"]
+
+_SUBCOMMAND_CHOICES: dict[str, tuple[str, ...]] = {
+    "/ltm": ("show", "clear"),
+    "/stm": ("show", "clear"),
+    "/cancel": ("agent",),
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,7 @@ class InputCompletion:
     kind: CompletionKind
     prefix: str
     at_mode: bool = False
+    choices: tuple[str, ...] = ()
 
 
 def completion_for_input(text: str) -> InputCompletion | None:
@@ -70,6 +77,14 @@ def completion_for_input(text: str) -> InputCompletion | None:
     if text.startswith("/cd "):
         prefix = text.split(" ", 1)[1] if " " in text else ""
         return InputCompletion(kind="file_path", prefix=prefix)
+
+    for cmd, choices in _SUBCOMMAND_CHOICES.items():
+        if text.lower().startswith(cmd + " "):
+            parts = text.split()
+            prefix = parts[-1] if len(parts) > 1 else ""
+            if len(parts) == 2:
+                return InputCompletion(kind="literal_choice", prefix=prefix, choices=choices)
+            return None
 
     at_index = text.rfind("@")
     if at_index != -1:
@@ -102,3 +117,11 @@ def iter_effort_value_completions(prefix: str):
     for value in EFFORT_VALUES:
         if value.startswith(folded):
             yield value
+
+
+def iter_literal_choice_completions(prefix: str, choices: tuple[str, ...]):
+    """Yield fixed subcommand choices (e.g. show/clear) matching *prefix*."""
+    folded = prefix.lower()
+    for choice in choices:
+        if choice.startswith(folded):
+            yield choice

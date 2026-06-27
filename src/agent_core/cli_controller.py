@@ -85,14 +85,6 @@ class AgentCliController:
             force_picker=force_picker,
         )
 
-    @property
-    def queued_input_count(self) -> int:
-        return len(self._queued_inputs)
-
-    @property
-    def has_queued_input(self) -> bool:
-        return bool(self._queued_inputs)
-
     def new_session_state(self) -> CliSessionState:
         return CliSessionState(history=ChatHistory())
 

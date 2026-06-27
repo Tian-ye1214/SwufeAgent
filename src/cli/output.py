@@ -108,10 +108,6 @@ def emit_renderable(renderable: Any) -> None:
     _sink.emit(renderable)
 
 
-def emit_text(text: str) -> None:
-    _sink.emit(text)
-
-
 def emit_rule(title: str) -> None:
     _sink.rule(title)
 

@@ -22,8 +22,7 @@ from cli.output import (
 )
 from cli.diff_view import compute_line_diff, diff_stats, format_diff_text, render_diff
 
-_IS_WINDOWS = sys.platform == "win32"
-if _IS_WINDOWS:
+if sys.platform == "win32":
     for _s in (sys.stdout, sys.stderr):
         if hasattr(_s, "reconfigure"):
             try:
@@ -35,12 +34,6 @@ class OutputConsoleProxy:
     def print(self, *objects: Any, **_: Any) -> None:
         for obj in objects:
             emit_renderable(obj)
-
-    def rule(self, title: str = "", **_: Any) -> None:
-        emit_rule(title)
-
-    def status(self, message: str, **_: Any):
-        return status_message(message)
 
 
 console = OutputConsoleProxy()

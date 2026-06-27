@@ -10,7 +10,7 @@ from typing import Any
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from config.app_config import settings
-from infra.persist_utils import atomic_write_json, iso_utc_now, safe_name
+from infra.persist_utils import atomic_write_json, iso_utc_now, safe_segment
 from infra import logger
 from workspace.workspace import (
     MODEL_MESSAGES_SUFFIX,
@@ -20,11 +20,6 @@ from workspace.workspace import (
 )
 
 _PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
-
-
-def _safe_segment(s: str, max_len: int = 80) -> str:
-    s = (s or "").strip().replace("\n", " ")
-    return safe_name(s, extra="_-.", max_len=max_len, fallback="default")
 
 
 def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:
@@ -74,10 +69,10 @@ class ConversationLog:
         sub_id: str | None = None,
         existing_run_base: Path | None = None,
     ) -> None:
-        self._name = _safe_segment(name, 40)
-        self._date = _safe_segment(date or "", 16)
-        self._topic = _safe_segment(topic or "", 80)
-        self._sub_id = _safe_segment(sub_id, 60) if sub_id else None
+        self._name = safe_segment(name, 40)
+        self._date = safe_segment(date or "", 16)
+        self._topic = safe_segment(topic or "", 80)
+        self._sub_id = safe_segment(sub_id, 60) if sub_id else None
         self._root = conversations_root()
         self._run_base: Path | None = existing_run_base
         self._init_lock = threading.Lock()
@@ -244,9 +239,9 @@ class SessionConversationLogs:
         """绑定本次任务的日期与主题；在 reset() 之前重复调用无效。首次绑定后触发 on_activate。"""
         if self._date is not None:
             return
-        self._date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
-        self._topic = _safe_segment((topic_hint.strip() or "default")[:200], 80)
-        self._session_id = _safe_segment(datetime.now().strftime("%H%M%S%f"), 16)
+        self._date = safe_segment(datetime.now().strftime("%Y%m%d"), 16)
+        self._topic = safe_segment((topic_hint.strip() or "default")[:200], 80)
+        self._session_id = safe_segment(datetime.now().strftime("%H%M%S%f"), 16)
         if self._on_activate:
             self._on_activate(self._date, self._topic)
 
@@ -262,18 +257,18 @@ class SessionConversationLogs:
         """将会话日志绑定到 /load 的原始快照文件，后续保存继续覆盖该文件。"""
         p = Path(load_path)
         base = snapshot_base_from_loadable(p)
-        date = _safe_segment(str(meta.get("date") or ""), 16)
-        topic = _safe_segment(str(meta.get("topic") or ""), 80)
+        date = safe_segment(str(meta.get("date") or ""), 16)
+        topic = safe_segment(str(meta.get("topic") or ""), 80)
         if not date:
-            date = _safe_segment(datetime.now().strftime("%Y%m%d"), 16)
+            date = safe_segment(datetime.now().strftime("%Y%m%d"), 16)
         if not topic:
-            topic = _safe_segment(base.name, 80)
+            topic = safe_segment(base.name, 80)
         self._date = date
         self._topic = topic
         self._logs.clear()
-        key = _safe_segment(agent_name, 40)
+        key = safe_segment(agent_name, 40)
         instance_raw = meta.get("session_id") or meta.get("sub_id")
-        instance_id = _safe_segment(str(instance_raw), 60) if instance_raw else None
+        instance_id = safe_segment(str(instance_raw), 60) if instance_raw else None
         self._session_id = instance_id
         self._logs[key] = ConversationLog(
             key,
@@ -291,7 +286,7 @@ class SessionConversationLogs:
         return None
 
     def for_agent(self, name: str) -> ConversationLog:
-        key = _safe_segment(name, 40)
+        key = safe_segment(name, 40)
         if key not in self._logs:
             self._logs[key] = ConversationLog(
                 key,
