@@ -29,37 +29,38 @@
 **Python 3.12+** · Windows / Linux / macOS 均可
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
-pip install -U pip && pip install -e ".[dev]"
-playwright install chromium     # 要用浏览器 Skill 时再装
+pip install redlotus                 # 核心
+pip install "redlotus[browser]"      # 浏览器 Skill（装后再 playwright install chromium）
+pip install "redlotus[bots]"         # QQ / 微信 机器人
 ```
 
-在 `src/config.json` 里填好 `BASE_URL`、`API_KEY` 和各角色模型；或在项目根放 `.env` 覆盖同名项。RAG 用 `RAG_models`，数据默认落在 `data/`。
+首次运行会在**用户配置目录**生成 `config.json`（Windows：`%LOCALAPPDATA%\RedLotus`；Linux：`~/.config/RedLotus`）。在其中填好 `BASE_URL`、`API_KEY`、`RAG_models` 与各角色模型；也可用环境变量或就近的 `.env` 覆盖同名项。日志 / 向量库（RAG）/ 长期记忆落在**用户数据目录**；Agent 工作产物 `WorkDatabase/` 与会话快照 `.redlotus/` 落在你**启动时的当前目录**。
 
 ```bash
-python main.py                  # 终端见真章
+redlotus                        # 终端见真章
 ```
 
 想让它在群里说话：
 
 ```bash
-cd src && python -m API.QQ      # 需配置 QQBOT 等环境变量
-cd src && python -m API.WeChat   # 扫码登录
+python -m redlotus.API.QQ       # 需配置 QQBOT 等环境变量
+python -m redlotus.API.WeChat   # 扫码登录
 ```
 
-QQ 机器人前置：先装好并运行 [NapCat](https://github.com/NapNeko/NapCatQQ)（提供 OneBot WebSocket 接口）。配置文件 `config.yaml` 须放在 `src/API/` 下（已随仓库附带模板），其中填好 `bt_uin`（机器人 QQ 号，也可用环境变量 `QQBOT_ID` 覆盖）与 `napcat.webui_token`（需为强密码：至少 12 位且含数字、大小写字母与特殊符号）。配置缺失或无效时启动会直接报错退出，不会静默卡住。
+QQ 机器人前置：先装好并运行 [NapCat](https://github.com/NapNeko/NapCatQQ)（提供 OneBot WebSocket 接口）。首次会在用户配置目录从随包模板生成 `config.yaml`，在其中填好 `bt_uin`（机器人 QQ 号，也可用环境变量 `QQBOT_ID` 覆盖）与 `napcat.webui_token`（需为强密码：至少 12 位且含数字、大小写字母与特殊符号）。配置缺失或无效时启动会直接报错退出，不会静默卡住。
 
 ---
 
 ## 给折腾的人
 
 ```bash
+pip install -e ".[dev]"         # 开发安装（仓库根；之后 redlotus 命令直连源码）
+python main.py                  # 等价于 redlotus，便于断点调试
 pytest tests/ -q                # 冒烟
-pyinstaller build.spec          # 打成可执行目录（可选）
+pip install ".[build]" && pyinstaller build.spec   # 打成可执行目录（可选）
 ```
 
-代码在 `src/`，入口 `main.py`，配置 `src/config.json`。
+代码在 `src/redlotus/`，命令入口 `redlotus`（= `redlotus.agent_core.entrypoint:main`）。随包默认配置 `src/redlotus/config.json` 仅作首次 seed 用，运行时实际读写**用户配置目录**里的 `config.json`。
 
 ---
 

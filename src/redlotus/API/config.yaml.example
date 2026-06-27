@@ -1,0 +1,25 @@
+root: '123456'
+bt_uin: '123456'                 # 必填：机器人 QQ 号（也可用环境变量 QQBOT_ID 覆盖）
+enable_webui_interaction: false
+debug: true
+github_proxy: null
+check_ncatbot_update: true
+skip_ncatbot_install_check: false
+websocket_timeout: 15
+napcat:
+  ws_uri: ws://localhost:3001
+  ws_token: NcatBot
+  ws_listen_ip: localhost
+  webui_uri: http://localhost:6099
+  webui_token: CHANGE_ME_strong_token   # 必填：至少 12 位，含数字、大小写字母与特殊符号
+  enable_webui: true
+  check_napcat_update: false
+  stop_napcat: false
+  remote_mode: true
+  report_self_message: false
+  report_forward_message_detail: true
+plugin:
+  plugins_dir: plugins
+  plugin_whitelist: []
+  plugin_blacklist: []
+  skip_plugin_load: false

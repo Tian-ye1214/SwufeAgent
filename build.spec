@@ -14,7 +14,7 @@ a = Analysis(
     pathex=[project, os.path.join(project, "src")],
     binaries=[],
     datas=[
-        (os.path.join(project, "src"), "src"),
+        (os.path.join(project, "src", "redlotus"), "redlotus"),
         *copy_metadata("genai_prices"),
         *copy_metadata("pydantic_ai_slim"),
     ],
