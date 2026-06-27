@@ -22,6 +22,7 @@ COMMANDS: tuple[str, ...] = (
     "/cd",
     "/skills",
     "/agent",
+    "/effort",
     "/api",
     "/compress",
     "/cancel",
@@ -31,7 +32,9 @@ COMMANDS: tuple[str, ...] = (
     "/tasks",
 )
 
-CompletionKind = Literal["command", "agent_role", "file_path"]
+EFFORT_VALUES: tuple[str, ...] = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+CompletionKind = Literal["command", "agent_role", "effort_value", "file_path"]
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,15 @@ def completion_for_input(text: str) -> InputCompletion | None:
         prefix = parts[-1] if len(parts) > 1 else ""
         if len(parts) == 2:
             return InputCompletion(kind="agent_role", prefix=prefix)
+        return None
+
+    if text.startswith("/effort "):
+        parts = text.split()
+        prefix = parts[-1] if len(parts) > 1 else ""
+        if len(parts) == 2:
+            return InputCompletion(kind="agent_role", prefix=prefix)
+        if len(parts) == 3:
+            return InputCompletion(kind="effort_value", prefix=prefix)
         return None
 
     if text.startswith("/cd "):
@@ -82,3 +94,11 @@ def iter_agent_role_completions(prefix: str):
     for role in get_agent_roles():
         if role.startswith(prefix):
             yield role
+
+
+def iter_effort_value_completions(prefix: str):
+    """Yield thinking on/off + effort-level values matching *prefix*."""
+    folded = prefix.lower()
+    for value in EFFORT_VALUES:
+        if value.startswith(folded):
+            yield value

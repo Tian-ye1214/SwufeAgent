@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config.app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name
+from config.app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name, set_thinking
 from runtime.lifecycle import AgentInvocationState
 from runtime.runtime_state import TRACE_STORE
 from ModelGateway.ModelChecker import (
@@ -36,6 +36,7 @@ from workspace.workspace import WorkspaceSnapshot, conversations_root
 from workspace.workspace_load import enter_workspace
 from cli.render import console, print_error, print_markdown, print_markdown_panel, print_panel, print_success, print_warning
 from cli.panel import build_panel_snapshot, render_panel
+from cli.completion import EFFORT_VALUES
 from infra import logger
 
 
@@ -108,6 +109,7 @@ def print_cli_help() -> None:
 | `/LTM show` / `/LTM clear` | 查看或清空长期记忆 |
 | `/STM show` / `/STM clear` | 查看或清空短期 RAG 记忆 |
 | `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
+| `/effort` | 查看或调整各角色思考：`/effort <role> off｜minimal｜low｜medium｜high｜xhigh｜max` |
 | `/api` | 修改 BASE_URL 与 API_KEY |
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` | Agent 生命周期与 invocation |
@@ -140,6 +142,19 @@ def print_agent_models() -> None:
             lines.append(f"  {meta_line}")
         lines.append("")
     print_panel("\n".join(lines), title="Agent 模型")
+
+
+def print_effort_settings() -> None:
+    lines = ["当前思考配置（config.json）", ""]
+    for role in get_agent_roles():
+        _, p = get_model_and_params(role)
+        effort = p.get("reasoning_effort")
+        if str(p.get("thinking")).strip().lower() == "enabled" and effort:
+            state = f"on · {effort}"
+        else:
+            state = "off"
+        lines.append(f"• {role}: {state}")
+    print_panel("\n".join(lines), title="思考配置")
 
 
 def interactive_set_api() -> None:
@@ -681,6 +696,34 @@ async def _cmd_agent(ctx: SlashCommandContext) -> bool | None:
     return None
 
 
+async def _cmd_effort(ctx: SlashCommandContext) -> bool | None:
+    roles = get_agent_roles()
+    role_text = "|".join(roles)
+    value_text = "|".join(EFFORT_VALUES)
+    if len(ctx.parts) == 1:
+        print_effort_settings()
+        _out(f"设置思考: /effort <{role_text}> <{value_text}>")
+        return None
+    if len(ctx.parts) < 3:
+        print_error(f"用法: /effort <{role_text}> <{value_text}>")
+        return None
+    role = ctx.parts[1].lower()
+    value = ctx.parts[2].strip().lower()
+    if role not in roles:
+        print_error(f"未知角色: {role}（可选: {role_text}）")
+        return None
+    if value not in EFFORT_VALUES:
+        print_error(f"非法取值: {value}（可选: {value_text}）")
+        return None
+    if value == "off":
+        set_thinking(role, "disabled")
+        print_success(f"已关闭 [{role}] 思考（已写入 config.json）")
+    else:
+        set_thinking(role, "enabled", value)
+        print_success(f"已设置 [{role}] 思考为 on · {value}（已写入 config.json）")
+    return None
+
+
 async def _cmd_api(ctx: SlashCommandContext) -> bool | None:
     interactive_set_api()
     return None
@@ -753,6 +796,7 @@ SLASH_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "/ltm": _cmd_ltm,
     "/stm": _cmd_stm,
     "/agent": _cmd_agent,
+    "/effort": _cmd_effort,
     "/api": _cmd_api,
     "/load": _cmd_load,
     "/compress": _cmd_compress,

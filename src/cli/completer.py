@@ -10,6 +10,7 @@ from cli.completion import (
     completion_for_input,
     iter_agent_role_completions,
     iter_command_completions,
+    iter_effort_value_completions,
 )
 from infra.path_sandbox import runtime_repo_root
 
@@ -34,6 +35,11 @@ class AgentCompleter(Completer):
         if ctx.kind == "agent_role":
             for role in iter_agent_role_completions(ctx.prefix):
                 yield Completion(role, start_position=-len(ctx.prefix), display_meta="role")
+            return
+
+        if ctx.kind == "effort_value":
+            for value in iter_effort_value_completions(ctx.prefix):
+                yield Completion(value, start_position=-len(ctx.prefix), display_meta="effort")
             return
 
         if ctx.kind == "file_path":

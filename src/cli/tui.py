@@ -24,6 +24,7 @@ from cli.completion import (
     completion_for_input,
     iter_agent_role_completions,
     iter_command_completions,
+    iter_effort_value_completions,
 )
 from cli.output import ContextUsageItem, OutputSink, set_output_sink
 from cli.panel import PanelSnapshotCache, build_panel_snapshot, render_panel
@@ -68,6 +69,11 @@ class AgentInputSuggester(Suggester):
             for role in iter_agent_role_completions(ctx.prefix):
                 if role != ctx.prefix:
                     return value[: -len(ctx.prefix)] + role if ctx.prefix else value + role
+            return None
+        if ctx.kind == "effort_value":
+            for effort in iter_effort_value_completions(ctx.prefix):
+                if effort != ctx.prefix:
+                    return value[: -len(ctx.prefix)] + effort if ctx.prefix else value + effort
             return None
         if ctx.kind == "file_path":
             return _complete_path_value(value, ctx.prefix)

@@ -183,6 +183,14 @@ def set_model_name(role: str, model_name: str) -> None:
     save_config(cfg)
 
 
+def set_thinking(role: str, thinking: str, reasoning_effort: str | None = None) -> None:
+    cfg = settings()
+    cfg["models"][role]["thinking"] = thinking
+    if reasoning_effort is not None:
+        cfg["models"][role]["reasoning_effort"] = reasoning_effort
+    save_config(cfg)
+
+
 def set_api(base_url: str | None = None, api_key: str | None = None) -> None:
     cfg = settings()
     if base_url is not None:
