@@ -1,0 +1,17 @@
+include README.md
+include src/redlotus/config.json
+
+recursive-include src/redlotus/prompts *.md
+exclude src/redlotus/prompts/LongTermMemory/SOUL.md
+exclude src/redlotus/prompts/LongTermMemory/USER.md
+
+graft src/redlotus/skills
+
+include src/redlotus/API/config.yaml.example
+
+global-exclude *.py[cod]
+global-exclude __pycache__
+global-exclude *.log
+global-exclude *.log.*
+exclude src/redlotus/API/config.yaml
+recursive-exclude src/redlotus/skills __pycache__
