@@ -1,0 +1,3134 @@
+meta:
+  id: finance-bp-109-v5.3
+  version: v6.1
+  blueprint_id: finance-bp-109
+  sop_version: crystal-compilation-v6.1
+  source_language: en
+  compiled_at: '2026-04-22T13:00:52.305302+00:00'
+  target_host: openclaw
+  authoritative_artifact:
+    primary: seed.yaml
+    non_authoritative_derivatives:
+    - SKILL.md (host-generated summary, may lag)
+    - HEARTBEAT.md (host telemetry)
+    - memory/*.md (host conversational memory)
+    rule: On any behavioral decision (preconditions check, OV assertion, EQ rule firing, spec_lock verification), agents MUST
+      re-read seed.yaml. Derivatives are for UI display only and may be out-of-date.
+  execution_protocol:
+    install_trigger:
+    - Execute resources.host_adapter.install_recipes[] in declared order
+    - Verify each package with import check before proceeding
+    execute_trigger: When user intent matches intent_router.uc_entries[].positive_terms AND user uses action verb (run/execute/跑/执行/backtest/fetch/collect)
+    on_execute:
+    - Reload seed.yaml (do not rely on SKILL.md or cached summaries)
+    - Run preconditions[] in declared order; halt on first fatal failure with on_fail message to user
+    - Enter context_state_machine.CA1_MEMORY_CHECKED state
+    - Evaluate evidence_quality.enforcement_rules[]; prepend user_disclosure_template
+    - Translate user_facing_fields to user locale per locale_contract
+    - "[V6 READING ORDER]\nThis crystal contains the following V6 layers. Before answering any business question, the host\
+      \ MUST read them in order:\n  1. anti_patterns[] — cross-project anti-patterns (with AP-* ids)\n  2. cross_project_wisdom[]\
+      \ — cross-project wisdom (with CW-* ids)\n  3. domain_constraints_injected[] — domain constraints (SHARED-* ids)\n \
+      \ 4. known_use_cases[] — concrete business scenarios (KUC-* ids)\n  5. component_capability_map — AST component map\
+      \ (by module)\n\nWhen answering user questions, proactively cite relevant AP-*/CW-*/SHARED-*/KUC-* ids with source text.\
+      \ Examples: T+1 rules -> cite SHARED-* constraint; model comparison -> warn via AP-*; follow-holdings strategy -> cite\
+      \ KUC-* with example file."
+    workspace_resolution:
+      scripts_path: '{host_workspace}/scripts/'
+      skills_path: '{host_workspace}/skills/'
+      trace_path: '{host_workspace}/.trace/'
+  capability_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  upgraded_from: finance-bp-109-v1.seed.yaml
+  upgraded_at: '2026-04-22T13:20:29.426886+00:00'
+  v6_inputs:
+    ast_mind_map: knowledge/sources/finance/finance-bp-109--ta-lib-python/v6_inputs/ast_mind_map.yaml
+    anti_patterns: null
+    cross_project_wisdom: null
+    examples_kuc: knowledge/sources/finance/finance-bp-109--ta-lib-python/v6_inputs/examples_kuc.yaml
+    shared_pools_dir: knowledge/sources/finance/_shared
+anti_patterns:
+- id: AP-TECHNICAL-ANALYSIS-001
+  title: C FFI Type Mismatch with Non-float64 Arrays
+  description: Passing non-float64 (NPY_DOUBLE) numpy arrays to TA-Lib C functions causes memory corruption or silent incorrect
+    calculations. The C FFI layer expects precisely float64 precision, and type mismatches propagate undetected, producing
+    wrong indicator values that may silently corrupt trading strategies. Root cause is not validating array dtype before the
+    C function call.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-002
+  title: Multidimensional Array Memory Access Violations
+  description: Passing multidimensional numpy arrays to TA-Lib C functions causes segmentation faults and memory access violations
+    due to incorrect stride calculations. The C layer assumes contiguous 1-dimensional memory layouts, and higher-dimensional
+    inputs break its internal pointer arithmetic, leading to crashes or silent memory corruption.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-003
+  title: Ignoring TA_RetCode Error Status from C Calls
+  description: When TA-Lib C functions return non-zero TA_RetCode values (indicating errors like uninitialized library, invalid
+    parameters, or out-of-range inputs), ignoring these codes silently propagates invalid computation results. This leads
+    to incorrect technical indicator values feeding into trading strategies without any warning, potentially causing significant
+    financial loss.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-004
+  title: Mismatched Array Lengths in Multi-Input Functions
+  description: When calculating indicators that require multiple input arrays (e.g., open, high, low, close, volume), providing
+    arrays of different lengths causes out-of-bounds memory access. TA-Lib iterates assuming identical sizes, and length mismatches
+    produce garbage values or segmentation faults, corrupting the entire indicator output.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-005
+  title: Time-Series Index Reindexing Breaks Alignment
+  description: Reindexing or resetting the DataFrame/Series index after computing technical indicators breaks temporal alignment
+    with original price data and other features. This causes look-ahead bias, shifts indicator values to incorrect timestamps,
+    and corrupts time-series datasets when used in backtesting or feature engineering pipelines.
+  project_source: finance-bp-122--ta-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-006
+  title: NaN/Inf/Zero Propagation Corrupts Indicator Values
+  description: Failing to clean input data of NaN, infinite values, or zero prices causes cascading corruption through rolling
+    window calculations. Division-by-zero errors on zero prices produce NaN that propagates into all subsequent indicator
+    values, corrupting entire datasets. Invalid values also cause incorrect boolean mask classifications when compared with
+    np.inf directly.
+  project_source: finance-bp-122--ta-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-007
+  title: EMA Smoothing Parameter Divergence from TA Standards
+  description: Using pandas adjust=True (the default) for ewm() when implementing EMA-based indicators produces Yahoo Finance
+    variant smoothing instead of standard recursive exponential smoothing per technical analysis textbooks. This causes different
+    signal thresholds and divergence from widely-accepted indicator calculations, leading to inconsistent trading signals.
+  project_source: finance-bp-122--ta-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-008
+  title: 'False Claims: Indicator Calculation as Trading Signal'
+  description: Presenting technical indicator values as real-time trading signals or guaranteed future performance misleads
+    users about the tool's capabilities. The library calculates historical indicators from OHLCV data; claiming these as trading
+    signals leads to improper trading decisions. Backtest results also do not guarantee future performance due to look-ahead
+    bias and market regime changes.
+  project_source: finance-bp-122--ta-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-009
+  title: Functional vs OOP API Implementation Divergence
+  description: When both functional wrappers (e.g., rsi()) and OOP classes (e.g., RSIIndicator) are provided, diverging implementations
+    produce different indicator values for the same inputs. This causes confusion, test failures, and breaks user code that
+    expects consistent behavior across APIs. The functional wrapper must delegate to the class implementation to ensure equivalence.
+  project_source: finance-bp-122--ta-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-010
+  title: Bollinger Bands Using Sample Std Deviation
+  description: Using pandas default ddof=1 (sample standard deviation) for Bollinger Bands produces wider bands than John
+    Bollinger's original specification, which uses population standard deviation. This causes overestimation of volatility,
+    incorrect trading signal thresholds, and divergence from the canonical indicator calculation that traders expect.
+  project_source: finance-bp-122--ta-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-011
+  title: Stale Cached Outputs Without Invalidation
+  description: Caching computed indicator outputs without invalidating when inputs, parameters, or input_names change causes
+    stale results to be returned even when underlying data has changed. This produces incorrect indicator values that silently
+    propagate into trading strategies, leading to wrong signals based on outdated calculations.
+  project_source: finance-bp-109--ta-lib-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-012
+  title: Concurrent Access Without Thread-Local State
+  description: Using shared Function instances across multiple threads without thread-local storage causes race conditions
+    where concurrent threads share state. This leads to data corruption, incorrect results, and non-deterministic indicator
+    values when multiple threads compute indicators simultaneously on the same instance.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-013
+  title: Using Python Lists Instead of NumPy Arrays for Stream Functions
+  description: Stream functions require numpy.ndarray inputs due to direct C API access via PyArray_TYPE() and PyArray_FLAGS().
+    Passing plain Python lists or other sequences causes runtime errors because the C layer cannot access the underlying C
+    arrays. This breaks real-time indicator calculations that expect efficient numpy buffer access.
+  project_source: finance-bp-109--ta-lib-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-014
+  title: Library Not Initialized Before C Function Calls
+  description: Calling TA-Lib C functions without prior library initialization returns TA_RetCode=1 (TA_LIB_NOT_INITIALIZE),
+    causing all function calls to fail. This is a silent failure mode that produces no output indicators, breaking batch calculation
+    pipelines unless the initialization step is explicitly performed before any function calls.
+  project_source: finance-bp-109--ta-lib-python
+  severity: high
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+- id: AP-TECHNICAL-ANALYSIS-015
+  title: Stateful Wrapper Functions Leak State Across Calls
+  description: When functional wrapper functions retain internal state between calls, different input series contaminate each
+    other's results through data leakage. This produces incorrect indicator values when the same wrapper function is called
+    sequentially with different data, as cached state from previous calls affects new computations.
+  project_source: finance-bp-122--ta-python
+  severity: medium
+  applicable_to_tags:
+    markets:
+    - multi-market
+    activities:
+    - technical-analysis
+  _source_file: anti-patterns/technical-analysis.yaml
+cross_project_wisdom:
+- wisdom_id: CW-TECHNICAL-ANALYSIS-001
+  source_project: finance-bp-109--ta-lib-python, finance-bp-122--ta-python
+  pattern_name: Explicit Input Validation Before Computation
+  description: 'Both projects require rigorous pre-computation validation: dtype checking (float64 for C FFI, numeric for
+    pandas), dimension checking (1D arrays for C layer), and length validation. This defensive pattern prevents silent failures
+    and memory corruption. Apply this pattern whenever interfacing with external C libraries or computing indicators on potentially
+    malformed input data.'
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-002
+  source_project: finance-bp-109--ta-lib-python, finance-bp-122--ta-python
+  pattern_name: Index Preservation Throughout Indicator Pipeline
+  description: Preserving the original DataFrame/Series index without reindexing or reset is critical for temporal alignment.
+    When constructing output Series, use index=self._close.index to maintain alignment with price data. This prevents look-ahead
+    bias and ensures downstream features correctly reference their corresponding timestamps.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-003
+  source_project: finance-bp-122--ta-python
+  pattern_name: Data Cleaning Before Indicator Computation
+  description: Indicators like RSI, MACD, and Bollinger Bands produce incorrect results when fed NaN, inf, or zero values.
+    Remove rows with zero prices (to prevent division-by-zero), filter out infinite values using the exp(709) threshold as
+    the maximum float64, and apply dropna to DataFrames before passing to indicator functions. This ensures clean propagation
+    through rolling window calculations.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-004
+  source_project: finance-bp-109--ta-lib-python
+  pattern_name: Error Code Propagation from C to Python Layer
+  description: Always call _ta_check_success and raise exceptions on non-zero TA_RetCode return values from C function calls.
+    This pattern ensures that errors like uninitialized library, invalid parameters, or out-of-range inputs propagate as proper
+    Python exceptions instead of silently producing garbage values. Never ignore return codes from the underlying C library.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-005
+  source_project: finance-bp-109--ta-lib-python
+  pattern_name: Thread-Local Storage for Concurrent Indicator Access
+  description: When the same Function instance may be accessed from multiple threads, use thread-local storage to maintain
+    isolated state per thread. This prevents race conditions, state corruption, and non-deterministic results when concurrent
+    threads compute indicators simultaneously. The pattern is essential for any multi-threaded trading system or async processing
+    pipeline.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-006
+  source_project: finance-bp-122--ta-python
+  pattern_name: Functional Wrapper Delegates to OOP Implementation
+  description: Functional wrapper functions like rsi() and ema_indicator() should instantiate the corresponding Indicator
+    class and call its result method, not reimplement logic. This ensures OOP and functional APIs produce identical outputs.
+    Any divergence causes test failures and breaks user code that switches between API styles. Validate equivalence in test
+    suites.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-007
+  source_project: finance-bp-122--ta-python
+  pattern_name: Standard TA Textbook Parameters for EMA Calculations
+  description: When implementing EMA-based indicators, use adjust=False in pandas ewm() to match standard recursive exponential
+    smoothing from technical analysis textbooks, not the Yahoo Finance variant. Also use ddof=0 for Bollinger Bands standard
+    deviation per the original specification. Deviations produce different signal thresholds that diverge from what traders
+    expect.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-008
+  source_project: finance-bp-109--ta-lib-python
+  pattern_name: Cache Invalidation on Any Input Change
+  description: Set outputs_valid flag to False whenever inputs, parameters, or input_names change. This pattern prevents returning
+    stale cached outputs when underlying data or parameters have been modified. Implement proper cache invalidation to ensure
+    computed indicators always reflect the current state.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+- wisdom_id: CW-TECHNICAL-ANALYSIS-009
+  source_project: finance-bp-109--ta-lib-python, finance-bp-122--ta-python
+  pattern_name: Library Initialization Before First Use
+  description: Explicitly initialize the TA-Lib C library before any function calls. Without initialization, all function
+    calls fail with TA_RetCode=1 (TA_LIB_NOT_INITIALIZE). This is a critical setup step that must be performed once before
+    the indicator computation pipeline begins, typically at application startup or when first loading the library.
+  applicable_to_activity: technical-analysis
+  _source_file: cross-project-wisdom/technical-analysis.yaml
+domain_constraints_injected: []
+resources_injected: {}
+known_use_cases:
+- kuc_id: KUC-101
+  source_file: docs/generate_html_pages.py
+  business_problem: Converts TA-Lib markdown documentation into styled HTML pages for web publishing, and generates Pygments
+    syntax highlighting CSS for code examples in documentation.
+  intent_keywords:
+  - documentation generation
+  - html pages
+  - pygments stylesheet
+  - markdown to html
+  - code highlighting
+  stage: reporting
+  data_domain: mixed
+  type: reporting
+component_capability_map:
+  project: finance-bp-109--ta-lib-python
+  scan_date: '2026-04-22'
+  stats:
+    total_files: 6
+    total_classes: 23
+    total_functions: 0
+    total_stages: 6
+  modules:
+    c_library_binding_layer:
+      class_count: 2
+      stage_id: c_wrapper
+      stage_order: 1
+      responsibility: 'Provides low-level Cython bindings to the underlying TA-Lib C library with function signatures auto-generated
+        from ta_func.h header files. WHY: Avoids SWIG overhead for 2-4x performance improvement over original Python bindings.'
+      classes:
+      - name: TA_RetCode enum access
+        file: c_library_binding_layer/ta-retcode-enum-access.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Array validation
+        file: c_library_binding_layer/array-validation.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 4
+    function_api_(batch):
+      class_count: 4
+      stage_id: func_api
+      stage_order: 2
+      responsibility: 'Provides stateless, direct function calls for batch processing entire indicator over input arrays.
+        WHY: Simple API for一次性 computation without state management, suitable for backtesting and batch analysis.'
+      classes:
+      - name: SMA.compute
+        file: function_api_(batch)/sma-compute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: BBANDS.compute
+        file: function_api_(batch)/bbands-compute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: ADX.compute
+        file: function_api_(batch)/adx-compute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Lookback padding
+        file: function_api_(batch)/lookback-padding.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 4
+    stream_api_(incremental):
+      class_count: 4
+      stage_id: stream_api
+      stage_order: 3
+      responsibility: 'Provides streaming functions that return single scalar values for real-time/online computation. WHY:
+        For live trading systems where data arrives incrementally and only latest indicator value matters.'
+      classes:
+      - name: stream_MOM.execute
+        file: stream_api_(incremental)/stream-mom-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: stream_CDL3BLACKCROWS.execute
+        file: stream_api_(incremental)/stream-cdl3blackcrows-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: stream_SMA.execute
+        file: stream_api_(incremental)/stream-sma-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Streaming state
+        file: stream_api_(incremental)/streaming-state.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 3
+    abstract_api_(stateful):
+      class_count: 7
+      stage_id: abstract_api
+      stage_order: 4
+      responsibility: 'Object-oriented wrapper providing stateful Function instances with unified interface for setting inputs,
+        parameters, and retrieving results. WHY: Simplifies complex functions like STOCH with multiple inputs/outputs and
+        enables reusable function instances with caching.'
+      classes:
+      - name: Function.__call__
+        file: abstract_api_(stateful)/function-call.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Function.set_input_arrays
+        file: abstract_api_(stateful)/function-set-input-arrays.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: SMA.invoke
+        file: abstract_api_(stateful)/sma-invoke.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: BBANDS.invoke
+        file: abstract_api_(stateful)/bbands-invoke.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: STOCH.invoke
+        file: abstract_api_(stateful)/stoch-invoke.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Input data type
+        file: abstract_api_(stateful)/input-data-type.py
+        line: 0
+        kind: replaceable_point
+      - name: Input price series
+        file: abstract_api_(stateful)/input-price-series.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 6
+    series_support_layer:
+      class_count: 2
+      stage_id: series_wrapper
+      stage_order: 5
+      responsibility: 'Wraps each public functions to accept pandas/polars Series and return matching types. WHY: Users prefer
+        working with labeled Series/DataFrames for financial data; automatic conversion improves usability without sacrificing
+        performance.'
+      classes:
+      - name: _wrapper.decorate
+        file: series_support_layer/wrapper-decorate.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Series type detection
+        file: series_support_layer/series-type-detection.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 4
+    code_generation:
+      class_count: 4
+      stage_id: code_generation
+      stage_order: 6
+      responsibility: 'Generates Cython code for _func.pxi and _stream.pxi from ta_func.h header file. WHY: 150+ functions;
+        manual maintenance would be error-prone and tedious; ensures consistency with upstream TA-Lib changes.'
+      classes:
+      - name: generate_func.execute
+        file: code_generation/generate-func-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: generate_stream.execute
+        file: code_generation/generate-stream-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: generate_abstract_stub.execute
+        file: code_generation/generate-abstract-stub-execute.py
+        line: 0
+        kind: required_method
+        signature: ''
+      - name: Name transformation rules
+        file: code_generation/name-transformation-rules.py
+        line: 0
+        kind: replaceable_point
+      design_decision_count: 4
+  data_flow_hints: []
+locale_contract:
+  source_language: en
+  user_facing_fields:
+  - human_summary.what_i_can_do.tagline
+  - human_summary.what_i_can_do.use_cases[]
+  - human_summary.what_i_auto_fetch[]
+  - human_summary.what_i_ask_you[]
+  - evidence_quality.user_disclosure_template
+  - post_install_notice.message_template.positioning
+  - post_install_notice.message_template.capability_catalog.groups[].name
+  - post_install_notice.message_template.capability_catalog.groups[].description
+  - post_install_notice.message_template.capability_catalog.groups[].ucs[].name
+  - post_install_notice.message_template.capability_catalog.groups[].ucs[].short_description
+  - post_install_notice.message_template.call_to_action
+  - post_install_notice.message_template.featured_entries[].beginner_prompt
+  - post_install_notice.message_template.more_info_hint
+  - preconditions[].description
+  - preconditions[].on_fail
+  - intent_router.uc_entries[].name
+  - intent_router.uc_entries[].ambiguity_question
+  - architecture.pipeline
+  - architecture.stages[].narrative.does_what
+  - architecture.stages[].narrative.key_decisions
+  - architecture.stages[].narrative.common_pitfalls
+  - constraints.fatal[].consequence
+  - constraints.regular[].consequence
+  - output_validator.assertions[].failure_message
+  - acceptance.hard_gates[].on_fail
+  - skill_crystallization.action
+  locale_detection_order:
+  - explicit_user_declaration
+  - first_message_language
+  - system_locale
+  translation_enforcement:
+    trigger: on_first_user_message
+    action: Render user_facing_fields in detected locale, preserving all IDs (BD-/SL-/UC-/finance-C-) and code identifiers
+      verbatim
+    violation_code: LOCALE-01
+    violation_signal: User receives untranslated English Human Summary when detected locale != en
+evidence_quality:
+  declared:
+    evidence_coverage_ratio: 1.0
+    evidence_verify_ratio: 0.45054945054945056
+    evidence_invalid: 50
+    evidence_verified: 41
+    evidence_auto_fixed: 0
+    audit_coverage: 45/45 (100%)
+    audit_pass_rate: 0/45 (0%)
+    audit_fail_total: 35
+    audit_finance_universal:
+      pass: 0
+      warn: 5
+      fail: 15
+    audit_subdomain_totals:
+      pass: 0
+      warn: 5
+      fail: 20
+  enforcement_rules:
+  - id: EQ-01
+    trigger: declared.evidence_verify_ratio < 0.5
+    action: MUST invoke traceback lookup for all cited BD-IDs in output before emitting business code — read LATEST.yaml sections
+      for each BD referenced
+    violation_code: EQ-01-V
+    violation_signal: Generated script references BD-IDs but no tool_call to read LATEST.yaml preceded code generation
+  user_disclosure_template: '[QUALITY NOTICE] This crystal was compiled from blueprint finance-bp-109. Evidence verify ratio
+    = 45.1% and audit fail total = 35. Generated results may have uncaptured requirement gaps. Verify critical decisions against
+    source files (LATEST.yaml / LATEST.jsonl).'
+traceback:
+  source_files:
+    blueprint: LATEST.yaml
+    constraints: LATEST.jsonl
+  mandatory_lookup_scenarios:
+  - id: TB-01
+    condition: Two constraints have apparently conflicting enforcement rules
+    lookup_target: LATEST.jsonl — find both constraint IDs, compare `consequence` + `evidence_refs` to determine priority
+  - id: TB-02
+    condition: A business decision rationale is unclear or disputed
+    lookup_target: LATEST.yaml — locate BD-ID under business_decisions, read `rationale` + `alternative_considered` fields
+  - id: TB-03
+    condition: evidence_invalid > 0 in evidence_quality.declared
+    lookup_target: LATEST.yaml _enrich_meta — cross-check specific BD `evidence_refs` fields for invalid markers
+  - id: TB-04
+    condition: User asks where a rule comes from
+    lookup_target: LATEST.jsonl — find constraint by ID, read `confidence.evidence_refs` for source file + line number
+  - id: TB-05
+    condition: Generated code does not match expected ZVT API behavior
+    lookup_target: LATEST.yaml stages[].required_methods — verify method signature and evidence locator in source code
+  degraded_lookup:
+    no_fs_access: 'Ask the user to paste the relevant LATEST.yaml section or LATEST.jsonl lines for the BD-/finance-C- IDs
+      in question. Crystal ID: finance-bp-109-v5.0.'
+trace_schema:
+  event_types:
+  - precondition_check
+  - spec_lock_check
+  - evidence_rule_fired
+  - evidence_rule_skipped
+  - locale_translation_emitted
+  - hard_gate_passed
+  - hard_gate_failed
+  - skill_emitted
+  - false_completion_claim
+preconditions:
+- id: PC-01
+  description: zvt package installed and importable
+  check_command: python3 -c 'import zvt; print(zvt.__version__)'
+  on_fail: 'Run: python3 -m pip install zvt  then re-run: python3 -m zvt.init_dirs to initialize data directories'
+  severity: fatal
+- id: PC-02
+  description: K-data exists for target entities (required before backtesting)
+  check_command: python3 -c "from zvt.api.kdata import get_kdata; df = get_kdata(entity_ids=['stock_sh_600000'], limit=1);
+    assert df is not None and len(df) > 0, 'No kdata found'"
+  on_fail: 'Run recorder first: python3 -m zvt.recorders.em.em_stock_kdata_recorder --entity_ids stock_sh_600000  (replace
+    with your target entity IDs)'
+  severity: fatal
+  applies_to_uc:
+  - UC-101
+- id: PC-03
+  description: ZVT data directory initialized (~/.zvt or ZVT_HOME)
+  check_command: 'python3 -c "import os; from pathlib import Path; zvt_home = Path(os.environ.get(''ZVT_HOME'', Path.home()
+    / ''.zvt'')); assert zvt_home.exists(), f''ZVT home not found: {zvt_home}''"'
+  on_fail: 'Run: python3 -m zvt.init_dirs'
+  severity: fatal
+- id: PC-04
+  description: SQLite write permission for ZVT data directory
+  check_command: python3 -c "import os, tempfile; from pathlib import Path; zvt_home = Path(os.environ.get('ZVT_HOME', Path.home()
+    / '.zvt')); test_f = zvt_home / '.write_test'; test_f.touch(); test_f.unlink()"
+  on_fail: 'Check directory permissions: chmod u+w ~/.zvt  or set ZVT_HOME environment variable to a writable location'
+  severity: warn
+intent_router:
+  uc_entries:
+  - uc_id: UC-101
+    name: TA-Lib Documentation HTML Generator
+    positive_terms:
+    - documentation generation
+    - html pages
+    - pygments stylesheet
+    - markdown to html
+    - code highlighting
+    data_domain: mixed
+    negative_terms:
+    - trading strategy
+    - backtesting
+    - factor computation
+    - market data
+    - stock screening
+    - live trading
+    ambiguity_question: Are you looking to generate documentation/build pages, or are you trying to implement or analyze trading
+      strategies?
+context_state_machine:
+  states:
+  - id: CA1_MEMORY_CHECKED
+    entry: Task started
+    exit: All memory queries attempted and recorded; memory_unavailable set if failed
+    timeout: 30s — skip memory, mark memory_unavailable=true, proceed to CA2
+  - id: CA2_GAPS_FILLED
+    entry: CA1 complete
+    exit: 'All FATAL-priority required inputs answered: target market (A-share/HK/US), data source, time range, strategy type'
+    timeout: NOT skippable — FATAL inputs MUST be user-answered before proceeding
+  - id: CA3_PATH_SELECTED
+    entry: CA2 complete
+    exit: intent_router matched single use case with confidence gap > 20% over next candidate, no data_domain ambiguity
+    timeout: Trigger ambiguity_question for top-2 candidates, await user selection
+  - id: CA4_EXECUTING
+    entry: CA3 complete + user explicit confirmation received
+    exit: All hard gates G1-Gn passed and output files written
+    timeout: NOT skippable — user confirmation of execution path required
+  enforcement: Code generation is PROHIBITED before CA4_EXECUTING. Any regression to earlier state MUST be announced to user.
+    buy/sell ordering SL-01 check runs at CA4 entry.
+spec_lock_registry:
+  semantic_locks:
+  - id: SL-01
+    description: Execute sell orders before buy orders in every trading cycle
+    locked_value: sell() called before buy() in each Trader.run() iteration
+    violation_is: fatal
+    source_bd_ids:
+    - BD-018
+  - id: SL-02
+    description: Trading signals MUST use next-bar execution (no look-ahead)
+    locked_value: due_timestamp = happen_timestamp + level.to_second()
+    violation_is: fatal
+    source_bd_ids:
+    - BD-014
+    - BD-025
+  - id: SL-03
+    description: Entity IDs MUST follow format entity_type_exchange_code
+    locked_value: stock_sh_600000 | stockhk_hk_0700 | stockus_nasdaq_AAPL
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-04
+    description: DataFrame index MUST be MultiIndex (entity_id, timestamp)
+    locked_value: df.index.names == ['entity_id', 'timestamp']
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-05
+    description: 'TradingSignal MUST have EXACTLY ONE of: position_pct, order_money, order_amount'
+    locked_value: XOR enforcement in trading/__init__.py:68
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-06
+    description: 'filter_result column semantics: True=BUY, False=SELL, None/NaN=NO ACTION'
+    locked_value: factor.py:475 order_type_flag mapping
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-07
+    description: Transformer MUST run BEFORE Accumulator in factor pipeline
+    locked_value: 'compute_result(): transform at :403 before accumulator at :409'
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-08
+    description: 'MACD parameters locked: fast=12, slow=26, signal=9'
+    locked_value: factors/algorithm.py:30 macd(slow=26, fast=12, n=9)
+    violation_is: fatal
+    source_bd_ids:
+    - BD-036
+  - id: SL-09
+    description: 'Default transaction costs: buy_cost=0.001, sell_cost=0.001, slippage=0.001'
+    locked_value: sim_account.py:25 SimAccountService default costs
+    violation_is: warning
+    source_bd_ids:
+    - BD-029
+  - id: SL-10
+    description: A-share equity trading is T+1 (no same-day close of buy positions)
+    locked_value: sim_account.available_long filters by trading_t
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-11
+    description: Recorder subclass MUST define provider AND data_schema class attributes
+    locked_value: contract/recorder.py:71 Meta; register_schema decorator
+    violation_is: fatal
+    source_bd_ids: []
+  - id: SL-12
+    description: Factor result_df MUST contain either 'filter_result' OR 'score_result' column
+    locked_value: result_df.columns.intersection({'filter_result', 'score_result'}) non-empty
+    violation_is: fatal
+    source_bd_ids: []
+  implementation_hints:
+  - id: IH-01
+    hint: 'Use AdjustType enum exactly: qfq (pre-adjust), hfq (post-adjust), bfq (none) — contract/__init__.py:121'
+  - id: IH-02
+    hint: For A-share kdata, default to hfq for long-term analysis (dividend-adjusted) — trader.py:538 StockTrader
+  - id: IH-03
+    hint: SQLite connection MUST use check_same_thread=False for multi-threaded recorders
+  - id: IH-04
+    hint: Accumulator state serialization uses JSON with custom encoder/decoder hooks — contract/base_service.py
+  - id: IH-05
+    hint: Factor.level MUST match TargetSelector.level (enforced at add_factor) — factors/target_selector.py:84
+preservation_manifest:
+  required_objects:
+    business_decisions_count: 104
+    fatal_constraints_count: 27
+    non_fatal_constraints_count: 147
+    use_cases_count: 1
+    semantic_locks_count: 12
+    preconditions_count: 4
+    evidence_quality_rules_count: 2
+    traceback_scenarios_count: 5
+architecture:
+  pipeline: data_collection -> data_storage -> factor_computation -> target_selection -> trading_execution -> visualization
+  stages:
+  - id: data_collection
+    narrative:
+      does_what: TimeSeriesDataRecorder and FixedCycleDataRecorder fetch OHLCV and fundamental data from providers (eastmoney,
+        joinquant, baostock, akshare) and persist domain objects (Stock1dKdata, BalanceSheet) to SQLite via df_to_db().
+      key_decisions: BD-002 chose evaluate_start_end_size_timestamps for incremental fetch (not full refresh) because comparing
+        to get_latest_saved_record avoids redundant API calls; BD-003 chose get_data_map field transformation to keep domain
+        schema provider-agnostic.
+      common_pitfalls: 'Don''t forget SL-11: Recorder subclass MUST declare both provider and data_schema class attributes
+        else initialization fails with assertion error; finance-C-001 fatal violation.'
+    business_decisions: []
+  - id: data_storage
+    narrative:
+      does_what: StorageBackend persists DataFrames to per-provider SQLite databases at {data_path}/{provider}/{provider}_{db_name}.db
+        using path templates from _get_path_template; Mixin.record_data and Mixin.query_data provide uniform read/write interface.
+      key_decisions: BD-004 chose StorageBackend abstraction (not hardcoded SQLite) to allow future cloud storage swap; BD-006
+        derives db_name from data_schema __tablename__ for per-domain database isolation.
+      common_pitfalls: SL-04 violation (wrong DataFrame index) causes factor pipeline failures downstream; always ensure df.index.names
+        == ['entity_id', 'timestamp'] before calling record_data.
+    business_decisions: []
+  - id: factor_computation
+    narrative:
+      does_what: Factor.compute() applies Transformer (stateless, e.g. MacdTransformer) then Accumulator (stateful, e.g. MaStatsAccumulator)
+        to produce filter_result or score_result columns; EntityStateService persists per-entity rolling state across batches.
+      key_decisions: BD-007 chose Factor inheriting DataReader for composable data access; SL-08 locks MACD at (fast=12, slow=26,
+        n=9) — chose standard Appel parameters not adaptive because interpretability matters for practitioners.
+      common_pitfalls: 'SL-07: Transformer MUST run before Accumulator — swapping order causes NaN propagation; SL-12: result_df
+        must contain filter_result OR score_result column or TargetSelector silently drops all signals.'
+    business_decisions: []
+  - id: target_selection
+    narrative:
+      does_what: TargetSelector.add_factor() registers Factor instances; get_targets() returns entity_ids passing threshold
+        filter at a specific timestamp, enabling point-in-time historical backtesting without look-ahead.
+      key_decisions: BD-012 chose registrable factor list (not hardcoded) for runtime customization; BD-013 chose timestamp-specific
+        filtering not current-only because backtests need historical point-in-time correctness.
+      common_pitfalls: Factor.level MUST match TargetSelector.level (IH-05); mismatched levels cause silent empty target lists
+        that look like no signals but are actually level-mismatch bugs.
+    business_decisions: []
+  - id: trading_execution
+    narrative:
+      does_what: Trader.run() calls sell() before buy() each cycle, generates TradingSignals with due_timestamp = happen_timestamp
+        + level.to_second() for next-bar execution, and applies on_profit_control() for stop-loss/take-profit before regular
+        target selection.
+      key_decisions: SL-01 locks sell-before-buy order because available_long check in sim_account depends on it — chose this
+        over symmetric ordering to prevent implicit leverage; BD-039 chose long=AND/short=OR multi-level logic to reflect
+        risk asymmetry.
+      common_pitfalls: 'SL-02 violation (immediate execution instead of next-bar) introduces look-ahead bias and makes backtest
+        results unreproducible in live trading; SL-10: A-share T+1 constraint — backtesting without it overstates returns.'
+    business_decisions: []
+  - id: visualization
+    narrative:
+      does_what: Drawer.draw() combines kline main chart with factor overlays and Rect annotations for entry/exit signals
+        using Plotly; Drawable interface on Factor enables consistent chart rendering across data types.
+      key_decisions: BD-019 chose drawer_rects subclass override for custom annotations not hardcoded markers — allows traders
+        to define entry/exit visuals without modifying base drawing logic.
+      common_pitfalls: draw_result=True by default (BD-055) is fine for development but set draw_result=False in production/headless
+        environments to avoid Plotly server startup overhead.
+    business_decisions: []
+  - id: cross_cutting_concerns
+    narrative:
+      does_what: 'Invariants and utilities that span multiple pipeline stages — collected from 30 source groups: abstract_api(5),
+        architecture(1), c_wrapper(6), calculation(1), code_generation(3), compatibility(1), and 24 more.'
+      key_decisions: 104 BDs merged here because they apply to more than one main stage (e.g. algorithm helpers, default value
+        choices, ordering contracts, error handling). Agent should inspect individual BD summaries and link back to affected
+        main stages via shared IDs.
+      common_pitfalls: Cross-cutting concerns frequently surface as bugs when changes to one main stage unintentionally break
+        another. Check constraints referencing these BDs and verify invariants still hold after any stage-local modification.
+    business_decisions:
+    - id: BD-010
+      type: B
+      summary: Thread-local storage per Function instance
+    - id: BD-011
+      type: B
+      summary: Output caching via outputs_valid dirty flag
+    - id: BD-012
+      type: B/BA
+      summary: Price series default mapping via __INPUT_PRICE_SERIES_DEFAULTS
+    - id: BD-013
+      type: BA
+      summary: Subclassable set_input_arrays for custom data types
+    - id: BD-014
+      type: B
+      summary: Parameter validation with explicit type checking
+    - id: BD-022
+      type: B
+      summary: Use Cython instead of SWIG for Python bindings to TA-Lib C library
+    - id: BD-001
+      type: B
+      summary: Cython chosen over SWIG for Python bindings
+    - id: BD-002
+      type: B
+      summary: Array type validation at API boundary
+    - id: BD-003
+      type: B/BA
+      summary: Integer default sentinel maps to TA_INTEGER_DEFAULT (-2^31)
+    - id: BD-004
+      type: BA
+      summary: Auto-generated Python bindings from ta_func.h header
+    - id: BD-GAP-001
+      type: B
+      summary: 'Missing: /N/A:** 15 ()'
+    - id: BD-GAP-002
+      type: RC
+      summary: 'Missing: Add precision limitations section to README documenting that each calculations use float64 (C double)
+        and are unsuitable for fixed income pricing, currency handling, or any use case requiring'
+    - id: BD-054
+      type: B
+      summary: Return lookback = timeperiod-1 for SMA, computed dynamically per parameters
+    - id: BD-019
+      type: BA
+      summary: Build-time C header parsing for code generation
+    - id: BD-020
+      type: B/BA
+      summary: Pythonic name transformation for C parameter names
+    - id: BD-021
+      type: B
+      summary: Filter non-indicator functions from code generation
+    - id: BD-051
+      type: B/RC
+      summary: Use Python 2/3 compatible exception handling for optional imports
+    - id: BD-029
+      type: B/BA
+      summary: Provide set_unstable_period() to configure convergence behavior of adaptive indicators
+    - id: BD-030
+      type: B
+      summary: Provide set_compatibility() to match other TA library behaviors (0=TA-Lib, 1=S&A)
+    - id: BD-044
+      type: B/BA
+      summary: Support candle settings customization for pattern recognition
+    - id: BD-080
+      type: BA
+      summary: Default price series mapping hardcodes 'close' as default for each price-based functions
+    - id: BD-085
+      type: DK/B
+      summary: Lookback period pre-filled with NaN values in output arrays before calculation
+    - id: BD-087
+      type: BA
+      summary: Input array length equality enforced before any calculation via check_length* functions
+    - id: BD-088
+      type: DK
+      summary: Function name normalization to uppercase - 'sma' and 'SMA' both work identically
+    - id: BD-092
+      type: BA
+      summary: 'Double-precision enforcement: input arrays must be NPY_DOUBLE type and C-contiguous'
+    - id: BD-040
+      type: B/BA
+      summary: Default price input for single-price functions is 'close' series
+    - id: BD-046
+      type: B/BA
+      summary: Define default timeperiod=14 for RSI, timeperiod=30 for many MAs
+    - id: BD-005
+      type: B
+      summary: NaN padding for lookback period in batch functions
+    - id: BD-006
+      type: B/BA
+      summary: 'Index convention: endIdx as length-1 (zero-based last element)'
+    - id: BD-007
+      type: B/BA
+      summary: No implicit input defaults - each price arrays required
+    - id: BD-032
+      type: B
+      summary: Provide both Function API (stateless) and Abstract API (stateful) interfaces
+    - id: BD-042
+      type: B/BA
+      summary: Define function name lookup as case-insensitive (uppercase internally)
+    - id: BD-048
+      type: B/BA
+      summary: Allow setting input price series via price='open' kwarg in Abstract API
+    - id: BD-028
+      type: B
+      summary: Define 9 moving average types (SMA, EMA, WMA, DEMA, TEMA, TRIMA, KAMA, MAMA, T3)
+    - id: BD-035
+      type: B
+      summary: Provide streaming versions (stream_*) of each 161 functions for incremental processing
+    - id: BD-038
+      type: B/RC
+      summary: Implement 61 candlestick pattern recognition functions (CDL*)
+    - id: BD-052
+      type: B
+      summary: Support variable period MAVP function with minperiod/maxperiod bounds
+    - id: BD-095
+      type: B/BA
+      summary: 'INTERACTION: BD-010 (Thread-local storage) × BD-074 (Deep copy for thread safety) → Thread safety strategy
+        contradiction'
+    - id: BD-096
+      type: BA
+      summary: 'INTERACTION: BD-091 (Generated code from C headers) × BD-004 (Auto-generated Python bindings) × BD-019 (Build-time
+        C header parsing) → Risk cascade on build pipeline'
+    - id: BD-097
+      type: B
+      summary: 'INTERACTION: BD-092 (NPY_DOUBLE and C-contiguous requirement) × BD-015 (Lazy dependency detection) → Performance
+        risk in DataFrame path'
+    - id: BD-098
+      type: BA
+      summary: 'INTERACTION: BD-085 (NaN pre-fill for lookback) × BD-090 (NaN propagation differs from pandas) → Behavioral
+        surprise risk cascade'
+    - id: BD-099
+      type: B/BA
+      summary: 'INTERACTION: BD-081 (Import-time singleton init) × BD-093 (Unstable period ordering) × BD-029 (set_unstable_period)
+        → Hidden state dependency in configuration'
+    - id: BD-100
+      type: B/BA
+      summary: 'INTERACTION: BD-087 (Array length validation) × BD-084 (Output type preservation) → Validation failure prevents
+        type preservation'
+    - id: BD-101
+      type: B
+      summary: 'INTERACTION: BD-016 (Polars/pandas mutual exclusion) × BD-037 (Raise exception on mixing) → Confirmed redundant
+        constraint with ambiguous scope'
+    - id: BD-102
+      type: BA/DK
+      summary: 'INTERACTION: BD-054 (Dynamic lookback computation) × BD-006 (endIdx as length-1 convention) → Risk cascade
+        on index boundary calculations'
+    - id: BD-043
+      type: B/BA
+      summary: Use make_double_array() to pre-fill output arrays with NaN up to lookback
+    - id: BD-089
+      type: DK/B
+      summary: MA_Type implemented as singleton class instance not Python Enum
+    - id: BD-024
+      type: B
+      summary: Wrap each TA-Lib functions to support pandas.Series and polars.Series input
+    - id: BD-025
+      type: B
+      summary: Convert each input data to float64 numpy arrays before calling C functions
+    - id: BD-055
+      type: B
+      summary: Support pandas.DataFrame column access by name in Abstract API
+    - id: BD-081
+      type: RC
+      summary: Import-time singleton initialization with atexit shutdown required before any function calls
+    - id: BD-083
+      type: T
+      summary: Polars and Pandas cannot be mixed - mutual exclusion enforced at runtime
+    - id: BD-090
+      type: BA
+      summary: NaN handling propagates to end of output in TA-Lib (different from pandas rolling)
+    - id: BD-023
+      type: B/BA
+      summary: Initialize TA-Lib on module import and register shutdown on process exit
+    - id: BD-049
+      type: B
+      summary: Use @wraps decorator on wrapper to preserve function metadata
+    - id: BD-056
+      type: B
+      summary: Define TA_FUNC_FLAGS including 'Function has an unstable period'
+    - id: BD-039
+      type: B
+      summary: Use int32 for integer outputs (patterns, indices) to reduce memory
+    - id: BD-086
+      type: B/BA
+      summary: Parameter state restoration after __call__ ensures no permanent state change per invocation
+    - id: BD-093
+      type: T
+      summary: Unstable period setting must precede indicator calculation for effect
+    - id: BD-031
+      type: B/RC
+      summary: 'Organize 161 functions into 10 groups: Overlap, Momentum, Volume, Volatility, Pattern, etc.'
+    - id: BD-026
+      type: B/BA
+      summary: Return Series/DataFrame when input is Series/DataFrame (preserve type)
+    - id: BD-027
+      type: B/BA
+      summary: Use NaN to fill lookback period in output arrays
+    - id: BD-034
+      type: B/BA
+      summary: Store lookback period NaN values as 0 in integer output arrays
+    - id: BD-041
+      type: B/RC
+      summary: Preserve pandas index when converting back to Series output
+    - id: BD-050
+      type: B
+      summary: Check for streaming result by testing if first result lacks __len__
+    - id: BD-082
+      type: B
+      summary: Thread-local storage used in Abstract Function for per-thread state isolation
+    - id: BD-084
+      type: BA
+      summary: 'Output type preservation pattern: DataFrame→DataFrame, Series→Series, ndarray→ndarray'
+    - id: BD-091
+      type: T
+      summary: 'Generated code pattern: _func.pxi and _stream.pxi auto-generated from C headers'
+    - id: BD-015
+      type: BA
+      summary: Lazy optional dependency detection for pandas and polars
+    - id: BD-016
+      type: B
+      summary: 'Mutual exclusion: cannot mix polars and pandas in single call'
+    - id: BD-017
+      type: B/DK
+      summary: Preserve pandas index through computation
+    - id: BD-018
+      type: B
+      summary: Identity passthrough wrapper when no pandas/polars available
+    - id: BD-008
+      type: B
+      summary: Single scalar output for stream/incremental processing
+    - id: BD-009
+      type: BA
+      summary: Unified function signatures between batch and stream APIs
+    - id: BD-094
+      type: T
+      summary: tools/generate_abstract_stub.py creates type stubs using runtime introspection
+    - id: BD-057
+      type: B
+      summary: Float64 conversion for pandas/polars Series before calling C library
+    - id: BD-058
+      type: B/BA
+      summary: Default SMA parameters for Stochastic Oscillator slowK
+    - id: BD-059
+      type: B/BA
+      summary: Default SMA parameters for Stochastic Oscillator slowD
+    - id: BD-060
+      type: B/BA
+      summary: EMA-based Bollinger Bands parameters
+    - id: BD-061
+      type: B/BA
+      summary: Default RSI timeperiod for Stochastic RSI info
+    - id: BD-062
+      type: B
+      summary: MAVP variable period range configuration
+    - id: BD-063
+      type: B/BA
+      summary: Default SMA timeperiod for MAVP min/max bounds
+    - id: BD-064
+      type: B/DK
+      summary: MIN/MAX sliding window timeperiod
+    - id: BD-065
+      type: B/DK
+      summary: Momentum timeperiod for rate-of-change calculation
+    - id: BD-066
+      type: B
+      summary: EMA smoothing parameters for STOCHRSI fastD
+    - id: BD-067
+      type: B/BA
+      summary: STOCHRSI default parameters for RSI and Stochastic
+    - id: BD-068
+      type: B/DK
+      summary: EMA timeperiod for double smoothing test
+    - id: BD-069
+      type: B
+      summary: RSI Wilder smoothing timeperiod
+    - id: BD-070
+      type: B/BA
+      summary: Set compatibility mode to 0 (default) vs 1
+    - id: BD-071
+      type: B
+      summary: Set unstable period for EMA convergence
+    - id: BD-072
+      type: B/DK
+      summary: TEMA triple exponential smoothing timeperiod
+    - id: BD-073
+      type: B/DK
+      summary: ATR true range calculation timeperiod
+    - id: BD-074
+      type: B
+      summary: Deep copy for thread-safe data manipulation
+    - id: BD-075
+      type: B/BA
+      summary: BBANDS default Bollinger Bands parameters
+    - id: BD-076
+      type: B/BA
+      summary: Candlestick CDL3BLACKCROWS pattern detection
+    - id: BD-077
+      type: B/DK
+      summary: MAXINDEX rolling maximum position index
+    - id: BD-078
+      type: B/BA
+      summary: Expected number of TA-Lib functions
+    - id: BD-079
+      type: B
+      summary: NaN propagation for missing values
+    - id: BD-045
+      type: B
+      summary: Test with Ford Motor Company 2012 stock data as fixture
+    - id: BD-033
+      type: B
+      summary: Use threading.local() for per-thread state in Abstract Function class
+    - id: BD-053
+      type: B
+      summary: Allow concurrent thread access via thread-local storage in Abstract API
+    - id: BD-036
+      type: B
+      summary: Validate input arrays are float64 type and C-contiguous before processing
+    - id: BD-037
+      type: B
+      summary: Raise exception when mixing polars and pandas inputs
+    - id: BD-047
+      type: B
+      summary: Raise TypeError for invalid parameter types (float for int parameter)
+resources:
+  packages:
+  - name: numpy
+    version_pin: latest
+  - name: TA-Lib C library (libta-lib / ta-lib-static)
+    version_pin: latest
+  - name: Cython
+    version_pin: latest
+  - name: build
+    version_pin: latest
+  - name: pandas
+    version_pin: latest
+  - name: polars
+    version_pin: latest
+  - name: pytest
+    version_pin: latest
+  - name: setuptools
+    version_pin: latest
+  - name: wheel
+    version_pin: latest
+  - name: cibuildwheel
+    version_pin: latest
+  strategy_scaffold:
+    entry_point_name: run_backtest
+    output_path: result.csv
+    execution_mode: backtest
+    conditional_entry_points:
+      backtest:
+        entry_point_name: run_backtest
+        output_path: result.csv
+      collector:
+        entry_point_name: run_collector
+        output_path: result.json
+      factor:
+        entry_point_name: run_factor
+        output_path: result.parquet
+      training:
+        entry_point_name: run_training
+        output_path: result.json
+      serving:
+        entry_point_name: run_server
+        output_path: result.json
+      research:
+        entry_point_name: run_research
+        output_path: result.json
+    tail_template: "# === DO NOT MODIFY BELOW THIS LINE ===\nif __name__ == \"__main__\":\n    result = run_backtest()  #\
+      \ implement above\n    from validate import enforce_validation\n    enforce_validation(result, output_path=\"{workspace}/result.csv\"\
+      )\n# === END DO NOT MODIFY ==="
+  host_adapter:
+    target: openclaw
+    timeout_seconds: 1800
+    shell_operator_restriction: 'exec tool intercepts && / ; / | — never chain: ''pip install X && python Y''. Use separate
+      exec calls.'
+    install_recipes:
+    - python3 -m pip install numpy
+    - python3 -m pip install TA-Lib C library (libta-lib / ta-lib-static)
+    - python3 -m pip install Cython
+    - python3 -m pip install zvt
+    credential_injection: JoinQuant/QMT credentials require user-side '!' prefix shell login. Never hardcode credentials in
+      generated scripts.
+    path_resolution: '{workspace} resolves to ~/.openclaw/workspace/doramagic at execution time.'
+    file_io_tooling: Use openclaw 'write' tool for .py/.sql files; 'exec' tool for python3 /absolute/path/script.py (absolute
+      paths only).
+constraints:
+  fatal:
+  - id: finance-C-001
+    when: When calling check_array on input numpy arrays before C function invocation
+    action: validate array dtype is NPY_DOUBLE (float64) and raise Exception for non-double arrays
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Passing non-float64 arrays to TA-Lib C functions causes memory corruption or incorrect calculations due to
+      type mismatch in the C FFI layer
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-002
+    when: When validating input array dimensions before C function calls
+    action: enforce input arrays have exactly 1 dimension (ndim == 1)
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Multidimensional arrays passed to TA-Lib C functions cause memory access violations and segmentation faults
+      due to incorrect stride calculations
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-003
+    when: When checking TA_RetCode return values from C function calls
+    action: call _ta_check_success and raise Exception on non-zero (failure) return codes
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Ignoring TA_RetCode errors silently propagates invalid computation results, leading to incorrect technical
+      indicator values in trading strategies
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-004
+    when: When validating array lengths for multi-input functions
+    action: check each input arrays have identical length and raise Exception on mismatch
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Mismatched array lengths cause out-of-bounds memory access when TA-Lib iterates over arrays of different
+      sizes
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-016
+    when: When implementing batch indicator calculations using the func API
+    action: Verify each input price arrays have float64 dtype (NPY_DOUBLE)
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Integer dtype input arrays cause runtime exceptions in the underlying TA-Lib C library, as demonstrated in
+      test_func.py:17-20 where func.MOM(a1) raises Exception when a1 is np.arange(10, dtype=int)
+    stage_ids:
+    - func_api
+  - id: finance-C-017
+    when: When implementing batch indicator calculations using the func API
+    action: Verify each input arrays are 1-dimensional
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Multi-dimensional arrays cause runtime exceptions, as real.ndim != 1 raises an exception in the check_array
+      function
+    stage_ids:
+    - func_api
+  - id: finance-C-018
+    when: When implementing batch indicator calculations with multiple price inputs
+    action: Verify each input price arrays have identical lengths
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Mismatched array lengths cause runtime exceptions, breaking the batch calculation pipeline as verified in
+      test_func.py:23-33
+    stage_ids:
+    - func_api
+  - id: finance-C-019
+    when: When implementing batch indicator calculations using the func API
+    action: Provide each required price arrays explicitly without relying on defaults
+    severity: fatal
+    kind: architecture_guardrail
+    modality: must
+    consequence: The func API has no default values for price arrays; all required arrays must be provided as positional or
+      keyword arguments
+    stage_ids:
+    - func_api
+  - id: finance-C-027
+    when: When implementing batch indicator calculations using the func API
+    action: Call the TA-Lib C library initialization before any function calls
+    severity: fatal
+    kind: resource_boundary
+    modality: must
+    consequence: Without initialization, TA_RetCode=1 (TA_LIB_NOT_INITIALIZE) is returned, causing all function calls to fail
+    stage_ids:
+    - func_api
+  - id: finance-C-029
+    when: When implementing stream function inputs
+    action: pass numpy arrays with dtype=float64 (NPY_DOUBLE) to stream functions
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Stream functions raise 'input array type is not double' exception when passed non-double precision arrays,
+      causing data loss or incorrect calculations in financial indicators
+    stage_ids:
+    - stream_api
+  - id: finance-C-030
+    when: When implementing stream function inputs
+    action: pass 1-dimensional numpy arrays to stream functions
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Stream functions raise 'input array has wrong dimensions' exception when passed multi-dimensional arrays,
+      breaking real-time indicator calculations
+    stage_ids:
+    - stream_api
+  - id: finance-C-031
+    when: When implementing stream functions with multiple price inputs
+    action: pass input arrays of identical length to stream functions
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Stream functions raise 'input array lengths are different' exception when arrays mismatch, causing incorrect
+      indicator values
+    stage_ids:
+    - stream_api
+  - id: finance-C-034
+    when: When calling stream functions
+    action: use numpy.ndarray inputs (not plain Python lists or other sequences)
+    severity: fatal
+    kind: resource_boundary
+    modality: must
+    consequence: Stream functions require numpy arrays due to direct C API access via PyArray_TYPE() and PyArray_FLAGS(),
+      causing runtime errors with non-array inputs
+    stage_ids:
+    - stream_api
+  - id: finance-C-046
+    when: When using the same Function instance across multiple threads
+    action: use thread-local storage to maintain isolated state per thread
+    severity: fatal
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without thread-local storage, concurrent threads would share state causing race conditions, incorrect results,
+      and data corruption
+    stage_ids:
+    - abstract_api
+  - id: finance-C-048
+    when: When invalidating cached outputs
+    action: set outputs_valid flag to False whenever inputs, parameters, or input_names change
+    severity: fatal
+    kind: architecture_guardrail
+    modality: must
+    consequence: Stale cached outputs would be returned even when underlying data or parameters have changed, producing incorrect
+      results
+    stage_ids:
+    - abstract_api
+  - id: finance-C-058
+    when: When retrieving outputs from Function
+    action: convert pandas.Series and polars.Series to numpy arrays before passing to TALIB
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Native pandas/polars Series objects would cause type errors in TALIB C function calls expecting numpy arrays
+    stage_ids:
+    - abstract_api
+  - id: finance-C-059
+    when: When implementing SMA or other TA-Lib functions to accept pandas Series input
+    action: Return pandas.Series with the same index preserved from the input Series
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Breaking pandas index preservation causes downstream code to lose temporal alignment, leading to incorrect
+      backtest results and misaligned signal generation
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-060
+    when: When converting pandas or polars Series to numpy arrays for TA-Lib processing
+    action: Apply astype(float) to the converted numpy array to verify numeric compatibility
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: TA-Lib C library requires float64 input; non-float arrays cause segmentation faults or incorrect calculations
+      in technical indicators
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-062
+    when: When both polars Series and pandas Series are detected in function arguments
+    action: Mix polars and pandas types in the same function call
+    severity: fatal
+    kind: domain_rule
+    modality: must_not
+    consequence: Mixed type processing creates ambiguity in output type selection and index handling, causing TypeError or
+      incorrect result types in downstream code
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-069
+    when: When generating Cython function bindings for TA-Lib
+    action: Use double precision (NPY_DOUBLE) for each numeric array type checks
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Using float32 or other numeric types causes memory corruption and incorrect calculation results since TA-Lib
+      internally uses double precision
+    stage_ids:
+    - code_generation
+  - id: finance-C-070
+    when: When validating input arrays in generated Cython functions
+    action: Check that input arrays are C-contiguous and convert if necessary
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Non-C-contiguous arrays cause pointer arithmetic errors when accessing data pointers, leading to segmentation
+      faults or corrupted output
+    stage_ids:
+    - code_generation
+  - id: finance-C-075
+    when: When regenerating code bindings
+    action: Require ta-lib/ta_func.h header file to exist in one of the configured include paths
+    severity: fatal
+    kind: resource_boundary
+    modality: must
+    consequence: Code generation fails silently or produces incomplete bindings without the header file, breaking the build
+      process
+    stage_ids:
+    - code_generation
+  - id: finance-C-105
+    when: When implementing or writing code that calls TA-Lib functions with multiple price arrays
+    action: Verify each input price arrays have identical lengths — the Cython wrapper enforces length equality via check_length*
+      functions
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Array length mismatch raises Exception('input array lengths are different'), causing function calls to fail
+      with misleading error messages
+  - id: finance-C-112
+    when: When presenting or reporting TA-Lib indicator calculations to users or making capability claims
+    action: Claim that TA-Lib technical indicators predict future prices, trends, or market movements — TA-Lib is a historical
+      calculation library that computes past values from price data
+    severity: fatal
+    kind: claim_boundary
+    modality: must_not
+    consequence: Users allocate capital based on false prediction claims, experiencing financial loss when historical indicator
+      patterns fail to predict future market behavior
+  - id: finance-C-115
+    when: When presenting or reporting TA-Lib indicator values as equivalent to real-time trading signals
+    action: Claim that TA-Lib indicator outputs alone constitute trading signals — TA-Lib computes mathematical values from
+      price data, requiring additional strategy logic, risk management, and execution handling to generate actionable signals
+    severity: fatal
+    kind: claim_boundary
+    modality: must_not
+    consequence: Users implement systems that generate trades based solely on indicator values without proper validation,
+      risk controls, or execution logic, leading to uncontrolled losses
+  - id: finance-C-120
+    when: When importing the TA-Lib Python module
+    action: Verify _ta_initialize() is called automatically at import time and atexit.register() is used to register shutdown
+      handlers; any code that bypasses the import mechanism must manually call _ta_initialize() before invoking indicator
+      functions
+    severity: fatal
+    kind: domain_rule
+    modality: must
+    consequence: Calling TA-Lib functions before initialization causes segmentation faults or undefined behavior; the C extension
+      library requires internal state setup via _ta_initialize() to function correctly
+    derived_from_bd_id: BD-081
+  - id: finance-C-173
+    when: When implementing or refactoring thread-safe data handling in TA-Lib multi-threaded usage
+    action: Deep copy input data before any manipulation to verify each thread operates on an independent copy — do not remove
+      or replace deep copying with alternative synchronization that assumes shared-data safety
+    severity: fatal
+    kind: architecture_guardrail
+    modality: must
+    consequence: Removing deep copy causes race conditions when multiple threads access shared data structures, leading to
+      corrupted intermediate calculations and non-deterministic backtest results across runs
+    derived_from_bd_id: BD-074
+  regular:
+  - id: finance-C-005
+    when: When initializing the TA-Lib Python wrapper
+    action: call _ta_initialize() on import and _ta_shutdown() on process exit via atexit
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without proper initialization, TA-Lib C library functions return TA_LIB_NOT_INITIALIZE errors, producing
+      all-NaN outputs
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-006
+    when: When implementing Cython functions that call TA-Lib C library
+    action: apply @boundscheck(False) and @wraparound(False) decorators to disable Python safety checks
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without these decorators, every array access incurs Python bounds-checking overhead, negating the 2-4x performance
+      benefit of Cython over SWIG
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-007
+    when: When using integer optional parameters in TA-Lib function bindings
+    action: use -2**31 (TA_INTEGER_DEFAULT) as the default sentinel value for optional integer parameters
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using incorrect default values causes TA-Lib to use wrong default periods, producing incorrect technical
+      indicator outputs
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-008
+    when: When checking for contiguous memory layout of input arrays
+    action: auto-convert non-contiguous arrays to C-contiguous via PyArray_GETCONTIGUOUS
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Non-contiguous arrays cause incorrect data access patterns in C functions, producing wrong indicator values
+      or segmentation faults
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-009
+    when: When building the TA-Lib Python wrapper from source
+    action: verify TA-Lib C library is installed before running setup.py or pip install
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Build fails with 'Cannot find ta-lib library' warning or unresolved symbol linker errors without the underlying
+      C library
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-010
+    when: When building the TA-Lib Python wrapper
+    action: use Cython to generate .c files, or use pre-generated .c files if Cython is unavailable
+    severity: medium
+    kind: resource_boundary
+    modality: must
+    consequence: Without Cython during build, the extension module cannot be compiled, breaking the entire package installation
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-011
+    when: When specifying numpy version for TA-Lib compatibility
+    action: use numpy<2 for TA-Lib 0.4.x branches and numpy>=2 for TA-Lib 0.5.x+ branches
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Using incompatible numpy version causes build failures or runtime crashes due to removed deprecated C APIs
+      in numpy 2.0+
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-012
+    when: When checking if TA-Lib wrapper import succeeds
+    action: verify package imports without errors and __ta_version__ is accessible
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Import failure indicates missing C library, build errors, or ABI incompatibilities preventing the entire
+      technical analysis functionality
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-013
+    when: When building on Windows platforms
+    action: use ta-lib-static as the library name instead of ta-lib on Windows
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Incorrect library name causes linker errors 'unresolved external symbol' for all TA-Lib functions on Windows
+      builds
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-014
+    when: When working with TA-Lib function output arrays
+    action: initialize output arrays with NaN for lookback period and zeros for integer outputs
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Uninitialized output arrays contain garbage values that corrupt technical indicator calculations in the lookback
+      period
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-015
+    when: When handling NaN values in input price arrays
+    action: find first valid (non-NaN) index via check_begidx functions to determine start of computation
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: TA-Lib handles NaN values unexpectedly - it propagates NaNs to end of output rather than skipping them like
+      pandas rolling mean
+    stage_ids:
+    - c_wrapper
+  - id: finance-C-020
+    when: When implementing batch indicator calculations using the func API
+    action: Fill the lookback period with NaN values to maintain output array length equal to input
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without NaN padding in the lookback period, output arrays would have different lengths than input arrays,
+      breaking vectorized operations and alignment
+    stage_ids:
+    - func_api
+  - id: finance-C-021
+    when: When implementing batch indicator calculations for multi-output functions
+    action: Return a tuple of arrays for functions like BBANDS (upperband, middleband, lowerband)
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Multi-output functions must return all outputs as a tuple; dropping outputs loses critical indicator data
+    stage_ids:
+    - func_api
+  - id: finance-C-022
+    when: When using unstable period functions (ADX, CMO, RSI, EMA, etc.)
+    action: Call set_unstable_period() before invoking the function if non-default behavior is required
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Functions with unstable periods produce different results depending on the unstable period setting, leading
+      to inconsistent or unexpected indicator values
+    stage_ids:
+    - func_api
+  - id: finance-C-023
+    when: When implementing batch indicator calculations using the func API
+    action: Expect pandas-style rolling window NaN handling (where NaN in input only affects lookback period)
+    severity: high
+    kind: domain_rule
+    modality: must_not
+    consequence: TA-Lib propagates NaN values to the end of output arrays, unlike pandas rolling mean which only has NaN in
+      the lookback period; this causes unexpected output shapes when input contains NaN
+    stage_ids:
+    - func_api
+  - id: finance-C-024
+    when: When implementing batch indicator calculations using the func API
+    action: Convert input arrays to C-contiguous memory layout if they are not already
+    severity: medium
+    kind: operational_lesson
+    modality: must
+    consequence: Non-contiguous input arrays are silently converted by PyArray_GETCONTIGUOUS, but explicit conversion prevents
+      repeated memory copies during batch processing
+    stage_ids:
+    - func_api
+  - id: finance-C-025
+    when: When using the func API for batch processing
+    action: Claim that output arrays contain valid values in the lookback period
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: The lookback period is filled with NaN (for double outputs) or 0 (for integer outputs); presenting these
+      as valid indicator values is factually incorrect
+    stage_ids:
+    - func_api
+  - id: finance-C-026
+    when: When using the func API for batch processing
+    action: Claim real-time or streaming capabilities for this batch processing API
+    severity: medium
+    kind: claim_boundary
+    modality: must_not
+    consequence: The func API processes entire arrays in batch mode; it does not provide single-value updates like the stream
+      API (talib.stream.SMA)
+    stage_ids:
+    - func_api
+  - id: finance-C-028
+    when: When specifying timeperiod or nbdev parameters to func API functions
+    action: Provide explicit positive integer values, not relying on the sentinel default -2**31
+    severity: medium
+    kind: resource_boundary
+    modality: must
+    consequence: The default value -2**31 is a sentinel that may cause unexpected behavior; explicit values ensure correct
+      lookback calculation
+    stage_ids:
+    - func_api
+  - id: finance-C-032
+    when: When passing data to stream functions
+    action: handle NaN return values when insufficient data is available for the timeperiod
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Stream functions return NaN when input data length is less than the required timeperiod, causing invalid
+      financial calculations if not checked
+    stage_ids:
+    - stream_api
+  - id: finance-C-033
+    when: When using stream functions for real-time computation
+    action: reprocess entire input array on each call (no internal state persistence)
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Stream functions do not maintain internal state between calls, requiring full array reprocessing each time
+      and negating 'streaming' performance benefits
+    stage_ids:
+    - stream_api
+  - id: finance-C-035
+    when: When implementing streaming indicator updates
+    action: claim true real-time streaming when stream functions process full arrays
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: Describing stream API as 'real-time streaming' is misleading since each call processes the entire input array,
+      not incremental updates
+    stage_ids:
+    - stream_api
+  - id: finance-C-036
+    when: When comparing batch and stream function results
+    action: verify stream output equals the last element of batch output array
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: The stream function's scalar output MUST equal the final element of the batch function's array output, otherwise
+      financial strategy signals will be incorrect
+    stage_ids:
+    - stream_api
+  - id: finance-C-037
+    when: When implementing stream functions with integer parameters
+    action: use TA_INTEGER_DEFAULT (-2**31) for unspecified integer parameters
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Integer parameters without explicit values use -2**31 as sentinel, and passing this value directly causes
+      undefined TA-Lib behavior
+    stage_ids:
+    - stream_api
+  - id: finance-C-038
+    when: When implementing stream functions with floating-point parameters
+    action: use TA_REAL_DEFAULT (-4e37) for unspecified real parameters
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Real parameters without explicit values use -4e37 as sentinel, and passing this value directly causes undefined
+      TA-Lib behavior
+    stage_ids:
+    - stream_api
+  - id: finance-C-039
+    when: When calling TA-Lib C functions from stream API
+    action: check return codes and raise exceptions on TA library errors
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Unchecked TA_RetCode values can mask critical errors like library not initialized, bad parameters, or allocation
+      failures
+    stage_ids:
+    - stream_api
+  - id: finance-C-040
+    when: When using the streaming API
+    action: use the experimental stream API for production trading systems without validation
+    severity: high
+    kind: operational_lesson
+    modality: must_not
+    consequence: The streaming API is marked experimental in CHANGELOG and lacks state persistence for true incremental computation,
+      risking production trading failures
+    stage_ids:
+    - stream_api
+  - id: finance-C-041
+    when: When implementing custom stream functions
+    action: apply @boundscheck(False) and @wraparound(False) decorators
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Missing Cython decorators causes significant performance degradation for real-time financial calculations
+      due to bounds checking overhead
+    stage_ids:
+    - stream_api
+  - id: finance-C-042
+    when: When converting batch function parameters to stream parameters
+    action: use identical parameter names and types for easy switching between APIs
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Parameter mismatches between batch and stream functions cause incorrect indicator calculations when developers
+      switch between APIs
+    stage_ids:
+    - stream_api
+  - id: finance-C-043
+    when: When initializing a Function instance without specifying price series
+    action: default to using 'close' prices for the 'price' input parameter
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Indicator calculations will use the wrong price series, producing incorrect technical analysis values that
+      do not match expected results
+    stage_ids:
+    - abstract_api
+  - id: finance-C-044
+    when: When providing invalid parameter types to Function
+    action: raise TypeError with descriptive message showing expected and actual types
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Invalid parameter types may silently produce incorrect results or cause undefined behavior in TA-Lib calculations
+    stage_ids:
+    - abstract_api
+  - id: finance-C-045
+    when: When creating Function instances with function names
+    action: normalize function names to uppercase for case-insensitive lookup
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Case-sensitive function name lookup would break API usability, as users commonly use lowercase function names
+    stage_ids:
+    - abstract_api
+  - id: finance-C-047
+    when: When Function inputs and parameters remain unchanged between calls
+    action: cache outputs and skip recomputation to improve performance
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Repeated calculations with identical inputs would unnecessarily recompute results, degrading performance
+      in tight loops
+    stage_ids:
+    - abstract_api
+  - id: finance-C-049
+    when: When calling __call__ with function parameters
+    action: restore opt_input values and input_names after the call to preserve Function state
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: State changes from temporary calls would persist, causing subsequent uses of the Function instance to use
+      wrong parameters
+    stage_ids:
+    - abstract_api
+  - id: finance-C-050
+    when: When input arrays are missing required keys
+    action: raise Exception listing each missing required data keys
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Silent failure or partial computation with missing data would produce undefined or incorrect indicator values
+    stage_ids:
+    - abstract_api
+  - id: finance-C-051
+    when: When providing price arguments to Function.__call__
+    action: validate the number of price arguments matches expected count
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Wrong number of price arguments would cause index errors or compute indicators on wrong price series
+    stage_ids:
+    - abstract_api
+  - id: finance-C-052
+    when: When input data type is pandas.DataFrame or polars.DataFrame
+    action: return output as the same DataFrame type with specified column names and index
+    severity: high
+    kind: claim_boundary
+    modality: must
+    consequence: Mismatched output types would break downstream code expecting consistent DataFrame interface and index alignment
+    stage_ids:
+    - abstract_api
+  - id: finance-C-053
+    when: When abstract API is used for backtesting or strategy development
+    action: claim that backtest results equal expected live trading performance
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: Backtest results do not account for slippage, market impact, execution delays, or changing market conditions
+      that affect live trading
+    stage_ids:
+    - abstract_api
+  - id: finance-C-054
+    when: When the TA-Lib Python wrapper is used
+    action: claim real-time trading capability for this library
+    severity: medium
+    kind: claim_boundary
+    modality: must_not
+    consequence: This is a technical analysis indicator library for historical data computation, not a live trading execution
+      system
+    stage_ids:
+    - abstract_api
+  - id: finance-C-055
+    when: When setting input_arrays
+    action: verify each arrays have the same length
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Array length mismatches would cause index errors or silent data truncation in TA-Lib calculations
+    stage_ids:
+    - abstract_api
+  - id: finance-C-056
+    when: When extending Function class for custom data types
+    action: call the parent set_input_arrays method first and return True/False appropriately
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Improper subclassing would break input validation and cause silent failures or incorrect calculations
+    stage_ids:
+    - abstract_api
+  - id: finance-C-057
+    when: When accessing input_arrays property for polars.DataFrame
+    action: use clone() instead of copy() for polars DataFrames
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using copy() on polars DataFrames would cause runtime errors as polars uses clone() for copying
+    stage_ids:
+    - abstract_api
+  - id: finance-C-061
+    when: When detecting input Series type for appropriate conversion handling
+    action: Check both positional args and keyword args for Series type using isinstance
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Missing keyword argument check causes functions called with Series as keyword argument to bypass conversion,
+      passing Series objects to TA-Lib C library which expects numpy arrays
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-063
+    when: When neither pandas nor polars is available in the runtime environment
+    action: Use identity wrapper that returns functions unchanged without type checking overhead
+    severity: medium
+    kind: resource_boundary
+    modality: must
+    consequence: Without identity wrapper fallback, every TA-Lib function call incurs unnecessary isinstance checks for None
+      types, degrading performance for numpy-only users
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-064
+    when: When handling optional dependencies pandas and polars for lazy loading
+    action: Catch ModuleNotFoundError and only set Series types to None for known missing modules
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Silent import failure for broken but installed pandas/polars masks real module errors, causing cryptic failures
+      in TA-Lib function calls
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-065
+    when: When TA-Lib functions return streaming results (non-array outputs)
+    action: Return streaming results directly without Series wrapping to preserve streaming interface
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Wrapping streaming results as Series breaks the streaming API contract, causing TypeError in code expecting
+      scalar or iterator results
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-066
+    when: When wrapping polars Series output from TA-Lib function results
+    action: Wrap numpy array results as polars.Series without passing index parameter
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Passing index to polars.Series constructor causes TypeError since polars does not support named index like
+      pandas; results are correctly converted without index
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-067
+    when: When TA-Lib function returns tuple results for multi-output indicators
+    action: Wrap each element of tuple result as a separate Series preserving the common index
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Returning tuple of arrays instead of Series breaks type consistency; downstream code expecting Series with
+      proper index alignment fails with shape or index errors
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-068
+    when: When using polars or pandas Series with MAVP function requiring period arrays
+    action: Extract index from the price Series input, not from the period array argument
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Using period array index causes misalignment with price data; the output must align with price timestamps,
+      not period values
+    stage_ids:
+    - series_wrapper
+  - id: finance-C-071
+    when: When generating function signatures from C headers
+    action: Skip TA_Set* and TA_Restore* configuration functions to keep only public indicator functions
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Including configuration functions creates bindings that conflict with the abstract API, causing runtime errors
+      when users attempt to configure TA-Lib settings
+    stage_ids:
+    - code_generation
+  - id: finance-C-072
+    when: When regenerating _func.pxi after upstream TA-Lib changes
+    action: Verify that __TA_FUNCTION_NAMES__ contains at least 150 function names
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Missing functions in __TA_FUNCTION_NAMES__ causes AttributeError when users try to call those indicators,
+      breaking the public API
+    stage_ids:
+    - code_generation
+  - id: finance-C-073
+    when: When parsing C header file signatures
+    action: Strip float-only functions (TA_S_*) to avoid generating bindings for deprecated interfaces
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Float-only functions use different calling conventions and cause type mismatches when bound to double-based
+      Python arrays
+    stage_ids:
+    - code_generation
+  - id: finance-C-074
+    when: When generating function lookback calculations
+    action: Calculate lookback as 'begidx + lib.{FuncName}_Lookback(options)' to determine proper result array padding
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Incorrect lookback causes output arrays to be misaligned with input arrays, resulting in NaN values in wrong
+      positions or index errors
+    stage_ids:
+    - code_generation
+  - id: finance-C-076
+    when: When discovering TA-Lib header files across platforms
+    action: Check platform-specific paths including /usr/include, /usr/local/include, /opt/local/include, and /opt/homebrew/include
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Omitting platform-specific paths causes header discovery to fail on different operating systems, preventing
+      code generation
+    stage_ids:
+    - code_generation
+  - id: finance-C-077
+    when: When running 'make generate' to regenerate bindings
+    action: Verify both Python talib package and C TA-Lib library are installed
+    severity: high
+    kind: resource_boundary
+    modality: must
+    consequence: Regeneration fails with import errors or header not found errors if dependencies are missing
+    stage_ids:
+    - code_generation
+  - id: finance-C-078
+    when: When cleaning up C variable names to Pythonic names
+    action: Strip 'in' prefix for input variables and 'optIn' prefix for optional parameters
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Inconsistent naming causes TypeError when calling functions with keyword arguments that don't match the generated
+      signatures
+    stage_ids:
+    - code_generation
+  - id: finance-C-079
+    when: When generating type stubs from runtime introspection
+    action: Use NDArray[np.float64] for each function inputs and outputs
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Type stubs with incorrect array dtypes cause mypy/pyright to report false positives about type mismatches
+    stage_ids:
+    - code_generation
+  - id: finance-C-080
+    when: When regenerating _func.pxi and _stream.pxi
+    action: Output files must be redirected to their respective locations using shell redirection
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Writing to stdout instead of redirecting causes generated code to be lost and build failures
+    stage_ids:
+    - code_generation
+  - id: finance-C-081
+    when: When making manual edits to generated _func.pxi file
+    action: Edit _func.pxi directly since it will be overwritten on next generation
+    severity: medium
+    kind: operational_lesson
+    modality: must_not
+    consequence: Direct edits are lost during regeneration, causing confusion and wasted development effort
+    stage_ids:
+    - code_generation
+  - id: finance-C-082
+    when: When developing new indicator functions in underlying TA-Lib
+    action: Install TA-Lib from git source to have headers available for code generation
+    severity: medium
+    kind: operational_lesson
+    modality: must
+    consequence: Binary TA-Lib installations may not include development headers needed for code generation
+    stage_ids:
+    - code_generation
+  - id: finance-C-083
+    when: When running code generation for TA-Lib
+    action: Modify the generator scripts (generate_func.py, generate_stream.py) without understanding the ta_func.h structure
+    severity: medium
+    kind: rationalization_guard
+    modality: should_not
+    consequence: Incorrect parser modifications cause function signatures to be malformed, leading to Cython compilation errors
+    stage_ids:
+    - code_generation
+  - id: finance-C-084
+    when: When TA-Lib adds new indicator functions in upstream
+    action: Regenerate _func.pxi and _stream.pxi to add bindings for new functions
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Missing bindings for new TA-Lib functions causes AttributeError when users try to use them
+    stage_ids:
+    - code_generation
+  - id: finance-C-085
+    when: When generating INDEX-type functions that output indices
+    action: Add index offset adjustment loop after function call to convert internal indices to absolute positions
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: INDEX functions return relative indices that must be adjusted by begidx, otherwise returned indices are incorrect
+    stage_ids:
+    - code_generation
+  - id: finance-C-086
+    when: When generating stream functions (stream_*)
+    action: Name functions with 'stream_' prefix to distinguish from batch functions
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Conflicting names between batch and stream functions cause import errors or wrong function resolution
+    stage_ids:
+    - code_generation
+  - id: finance-C-087
+    when: When implementing user_code that passes pandas/polars Series to TA-Lib
+    action: pass float64-compatible Series values that can be converted to contiguous numpy arrays
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: TypeError raised when Series dtype cannot be cast to float64, or MemoryError during non-contiguous array
+      copy operations for large datasets
+  - id: finance-C-088
+    when: When implementing user_code that mixes pandas and polars inputs
+    action: mix pandas and polars Series/DataFrame in the same function call
+    severity: high
+    kind: domain_rule
+    modality: must_not
+    consequence: Exception raised with message 'Cannot mix polars and pandas', causing the entire function call to fail
+  - id: finance-C-089
+    when: When implementing series_wrapper that extracts numpy arrays from Series
+    action: preserve the original pandas index for downstream return value wrapping
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Index mismatch causes pandas alignment errors when result Series index does not match original input index
+  - id: finance-C-090
+    when: When implementing series_wrapper that converts pandas/polars inputs to numpy
+    action: convert input arrays to float64 dtype before passing to func_api
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: TypeError raised by func_api check_array() when input dtype is not NPY_DOUBLE, causing indicator calculation
+      to fail
+  - id: finance-C-091
+    when: When implementing series_wrapper that passes data to func_api
+    action: verify each input arrays have identical length values
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Exception raised with 'input array lengths are different', causing the function to fail before any calculation
+  - id: finance-C-092
+    when: When implementing series_wrapper that passes dict/DataFrame to abstract_api
+    action: provide each required price series keys (open, high, low, close, volume as needed by the specific function)
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Exception raised with 'input_arrays parameter missing required data key', preventing function execution
+  - id: finance-C-093
+    when: When implementing abstract_api that extracts arrays from dict/DataFrame
+    action: convert extracted pandas/polars Series to float64 numpy arrays before passing to func_api
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: TypeError or incorrect calculation results when Series with non-float64 dtype is passed to TA-Lib C function
+  - id: finance-C-094
+    when: When implementing abstract_api that passes data to func_api
+    action: verify each price series arrays in the input dict have identical length
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Exception raised at runtime when length validation fails inside func_api, with 'input array lengths are different'
+  - id: finance-C-095
+    when: When implementing func_api that passes arrays to c_wrapper
+    action: convert input arrays to C-contiguous memory layout if not already contiguous
+    severity: medium
+    kind: resource_boundary
+    modality: must
+    consequence: Silent automatic conversion causes memory copy overhead; for streaming/large datasets this creates significant
+      performance degradation
+  - id: finance-C-096
+    when: When implementing c_wrapper that passes data to func_api
+    action: pad output arrays with NaN values for the lookback period (first lookback elements)
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Financial indicators show incorrect values when lookback NaN padding is missing, causing wrong trading signals
+      and financial losses
+  - id: finance-C-097
+    when: When implementing c_wrapper that returns results to func_api
+    action: propagate TA_RetCode error codes and raise Python exceptions for non-zero return values
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Silent failure or incorrect results when TA-Lib C library returns error code that is not converted to exception
+  - id: finance-C-098
+    when: When implementing c_wrapper that processes inputs from func_api
+    action: compute beginning index (begidx) by finding first non-NaN value across each input arrays
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Incorrect indicator values when NaN detection fails, causing misaligned outputs and wrong trading decisions
+  - id: finance-C-099
+    when: When implementing abstract_api that passes results to series_wrapper
+    action: return results matching the input type (polars.DataFrame returns polars.DataFrame, pandas.DataFrame returns pandas.DataFrame)
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: TypeError when downstream code expects specific return type but receives numpy array instead of DataFrame/Series
+  - id: finance-C-100
+    when: When implementing series_wrapper that returns pandas Series to user_code
+    action: wrap numpy results in pandas Series preserving the original input index
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Index misalignment in result Series causes pandas alignment issues and incorrect data analysis in downstream
+      code
+  - id: finance-C-101
+    when: When implementing series_wrapper that returns polars Series to user_code
+    action: wrap numpy results in polars Series without explicit index (polars has no built-in index)
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Incorrect data association when polars Series is created with misaligned data compared to expected row positions
+  - id: finance-C-102
+    when: When implementing c_wrapper that processes stream inputs from func_api
+    action: return scalar values (float64) instead of arrays for streaming API calls
+    severity: medium
+    kind: resource_boundary
+    modality: must
+    consequence: TypeError when stream result (scalar) is treated as array, or incorrect value extraction from single-element
+      array
+  - id: finance-C-103
+    when: When implementing abstract_api that validates DataFrame input columns
+    action: check that each required column names exist in the input DataFrame (not just that dict keys exist)
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: KeyError raised when accessing missing DataFrame column, causing function to fail for valid dict inputs
+  - id: finance-C-104
+    when: When implementing or writing code that calls TA-Lib functions
+    action: Pass input arrays with NPY_DOUBLE (float64) dtype — the Cython wrapper rejects non-float64 arrays at the boundary
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Input array type validation raises Exception('input array type is not double'), causing function calls to
+      fail silently or throw unexpected errors
+  - id: finance-C-106
+    when: When implementing or writing code that passes arrays to TA-Lib functions
+    action: Verify input arrays are C-contiguous — non-contiguous arrays are silently converted by calling PyArray_GETCONTIGUOUS
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Non-contiguous arrays trigger internal conversion overhead on every call, degrading performance especially
+      for streaming/realtime use cases
+  - id: finance-C-107
+    when: When implementing or writing code that processes financial time series with missing values
+    action: Assume TA-Lib NaN propagation behavior matches pandas rolling calculations — the underlying C library propagates
+      NaN to end of output, unlike pandas which outputs values until lookback gap
+    severity: high
+    kind: resource_boundary
+    modality: must_not
+    consequence: NaN handling differences cause indicator values to differ from pandas-native rolling calculations, leading
+      to incorrect strategy signals and financial loss
+  - id: finance-C-108
+    when: When implementing or writing code that processes financial time series with leading NaN values
+    action: Expect the lookback period of each indicator to be filled with NaN — the wrapper pre-fills lookback positions
+      with NaN to indicate insufficient data for calculation
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Misunderstanding lookback NaN handling leads to off-by-one errors in signal generation, causing premature
+      or delayed trading decisions
+  - id: finance-C-109
+    when: When implementing or writing code using the Abstract API in multithreaded applications
+    action: Rely on thread-local storage in the Function class — each thread gets isolated state via threading.local(), ensuring
+      safe concurrent use without explicit locking
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without thread-local isolation, shared Function state causes race conditions where parameters from one thread
+      corrupt calculations in another thread, producing incorrect indicator values
+  - id: finance-C-110
+    when: When implementing or writing code that mixes Polars and Pandas in the same TA-Lib function call
+    action: Pass both Polars and Pandas objects to a single TA-Lib function — the wrapper explicitly raises Exception('Cannot
+      mix polars and pandas') when both types are detected
+    severity: high
+    kind: domain_rule
+    modality: must_not
+    consequence: Mixed Polars/Pandas inputs trigger explicit Exception, halting execution and requiring refactoring of data
+      pipeline
+  - id: finance-C-111
+    when: When implementing or writing code using the Abstract API's Function class __call__ method
+    action: Expect parameter state to be restored after each call — the wrapper explicitly saves and restores opt_input values
+      and input_names, ensuring stateless per-invocation behavior
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without state restoration, subsequent calls with different parameters would carry over unintended parameter
+      values, producing incorrect calculations
+  - id: finance-C-113
+    when: When implementing or deploying TA-Lib in environments without C compilation toolchain
+    action: Claim TA-Lib can run in pure Python environments without C compiler, NumPy, or the underlying TA-Lib C library
+      — the wrapper is a Cython-based binding that requires compiled dependencies
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: Users attempt installation in unsupported environments, experiencing build failures, missing symbol errors,
+      or degraded functionality
+  - id: finance-C-114
+    when: When implementing or deploying TA-Lib in embedded systems or minimal Python environments
+    action: Claim TA-Lib can run without NumPy — the Cython wrapper uses NumPy C API (np.import_array, PyArray_* functions)
+      and converts each input to float64 ndarrays
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: Users attempt deployment on NumPy-less platforms, encountering ImportError or AttributeError when calling
+      any TA-Lib function
+  - id: finance-C-116
+    when: When comparing TA-Lib indicator calculations with pandas-native rolling calculations
+    action: Claim TA-Lib produces identical results to pandas rolling calculations — NaN propagation behavior differs fundamentally
+      between the C library and pandas implementation
+    severity: high
+    kind: claim_boundary
+    modality: must_not
+    consequence: Users expect interchangeability between TA-Lib and pandas rolling functions, receiving unexpected NaN values
+      that break downstream logic and cause incorrect calculations
+  - id: finance-C-117
+    when: When implementing or writing code that sets integer parameters in TA-Lib functions
+    action: Use -2**31 (or equivalent TA_INTEGER_DEFAULT) for optional integer parameters that should use library defaults
+      — this sentinel value maps to the C library's default behavior
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Omitting the -2**31 sentinel or using incorrect integer values causes the C library to use undefined parameter
+      states, producing unpredictable indicator outputs
+  - id: finance-C-118
+    when: When implementing or writing code that processes output from TA-Lib functions
+    action: Expect output type to match input type — DataFrame→DataFrame, Series→Series, ndarray→ndarray — the wrapper preserves
+      container type through the calculation pipeline
+    severity: medium
+    kind: architecture_guardrail
+    modality: must
+    consequence: Incorrect expectations about output container type leads to type errors or incorrect data handling in downstream
+      processing
+  - id: finance-C-119
+    when: When implementing or writing code that imports the TA-Lib Python package
+    action: Rely on automatic TA-Lib C library initialization at import time — _ta_initialize() is called in talib/__init__.py
+      at module load and _ta_shutdown() is registered via atexit for clean termination
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Attempting to call TA-Lib functions before import completes or after process shutdown causes undefined behavior
+      or segmentation faults
+  - id: finance-C-121
+    when: When implementing integer parameter handling in TA-Lib Python bindings
+    action: Map Python None or missing optional integers to TA_INTEGER_DEFAULT constant (-2^31) as defined by the TA-Lib C
+      library; do not use arbitrary sentinel values like 0, -1, or Python None directly in C calculations
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using incorrect sentinel values causes the underlying C library to receive invalid parameters, producing
+      wrong indicator values or silent data corruption that propagates to trading decisions
+    derived_from_bd_id: BD-003
+  - id: finance-C-122
+    when: When calculating indicators that depend on dynamic lookback periods (e.g., SMA, EMA, RSI with varying timeperiod
+      parameters)
+    action: Verify lookback computation correctly accounts for endIdx as length-1 convention; verify the number of NaN values
+      prepended matches the dynamic lookback derived from parameters (e.g., timeperiod=200 requires 199 prior bars lookback);
+      validate output array length equals input length and valid results start at correct index
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Off-by-one errors in lookback calculation cause output arrays with wrong length, incorrect NaN count in lookback
+      period, and valid results starting at wrong index; for high-period indicators like SMA(200), this propagates to significant
+      data misalignment in backtesting and live trading
+    derived_from_bd_id: BD-102
+  - id: finance-C-123
+    when: When processing input data arrays with NaN values or generating output arrays for TA-Lib indicators
+    action: Pre-fill output arrays with NaN values for the lookback period before calculation; do not assume output arrays
+      contain valid data for the first N elements where N equals the dynamic lookback period
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Using uninitialized output arrays or assuming valid values in the lookback period causes incorrect indicator
+      values and silent data corruption that propagates to strategy calculations
+    derived_from_bd_id: BD-085
+  - id: finance-C-124
+    when: When implementing candlestick pattern recognition in technical analysis
+    action: Implement each 61 standard TA-Lib candlestick patterns (CDL* functions) covering both single-candle patterns (doji,
+      hammer, engulfing) and multi-candle patterns (morning star, three white soldiers) — the complete taxonomy is mandatory
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Partial pattern implementation creates false claims of comprehensive technical analysis, as traders relying
+      on missing patterns will have gaps in their automated strategy coverage compared to industry-standard TA-Lib
+    derived_from_bd_id: BD-038
+  - id: finance-C-125
+    when: When implementing or refactoring concurrent execution of shared Function instances
+    action: Use threading.local() for stateful computation buffers to isolate per-thread state; do NOT remove thread-local
+      storage or replace with shared mutable state
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Removing thread-local storage causes data races when multiple threads share Function instances concurrently;
+      computed indicators from one thread bleed into another, producing incorrect signals and corrupting backtest results
+    derived_from_bd_id: BD-010
+  - id: finance-C-126
+    when: When using abstract API parameters 'price', 'price0', 'price1' etc. without explicit column specification
+    action: Verify that __INPUT_PRICE_SERIES_DEFAULTS mapping (price->close, price0->high, price1->low, etc.) matches the
+      actual DataFrame column names; if columns differ, explicitly specify the correct column name
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Relying on default mappings when DataFrame columns don't follow standard naming silently computes indicators
+      on wrong price series, producing invalid trading signals that appear correct
+    derived_from_bd_id: BD-012
+  - id: finance-C-127
+    when: When passing parameters to TA-Lib function wrappers
+    action: Use Pythonic parameter names (e.g., timeperiod, high, low) when available; verify that camelCase C parameter names
+      are correctly transformed to snake_case if using raw parameter dictionaries
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Using untransformed C parameter names like optInTimePeriod or inHigh causes TypeError exceptions or silently
+      wrong parameter values, breaking indicator calculations in live strategies
+    derived_from_bd_id: BD-020
+  - id: finance-C-128
+    when: When importing optional dependencies (pandas, polars) in the framework
+    action: Use try/except ImportError with Python 2/3 compatible exception handling syntax to gracefully handle missing optional
+      dependencies; do not let missing optional libraries prevent import of core functionality
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Missing optional dependencies cause ImportError exceptions that prevent the entire module from loading, blocking
+      access to core TA-Lib functionality even when optional DataFrame features are not used
+    derived_from_bd_id: BD-051
+  - id: finance-C-129
+    when: When integrating custom DataFrame implementations (non-pandas/polars) with the abstract API
+    action: Subclass Function and override set_input_arrays to handle conversion from custom data types to numpy arrays; do
+      not assume each data types are automatically supported
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Using custom DataFrame types without proper set_input_arrays override causes TypeError or incorrect array
+      conversion, producing wrong indicator values that silently corrupt strategy logic
+    derived_from_bd_id: BD-013
+  - id: finance-C-130
+    when: When initializing the framework in environments with missing pandas/polars
+    action: Assume pandas or polars is installed at import time; use lazy detection (check availability only when calling
+      DataFrame-dependent methods) to allow core functionality to work without optional dependencies
+    severity: high
+    kind: operational_lesson
+    modality: must_not
+    consequence: Eagerly importing optional dependencies causes immediate failure when neither pandas nor polars is installed,
+      preventing use of core indicator calculation functions that don't require DataFrames
+    derived_from_bd_id: BD-015
+  - id: finance-C-131
+    when: When implementing or modifying Python bindings for the TA-Lib C library
+    action: Use Cython to generate Python C extensions for TA-Lib C library integration — maintain near-native performance
+      and Python API ergonomics; do not replace with SWIG or other binding mechanisms
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Switching from Cython to SWIG introduces wrapper complexity, poorer numpy array integration, and potential
+      memory access issues that could cause incorrect calculation results or performance degradation
+    derived_from_bd_id: BD-022
+  - id: finance-C-132
+    when: When generating the Python API surface from source code
+    action: Filter out TA_Set*, TA_Restore*, and other internal functions from generated code — include only public technical
+      indicator functions to keep API surface clean and focused
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Including internal functions in the public API causes confusion, potential misuse of unverified functions,
+      and API surface pollution that complicates documentation and user onboarding
+    derived_from_bd_id: BD-021
+  - id: finance-C-133
+    when: When configuring adaptive indicators (KAMA, MAMA, etc.) in backtesting
+    action: Explicitly call set_unstable_period() to configure convergence behavior based on parameter selection and risk
+      tolerance — do not rely on framework defaults for adaptive indicators
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Failing to configure set_unstable_period causes convergence warnings to be suppressed silently, leading to
+      incorrect indicator values that distort strategy logic and produce backtest results incompatible with live trading
+    derived_from_bd_id: BD-029
+  - id: finance-C-134
+    when: When processing integer output arrays from pattern recognition and price transform functions
+    action: Interpret lookback period positions as zero (0) rather than NaN in int32 output arrays — zero signals 'no valid
+      pattern found' while non-zero values indicate 'pattern at position N'
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Misinterpreting zero as a valid pattern position causes incorrect pattern recognition results, leading to
+      false trading signals that execute trades on non-existent patterns and produce unreproducible strategy behavior
+    derived_from_bd_id: BD-034
+  - id: finance-C-135
+    when: When calling single-price technical indicator functions without explicit price input
+    action: Default to 'close' price series for single-price functions (RSI, MACD, etc.) when no price input is specified
+      — use Abstract API default inputs configuration for the close series
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using non-close prices as defaults causes indicators to calculate on the wrong price series, producing incorrect
+      strategy signals that lead to trades at wrong times and significant financial losses
+    derived_from_bd_id: BD-040
+  - id: finance-C-136
+    when: When implementing or migrating code that uses TA-Lib indicator functions
+    action: Assume TA-Lib NaN handling behaves like pandas rolling operations — TA-Lib propagates NaN values to the end of
+      output while pandas recovers after a window of valid values; handle NaN values explicitly at the end of series
+    severity: high
+    kind: domain_rule
+    modality: must_not
+    consequence: Assuming pandas-like NaN recovery causes silent result distortion where TA-Lib outputs NaN for the entire
+      remaining series while pandas code expects recovery, leading to strategies that work in development but fail in production
+    derived_from_bd_id: BD-090
+  - id: finance-C-137
+    when: When preparing input arrays for TA-Lib function calls
+    action: Convert input arrays to float64 dtype (NPY_DOUBLE) and verify C-contiguous memory layout before passing to TA-Lib
+      functions — use np.ascontiguousarray() if needed
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Passing non-double-precision or non-C-contiguous arrays causes silent type conversion at call time, adding
+      memory copies and potential precision loss that distorts calculation results in ways that are difficult to debug
+    derived_from_bd_id: BD-092
+  - id: finance-C-138
+    when: When implementing concurrent access to Abstract Function instances across multiple threads
+    action: Use thread-local storage (threading.local()) to maintain independent state per thread — do not remove threading.local()
+      usage or replace with shared state patterns that allow instances to be shared safely
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Without thread-local storage, concurrent threads sharing Abstract Function instances experience race conditions
+      where one thread's parameter state overwrites another's, causing silent data corruption in multi-strategy applications
+    derived_from_bd_id: BD-053
+  - id: finance-C-139
+    when: When implementing lookback period calculation for moving average and similar indicators
+    action: Compute lookback dynamically as timeperiod-1 per parameters — do not use hardcoded lookback values or fixed lookup
+      tables that cannot capture parameter-dependent lookback
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Hardcoded lookback values produce incorrect indicator results for non-default timeperiods, causing strategies
+      to use signals from incorrect historical windows and leading to trading losses
+    derived_from_bd_id: BD-054
+  - id: finance-C-140
+    when: When implementing input parameter handling for Abstract API functions that accept DataFrames
+    action: Support DataFrame column access by name using input_name parameters — do not change to positional-only argument
+      handling that requires users to remember column order
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Switching to positional-only column access breaks existing user code that relies on named column specification,
+      requiring widespread refactoring and causing breaking API changes
+    derived_from_bd_id: BD-055
+  - id: finance-C-141
+    when: When implementing indicator function metadata and flags
+    action: Expose TA_FUNC_FLAGS including the 'unstable period' flag for KAMA, MAMA, ADX, ATR indicators — do not remove
+      or hide convergence period information that indicates when indicator results become reliable
+    severity: medium
+    kind: domain_rule
+    modality: must
+    consequence: Hiding the unstable period flag causes strategies to use indicator results before convergence completes,
+      producing unreliable signals during warmup periods that degrade strategy performance silently
+    derived_from_bd_id: BD-056
+  - id: finance-C-142
+    when: When implementing data type conversion for input arrays before calling TA-Lib C library functions
+    action: Convert pandas/polars Series to Float64 before calling TA-Lib C library — do not use Float32 for memory efficiency
+      as it causes precision loss in price calculations
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using Float32 precision causes precision loss in financial price calculations, producing incorrect indicator
+      values that lead to faulty trading signals and financial losses in live trading
+    derived_from_bd_id: BD-057
+  - id: finance-C-143
+    when: When validating TA-Lib library installation completeness
+    action: Verify that the function count matches the expected count to detect incomplete TA-Lib installations early — do
+      not skip function count validation as it allows broken installations to go undetected
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Skipping function count validation allows incomplete TA-Lib installations to go undetected until specific
+      functions are called, causing cryptic runtime errors during live trading when missing functions are accessed
+    derived_from_bd_id: BD-078
+  - id: finance-C-144
+    when: When implementing __call__ method for Abstract Function class
+    action: Restore parameter state (opt_input values, input_names) after each function call completes — do not allow per-call
+      parameter changes to persist across invocations
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Without parameter state restoration after each call, subsequent invocations inherit modified parameters from
+      previous calls, causing silent parameter bleed where strategies use wrong indicator configurations
+    derived_from_bd_id: BD-086
+  - id: finance-C-145
+    when: When designing thread-safe access patterns for shared Abstract Function instances across multiple threads
+    action: Do not assume thread-local storage alone provides complete thread safety — deep copy of input data is required
+      when sharing instances across threads to prevent data corruption from shared array access
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Relying only on thread-local storage while sharing input data causes subtle data corruption as threads may
+      simultaneously read and write shared arrays, producing incorrect indicator values in concurrent multi-strategy applications
+    derived_from_bd_id: BD-095
+  - id: finance-C-146
+    when: When configuring unstable periods using set_unstable_period() with thread-local Abstract Function instances
+    action: Verify set_unstable_period() is called after thread-local isolation is established and before each thread's indicator
+      calculations — do not configure unstable periods on shared state before threading operations begin
+    severity: medium
+    kind: operational_lesson
+    modality: must
+    consequence: Configuring unstable periods before thread-local isolation causes inconsistent convergence behavior across
+      threads, with some threads using incorrect warmup periods and producing unreliable indicator values
+    derived_from_bd_id: BD-099
+  - id: finance-C-147
+    when: When integrating TA-Lib functions into typed data pipelines where downstream code expects consistent DataFrame or
+      Series output types
+    action: Handle validation errors gracefully to preserve output type consistency — implement fallback or typed error responses
+      instead of raising exceptions for length validation failures that break pipeline flow
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Validation failures raising exceptions breaks typed pipeline integration where downstream code expects consistent
+      DataFrame or Series outputs, causing pipeline failures even for recoverable input errors
+    derived_from_bd_id: BD-100
+  - id: finance-C-148
+    when: When modifying the TA-Lib initialization lifecycle
+    action: Replace automatic initialization on import with lazy initialization — the C library must be initialized exactly
+      once per process before any function calls
+    severity: medium
+    kind: operational_lesson
+    modality: should_not
+    consequence: Switching to lazy initialization shifts initialization costs to the first function call and may cause cryptic
+      C-level errors if TA-Lib functions are called before the library is ready, breaking user expectations in backtesting
+      workflows
+    derived_from_bd_id: BD-023
+  - id: finance-C-149
+    when: When implementing TA-Lib wrapper functions
+    action: Accept pandas.Series and polars.Series inputs directly, detect input types transparently, and extract arrays internally
+      — raising clear errors for mixed input types
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Without DataFrame input support, users must manually extract numpy arrays before each function call, introducing
+      boilerplate and increasing the risk of type mismatch errors in quantitative research workflows
+    derived_from_bd_id: BD-024
+  - id: finance-C-150
+    when: When processing input data before calling TA-Lib C functions
+    action: Convert each input data to float64 numpy arrays with C-contiguous memory layout before passing to C functions
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using float32 or integer arrays causes memory misalignment with C ABI requirements, leading to segmentation
+      faults or silent precision loss in technical indicator calculations
+    derived_from_bd_id: BD-025
+  - id: finance-C-151
+    when: When implementing the TA-Lib Python API
+    action: Provide both Function API (stateless) and Abstract API (stateful) interfaces, sharing the same underlying C implementation
+      for correctness and performance
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Removing either the stateless or stateful API breaks existing user workflows — batch research relies on stateless
+      calls while live trading relies on stateful streaming interfaces
+    derived_from_bd_id: BD-032
+  - id: finance-C-152
+    when: When implementing or refactoring function name lookup logic in the TA-Lib Python wrapper
+    action: Normalize each function names to uppercase internally while accepting any casing from users (case-insensitive
+      lookup)
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Breaking case-insensitive function name lookup causes existing code using 'rsi', 'RSI', or 'Rsi' to fail
+      with function not found errors, making the wrapper incompatible with user expectations
+    derived_from_bd_id: BD-042
+  - id: finance-C-153
+    when: When implementing output array initialization in the Python wrapper for technical indicator functions
+    action: Use make_double_array() to pre-fill output arrays with NaN up to the lookback period, deferring sentinel value
+      initialization to the wrapper layer
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Skipping NaN pre-fill causes lookback period to contain uninitialized garbage values instead of proper NaN
+      sentinels, leading to incorrect calculations and silent data corruption in backtesting strategies
+    derived_from_bd_id: BD-043
+  - id: finance-C-154
+    when: When implementing or adjusting technical indicator default parameters
+    action: Change the default timeperiod=14 for RSI (Wilder's original) or timeperiod=30 for common MAs without explicit
+      documentation — these defaults encode industry-standard conventions
+    severity: medium
+    kind: operational_lesson
+    modality: must_not
+    consequence: Modifying default timeperiod values causes strategies to use non-standard parameters that alter indicator
+      responsiveness and smoothness, leading to backtest-live divergence when live trading uses broker defaults
+    derived_from_bd_id: BD-046
+  - id: finance-C-155
+    when: When migrating pandas-based rolling statistics code to TA-Lib functions
+    action: Verify that TA-Lib NaN propagation behavior matches strategy expectations — TA-Lib propagates NaN to end of series
+      while pandas may recover after sufficient valid data in window
+    severity: high
+    kind: operational_lesson
+    modality: must
+    consequence: Users expecting pandas-like NaN recovery after sufficient valid data will encounter unexpected NaN regions
+      throughout the TA-Lib output series, causing silent calculation errors in strategies that rely on rolling statistics
+      recovering from missing data
+    derived_from_bd_id: BD-098
+  - id: finance-C-156
+    when: When using the Stochastic Oscillator indicator with default parameters
+    action: Change the slowK default smoothing period from 3-period SMA without explicit testing and justification — the default
+      minimizes signal noise while maintaining responsiveness for overbought/oversold detection
+    severity: medium
+    kind: operational_lesson
+    modality: should_not
+    consequence: Modifying the slowK default period alters the indicator's smoothing characteristics; a longer period increases
+      lag and may miss timely entry/exit points while a shorter period increases noise and generates false trading signals
+    derived_from_bd_id: BD-058
+  - id: finance-C-157
+    when: When using the Stochastic Oscillator indicator with default parameters
+    action: Change the slowD default smoothing period from 3-period SMA without explicit testing and justification — the double-smoothing
+      creates the signal line for buy/sell crossovers
+    severity: medium
+    kind: operational_lesson
+    modality: should_not
+    consequence: Modifying the slowD default period alters the crossover signal characteristics; changing to a shorter period
+      increases false signals while a longer period increases lag in momentum trading decisions
+    derived_from_bd_id: BD-059
+  - id: finance-C-158
+    when: When configuring Bollinger Bands with default parameters
+    action: Change the default 20-period MA window or 2 standard deviation multiplier without explicit testing and justification
+      — the multiplier of 2 captures approximately 95% of price action under normal distribution
+    severity: medium
+    kind: operational_lesson
+    modality: should_not
+    consequence: Modifying the standard deviation multiplier changes the volatility envelope width; 1.5x creates tighter bands
+      causing more false mean reversion signals while 3.0x focuses only on extreme movements, missing valid trading opportunities
+    derived_from_bd_id: BD-060
+  - id: finance-C-159
+    when: When configuring Stochastic RSI indicator with default parameters
+    action: Change the default 14-period timeperiod without explicit testing and justification — the period aligns with traditional
+      RSI conventions for a two-week trading cycle
+    severity: medium
+    kind: operational_lesson
+    modality: should_not
+    consequence: Modifying the Stochastic RSI period changes momentum sensitivity; shorter periods increase responsiveness
+      but also increase noise while longer periods smooth fluctuations and may delay valid signals in momentum-based strategies
+    derived_from_bd_id: BD-061
+  - id: finance-C-160
+    when: When implementing or refactoring Abstract Function classes that maintain internal state
+    action: Use threading.local() for per-thread state isolation — each thread must maintain independent state arrays without
+      sharing or locking
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without threading.local() isolation, concurrent threads sharing Abstract Function state will cause race conditions
+      on internal state arrays, producing incorrect indicator values and non-deterministic backtest results
+    derived_from_bd_id: BD-033
+  - id: finance-C-161
+    when: When implementing indicator functions for real-time trading scenarios
+    action: Provide streaming versions (stream_*) of each function that support incremental O(1) per-tick updates — do not
+      rely solely on batch processing that requires O(n) full recalculation on each new bar
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without streaming variants, real-time trading systems face O(n) recalculation cost per tick, causing unacceptable
+      latency spikes that make low-latency strategy execution impossible
+    derived_from_bd_id: BD-035
+  - id: finance-C-162
+    when: When validating input arrays before passing to low-level indicator calculations
+    action: Validate that input arrays are float64 dtype and C-contiguous memory layout before processing — reject non-compliant
+      inputs with clear Python error messages
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Without float64 and C-contiguous validation, invalid inputs reach C-level libraries causing segmentation
+      faults or undefined behavior with cryptic stack traces instead of actionable error messages
+    derived_from_bd_id: BD-036
+  - id: finance-C-163
+    when: When processing DataFrame inputs in calculation functions
+    action: Raise an explicit exception when polars and pandas DataFrames are mixed in the same calculation — do not allow
+      implicit conversion between DataFrame types
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Without explicit exception handling, mixing polars and pandas inputs produces ambiguous results due to different
+      index semantics and type systems, leading to silent data corruption in calculation outputs
+    derived_from_bd_id: BD-037
+  - id: finance-C-164
+    when: When implementing MAVP (Moving Average Variable Period) calculations with invalid period values
+    action: Use default SMA timeperiod values as fallback when periods exceed valid ranges — must not raise exceptions or
+      change to other fallback behaviors
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Changing the fallback behavior from default SMA timeperiod to exceptions breaks existing code that relies
+      on graceful degradation, causing silent failures in variable-period moving average calculations
+    derived_from_bd_id: BD-063
+  - id: finance-C-165
+    when: When using STOCHRSI (Stochastic RSI) indicator in momentum-based overbought/oversold analysis
+    action: Use the default RSI and Stochastic parameters that align with traditional technical analysis conventions — must
+      not use non-standard parameter values
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Using non-standard STOCHRSI parameters causes the indicator to produce momentum signals that deviate from
+      market conventions, making comparison with other traders' analysis unreliable and potentially causing incorrect trading
+      decisions
+    derived_from_bd_id: BD-067
+  - id: finance-C-166
+    when: When configuring TA-Lib compatibility mode for indicator calculations
+    action: Set compatibility mode to 0 (default TA-Lib calculation behavior) — must not set to mode 1 or other alternative
+      calculation methods
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Setting compatibility mode to non-zero values causes TA-Lib functions to produce slightly different results
+      for edge cases, breaking consistency with standard TA-Lib behavior and causing backtest-live discrepancies
+    derived_from_bd_id: BD-070
+  - id: finance-C-167
+    when: When calculating Bollinger Bands (BBANDS) for trend visualization and signal generation
+    action: Verify that BBANDS uses default parameters of 20-period MA and 2 standard deviations — these standard values verify
+      cross-platform comparison consistency
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Using non-standard Bollinger Band parameters makes comparison with other traders' analysis difficult and
+      reduces the indicator's utility as a market-standard tool, potentially causing misalignment in trading strategies
+    derived_from_bd_id: BD-075
+  - id: finance-C-168
+    when: When implementing Three Black Crows (CDL3BLACKCROWS) candlestick pattern detection for bearish reversal signals
+    action: Use the specific price relationship thresholds defined by the pattern detection logic — must not adjust thresholds
+      to be more stringent or looser without explicit user configuration
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Altering CDL3BLACKCROWS detection thresholds changes the timing and frequency of bearish reversal signals,
+      causing strategies to either miss valid reversal patterns or generate excessive false signals
+    derived_from_bd_id: BD-076
+  - id: finance-C-169
+    when: When implementing parameter validation for wrapper functions that accept numeric arguments
+    action: Raise TypeError immediately for type mismatches when float values are passed to integer parameters (e.g., 14.5
+      for timeperiod=14) — do not silently truncate or coerce values
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Silent type coercion changes user intent without warning, causing subtle calculation errors in RSI, moving
+      averages, and other indicator computations that are difficult to trace in production
+    derived_from_bd_id: BD-047
+  - id: finance-C-170
+    when: When implementing wrapper functions that delegate to C/Cython implementations
+    action: Use @wraps decorator or equivalent mechanism to preserve function metadata (name, docstring, annotations) from
+      the underlying implementation
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without metadata preservation, function introspection, documentation generation, and IDE autocompletion fail,
+      breaking Python tooling expectations and reducing developer productivity
+    derived_from_bd_id: BD-049
+  - id: finance-C-171
+    when: When handling return values from wrapper functions that support both batch and streaming modes
+    action: Detect streaming results by checking if the first result lacks __len__ attribute — use duck-typing to distinguish
+      single scalar values from arrays/Series
+    severity: high
+    kind: domain_rule
+    modality: must
+    consequence: Incorrect type detection causes TypeError or silent data corruption when streaming scalar values are incorrectly
+      treated as batch arrays or vice versa in downstream processing
+    derived_from_bd_id: BD-050
+  - id: finance-C-174
+    when: When implementing the DataFrame input path for TA-Lib function calls
+    action: Explicitly detect non-NPY_DOUBLE or non-C-contiguous arrays before calling C functions; if conversion is required,
+      document the O(n) performance cost and warn users in high-frequency trading scenarios
+    severity: high
+    kind: architecture_guardrail
+    modality: must
+    consequence: Without explicit detection and warning, the multi-step DataFrame conversion (extract ndarray, convert to
+      float64, make C-contiguous) creates hidden O(n) performance cost that causes unpredictable latency spikes in high-frequency
+      trading with large arrays
+    derived_from_bd_id: BD-097
+  - id: finance-C-175
+    when: When auditing coverage and maintaining mutual exclusion constraints between polars and pandas
+    action: Consolidate BD-016 and BD-037 into a single canonical business decision to eliminate redundant maintenance risk;
+      define scope unambiguously (single call vs session-level)
+    severity: medium
+    kind: operational_lesson
+    modality: should
+    consequence: Redundant constraints with ambiguous scope create maintenance risk where exception messages or behavior may
+      diverge between two BDs, causing inconsistent enforcement of mutual exclusion rules
+    derived_from_bd_id: BD-101
+output_validator:
+  assertions:
+  - id: OV-01
+    check_predicate: all(p in inspect.getsource(zvt.factors.algorithm.macd) for p in ['slow=26', 'fast=12', 'n=9'])
+    failure_message: 'FATAL: MACD params drifted from (fast=12, slow=26, n=9) — SL-08 violation, non-reproducible signals'
+    business_meaning: Standard MACD parameters are a semantic lock; drift makes results incomparable with industry-standard
+      indicators and non-reproducible.
+    source_ids:
+    - SL-08
+    - BD-036
+  - id: OV-02
+    check_predicate: result.get('total_trades', 0) > 0 or result.get('explicit_zero_trade_ack') is True
+    failure_message: Zero trades executed — likely missing pre-fetched data (see PC-02) or over-restrictive filters
+    business_meaning: A backtest with zero trades is not a valid result; either data is missing or the strategy never triggered.
+      Structural non-emptiness check is insufficient — we need business confirmation.
+    source_ids:
+    - SL-01
+    - finance-C-073
+  - id: OV-03
+    check_predicate: result.get('annual_return') is None or abs(float(result['annual_return'])) <= 5.0
+    failure_message: 'FATAL: |annual_return| > 500% — likely look-ahead bias or data error'
+    business_meaning: Annual returns exceeding 500% are physically implausible for A-share strategies; indicates look-ahead
+      bias or corrupt data.
+    source_ids: []
+  - id: OV-04
+    check_predicate: result.get('holding_change_pct') is None or abs(float(result['holding_change_pct'])) <= 1.0
+    failure_message: 'FATAL: |holding_change_pct| > 100% — physically impossible'
+    business_meaning: Holding change percentage cannot exceed 100%; violation indicates position accounting error.
+    source_ids:
+    - BD-029
+  - id: OV-05
+    check_predicate: result.get('max_drawdown') is None or abs(float(result['max_drawdown'])) <= 1.0
+    failure_message: 'FATAL: |max_drawdown| > 100% — impossible for non-leveraged account'
+    business_meaning: Maximum drawdown cannot exceed 100% without leverage; violation indicates calculation error or look-ahead
+      bias.
+    source_ids: []
+  - id: OV-06
+    check_predicate: not (hasattr(result, 'trade_log') and result.trade_log and any(result.trade_log[i].action == 'sell' and
+      i+1 < len(result.trade_log) and result.trade_log[i+1].action == 'buy' and result.trade_log[i].timestamp == result.trade_log[i+1].timestamp
+      for i in range(len(result.trade_log)-1)))
+    failure_message: 'FATAL: buy-before-sell detected in same cycle — SL-01 violation, creates implicit leverage'
+    business_meaning: SL-01 requires sell() before buy() in each cycle; violation means available_long was not updated before
+      buying, risking duplicate positions.
+    source_ids:
+    - SL-01
+  scaffold:
+    validate_py_path: '{workspace}/validate.py'
+    tail_block: "# === DO NOT MODIFY BELOW THIS LINE ===\nif __name__ == \"__main__\":\n    result = run_backtest()\n    from\
+      \ validate import enforce_validation\n    enforce_validation(result, output_path=\"{workspace}/result.csv\")\n# ===\
+      \ END DO NOT MODIFY ==="
+  enforcement_protocol: 1. Never edit validate.py. 2. Never delete the DO NOT MODIFY tail block from the main script. 3. Never
+    wrap enforce_validation() in try/except. 4. Never rewrite result write logic — it MUST go through enforce_validation.
+    5. If validate.py raises ImportError, fix the dependency, do not remove the call.
+acceptance:
+  hard_gates:
+  - id: G1
+    check: '{workspace}/result.csv exists AND file size > 0'
+    on_fail: Strategy did not produce output; check run_backtest() return value and enforce_validation() call
+  - id: G2
+    check: '{workspace}/result.csv.validation_passed marker file exists'
+    on_fail: Validation did not complete; review validate.py output and fix assertion failures
+  - id: G3
+    check: 'Main script contains literal: from validate import enforce_validation'
+    on_fail: Validation chain stripped; re-add the import in the DO NOT MODIFY block
+  - id: G4
+    check: 'Main script contains literal: # === DO NOT MODIFY BELOW THIS LINE ==='
+    on_fail: Validation fence removed; regenerate DO NOT MODIFY tail block
+  - id: G5
+    check: 'result.csv has at least 1 row: pandas.read_csv(result.csv).shape[0] >= 1'
+    on_fail: Empty result; check if trade_log is non-empty and factors generated signals. Confirm PC-02 (k-data exists) passed.
+  - id: G6
+    check: 'If MACD strategy: source contains ''slow=26'' AND ''fast=12'' AND ''n=9'' in algorithm call'
+    on_fail: MACD params drifted from SL-08 lock; restore standard (12, 26, 9)
+  - id: G7
+    check: 'For data pipeline tasks: result.csv contains ''entity_id'' and ''timestamp'' fields'
+    on_fail: Missing required columns; check Mixin.query_data return schema and DataFrame MultiIndex reset_index() before
+      writing
+  - id: G8
+    check: 'OV-03 passes: abs(annual_return) <= 5.0 (500%)'
+    on_fail: Physical plausibility check failed; investigate look-ahead bias or data corruption in input kdata
+  soft_gates:
+  - id: SG-01
+    rubric: 'Strategy narrative consistency: user intent aligns with generated strategy.py logic. dim_a: signal direction
+      (buy/sell) matches intent [1-5, pass>=4]; dim_b: frequency (daily/intraday) aligns [1-5, pass>=4]; dim_c: risk controls
+      match user intent [1-5, pass>=4].'
+  - id: SG-02
+    rubric: 'Factor combination quality. dim_a: no highly correlated factor duplication [1-5, pass>=4]; dim_b: multi-period
+      alignment correct [1-5, pass>=4]; dim_c: liquidity filter present for A-share [1-5, pass>=4].'
+  - id: SG-03
+    rubric: 'Data source selection appropriateness. dim_a: coverage sufficient for target entities [1-5, pass>=4]; dim_b:
+      provider latency acceptable for strategy frequency [1-5, pass>=4]; dim_c: no unauthorized provider used without credentials
+      [1-5, pass>=4].'
+skill_crystallization:
+  trigger: all_hard_gates_passed AND user_opt_out_skill_saving != true
+  output_path_template: '{workspace}/../skills/{slug}.skill'
+  slug_template: '{blueprint_id_short}-{uc_id_lower}'
+  captured_fields:
+  - name
+  - intent_keywords
+  - entry_point_script
+  - validate_script
+  - fatal_constraints
+  - spec_locks
+  - preconditions
+  - install_recipes
+  - human_summary_translated
+  action: 'After all Hard Gates PASS, resolve slug via slug_template using the executed UC, then write the .skill YAML file
+    at output_path_template. Notify user in their detected locale: ''Skill saved as {slug}.skill — next time say one of {sample_triggers}
+    from the matched UC to invoke directly.'''
+  violation_signal: All hard gates passed but no .skill file exists at expected path
+  skill_file_schema:
+    name: finance-bp-109 / TA-Lib Documentation HTML Generator
+    version: v5.3
+    intent_keywords:
+    - documentation generation
+    - html pages
+    - pygments stylesheet
+    - markdown to html
+    - code highlighting
+    entry_point: run_backtest
+    fatal_guards:
+    - SL-01
+    - SL-02
+    - SL-03
+    - SL-04
+    - SL-05
+    - SL-06
+    - SL-07
+    - SL-08
+    - SL-10
+    - SL-11
+    - SL-12
+    spec_locks:
+    - SL-01
+    - SL-02
+    - SL-03
+    - SL-04
+    - SL-05
+    - SL-06
+    - SL-07
+    - SL-08
+    - SL-09
+    - SL-10
+    - SL-11
+    - SL-12
+    preconditions:
+    - PC-01
+    - PC-02
+    - PC-03
+    - PC-04
+post_install_notice:
+  trigger: skill_installation_complete
+  message_template:
+    positioning: I help you build quant strategies on A-share with ZVT — from data fetch to backtest, one flow.
+    capability_catalog:
+      group_strategy:
+        source: auto_grouped
+        strategy_reason: no candidate field had 2-7 distinct values; all capabilities collapsed into single group
+      groups:
+      - group_id: all
+        name: All Capabilities
+        description: ''
+        emoji: 📦
+        uc_count: 1
+        ucs:
+        - uc_id: UC-101
+          name: TA-Lib Documentation HTML Generator
+          short_description: 'Converts TA-Lib markdown documentation into styled HTML pages for web publishing, and generates
+            Pygments syntax highlighting CSS for code examples in '
+          sample_triggers:
+          - documentation generation
+          - html pages
+          - pygments stylesheet
+    call_to_action: Tell me which one you want to try.
+    featured_entries:
+    - uc_id: UC-101
+      beginner_prompt: Try ta-lib documentation html generator
+      auto_selected: true
+    - uc_id: UC-100
+      beginner_prompt: Try capability UC-100
+      auto_selected: true
+    - uc_id: UC-101
+      beginner_prompt: Try capability UC-101
+      auto_selected: true
+    more_info_hint: Ask me 'what else can you do?' to see all 1 capabilities.
+  locale_rendering:
+    instruction: On skill_installation_complete, translate ALL user-facing strings (positioning + capability_catalog.groups[].name
+      + capability_catalog.groups[].description + capability_catalog.groups[].ucs[].short_description + call_to_action + featured_entries[].beginner_prompt
+      + more_info_hint) into detected user locale per locale_contract. Preserve UC-IDs, group_id, emoji, and sample_triggers
+      verbatim.
+    preserve_verbatim:
+    - UC-IDs
+    - group_id
+    - emoji
+    - sample_triggers
+    - technical_class_names
+  enforcement:
+    action: 'Host agent MUST send composed message to user as the FIRST user-facing response after skill_installation_complete
+      event. Message MUST contain: positioning, capability_catalog (rendered as markdown tables per group), 3 featured_entries,
+      call_to_action, and more_info_hint.'
+    violation_code: PIN-01
+    violation_signal: First user-facing message post-install does not contain the full capability_catalog (all UCs grouped)
+      OR skips featured_entries OR skips call_to_action.
+human_summary:
+  persona: Doraemon
+  what_i_can_do:
+    tagline: 'I help you build quant strategies on A-share with ZVT — from data fetch to backtest, one flow. Just tell me
+      what you want; I''ll write the code, you don''t have to dig docs. (Heads up: ZVT natively supports A-share, HK, and
+      crypto. US stocks — stockus_nasdaq_AAPL — are half-baked; don''t bother for serious work.)'
+    use_cases:
+    - TA-Lib Documentation HTML Generator
+    - A-share MACD daily golden-cross backtest with hfq price adjustment from eastmoney
+    - 'End-to-end ZVT pipeline: FinanceRecorder + GoodCompanyFactor + StockTrader'
+    - Multi-factor strategy with TargetSelector (AND mode) combining MACD + volume breakout
+    - Index composition data collection (SZ1000, SZ2000) with EM recorder
+    - Institutional fund holdings tracker via joinquant_fund_runner pattern
+    - Custom Transformer + Accumulator factor with per-entity rolling state
+  what_i_auto_fetch:
+  - ZVT stage pipeline structure (data_collection → visualization) from LATEST.yaml
+  - Semantic locks (SL-01 through SL-12) — especially sell-before-buy ordering and MACD params
+  - Fatal constraints (finance-C-*) relevant to your target strategy type
+  - 'Default parameters: MACD(12,26,9), hfq adjustment, buy_cost=0.001, base_capital=1M CNY'
+  - Entity ID format (stock_sh_600000) and DataFrame MultiIndex convention
+  - Provider-specific recorder class names and required class attributes
+  what_i_ask_you:
+  - 'Target market: A-share (default), HK, or crypto? (US stocks in ZVT are half-baked — stockus_nasdaq_AAPL exists but coverage
+    is thin)'
+  - 'Data source / provider: eastmoney (free, no account), joinquant (account+paid), baostock (free, good history), akshare,
+    or qmt (broker)?'
+  - 'Strategy type: MACD golden-cross, MA crossover, volume breakout, fundamental screen, or custom factor?'
+  - 'Time range: start_timestamp and end_timestamp for backtest period'
+  - 'Target entity IDs: specific stocks (stock_sh_600000) or index components (SZ1000)?'
+  locale_rendering:
+    instruction: On first user contact, translate all fields above into detected user locale while preserving Doraemon persona
+      (direct, frank, mildly snarky, knows limits).
+    preserve_verbatim:
+    - BD-IDs
+    - SL-IDs
+    - UC-IDs
+    - finance-C-IDs
+    - class_names
+    - function_names
+    - file_paths
+    - numeric_thresholds
