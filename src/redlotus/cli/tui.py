@@ -318,7 +318,7 @@ class RedLotusTui(App[None]):
             self.system.review_store.activate(self._on_reviews_changed)
         self.set_interval(0.5, self.refresh_status)
         self.query_one("#input", AgentInput).focus()
-        await self.system.prepare_cli_session()
+        await self._prepare_cli_session()
         controller = self.system._cli_controller
         controller._active_session_state = self.state
         controller.set_snapshot_picker(self.pick_snapshot)
@@ -328,6 +328,11 @@ class RedLotusTui(App[None]):
 
     def _schedule_workspace_enter(self) -> None:
         self.run_worker(self._enter_workspace_after_mount, exclusive=True)
+
+    async def _prepare_cli_session(self) -> None:
+        missing = await self.system.prepare_cli_session()
+        if missing:
+            self._begin_api_input()
 
     async def _enter_workspace_after_mount(self) -> None:
         loaded = await self.system._cli_controller.enter_current_workspace()

@@ -831,8 +831,8 @@ class AgentSystem:
         await self._after_coordinator_turn(history)
         return history, output
 
-    async def prepare_cli_session(self) -> None:
-        await self._cli_controller.prepare_session()
+    async def prepare_cli_session(self) -> tuple[str, ...]:
+        return await self._cli_controller.prepare_session()
 
     async def process_cli_line(
         self,

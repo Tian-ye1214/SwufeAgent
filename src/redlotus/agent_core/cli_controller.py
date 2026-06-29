@@ -18,7 +18,7 @@ from redlotus.cli.file_ref import augment_text_with_file_refs, load_file_refs
 from redlotus.cli.output import ContextUsageItem, clear_context_usage, set_context_usage
 from redlotus.cli.render import print_repl_welcome, print_success, print_warning
 from redlotus.cli.repl import InteractiveRepl
-from redlotus.cli.cli_commands import handle_slash_command
+from redlotus.cli.cli_commands import handle_slash_command, interactive_set_api
 from redlotus.cli.cli_ui import print_startup_logo
 from redlotus.tools.memory import ChatHistory
 from redlotus.workspace.workspace import WorkspaceSnapshot
@@ -102,11 +102,24 @@ class AgentCliController:
         history.reset()
         clear_context_usage()
 
-    async def prepare_session(self) -> None:
-        print_startup_logo()
-        print_repl_welcome()
+    async def _prewarm_contexts(self) -> None:
         await prewarm_effective_max_contexts_by_role_async(reason="program startup")
         self.system._context_prewarmed = True
+
+    async def prepare_session(self) -> tuple[str, ...]:
+        print_startup_logo()
+        print_repl_welcome()
+        app_config.reload_config()
+        missing = app_config.missing_main_api_keys()
+        if missing:
+            print_warning(
+                "Missing main model API config: "
+                + ", ".join(missing)
+                + ". Please enter /api or configure .env/config.json first."
+            )
+            return missing
+        await self._prewarm_contexts()
+        return ()
 
     def schedule_queue_drain(self) -> None:
         if self.system._current_turn is not None or not self._queued_inputs:
@@ -340,7 +353,12 @@ class AgentCliController:
             await run_textual_tui(self.system, stop_event=stop_event)
             return
 
-        await self.prepare_session()
+        missing = await self.prepare_session()
+        if missing:
+            interactive_set_api()
+            app_config.reload_config()
+            if not app_config.missing_main_api_keys():
+                await self._prewarm_contexts()
         state = self.new_session_state()
         self._active_session_state = state
 
