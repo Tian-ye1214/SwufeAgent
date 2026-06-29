@@ -37,11 +37,13 @@ def _get_shared_client() -> httpx.AsyncClient:
 
 
 class LongTermMemory:
-    """跨会话长期记忆，持久化到 src/prompts/LongTermMemory/ 目录。
+    """跨会话长期记忆。
 
-    - MEMORY_GUIDANCE.md：给模型的长期记忆**使用**说明（随 load 注入 get_injection，不是抽取提示词）
-    - soul_user_consolidation.md：从对话或日志增量中**合并**出 SOUL/USER 整篇正文的**唯一**提示词
-    - SOUL.md / USER.md：各一份 **Markdown** 文件（首行 `# SOUL` / `# USER`，正文为整体叙述）；无标题时整篇当正文；`\\n---\\n` 分隔的段落会合并
+    - 可写数据（SOUL.md / USER.md / consolidation_state.json）：`paths.memory_dir()`（用户数据目录）
+    - 只读模板（MEMORY_GUIDANCE.md / soul_user_consolidation.md）：`prompts/LongTermMemory/`
+    - MEMORY_GUIDANCE.md：长期记忆**使用**说明（注入 get_injection，不是合并提示词）
+    - soul_user_consolidation.md：从提供的文本**合并** SOUL/USER 整篇正文的**唯一**提示词
+    - SOUL.md / USER.md：各一份 Markdown（首行 `# SOUL` / `# USER`）；`\\n---\\n` 分隔段落在读取时合并
     """
     _CHAR_LIMIT = 8000
     _PROMPT_BODY_ELIDE = 10_000
@@ -329,7 +331,7 @@ class LongTermMemory:
 
     async def consolidate_from_messages(self, messages: list, *, silent: bool = True) -> None:
         """
-        根据本轮消息转写，调用 worker 将 SOUL/USER 各**整篇**重写成自洽正文并落盘（见 soul_user_consolidation.md）。
+        根据用户输入转写（`user_prompts_to_text`），调用 worker 将 SOUL/USER 各**整篇**重写成自洽正文并落盘（见 soul_user_consolidation.md）。
         失败时静默（silent=True）或抛出异常。
         """
         try:
