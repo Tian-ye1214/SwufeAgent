@@ -590,6 +590,40 @@ class BasicToolkit:
             ]
         )
 
+    async def _generate_image_result(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        max_wait_time: int,
+        *,
+        include_image_content: bool,
+    ) -> ToolReturn | str:
+        result = await generate_image_from_flux(prompt, width=width, height=height, max_wait_time=max_wait_time)
+        if not isinstance(result, tuple):
+            return result
+
+        image_bytes, mime_type, info_text = result
+        ext = mimetypes.guess_extension(mime_type) or ".jpg"
+        name = f"generated_{int(time.time())}{ext}"
+        try:
+            path = self._resolve_path_candidate(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_bytes, image_bytes)
+        except ValueError as e:
+            return f"Security error: {e}"
+
+        text = f"{info_text}\nSaved to: {path.name}"
+        if not include_image_content:
+            return text
+        return ToolReturn(
+            return_value=text,
+            content=[
+                info_text,
+                BinaryContent(data=image_bytes, media_type=mime_type),
+            ]
+        )
+
     async def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, max_wait_time: int = 300) -> ToolReturn | str:
         """
         Generate images using AI model. Use this tool whenever the user asks to create, generate, make, or produce an image, picture, photo, illustration, artwork, or visual content.
@@ -609,29 +643,33 @@ class BasicToolkit:
             Success: The generated image displayed inline plus generation details.
             Failure: Returns an error message.
         """
-        result = await generate_image_from_flux(prompt, width=width, height=height, max_wait_time=max_wait_time)
-        if not isinstance(result, tuple):
-            return result
-
-        image_bytes, mime_type, info_text = result
-        ext = mimetypes.guess_extension(mime_type) or ".jpg"
-        name = f"generated_{int(time.time())}{ext}"
-        try:
-            path = self._resolve_path_candidate(name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(path.write_bytes, image_bytes)
-        except ValueError as e:
-            return f"Security error: {e}"
-
-        return ToolReturn(
-            return_value=f"{info_text}\nSaved to: {path.name}",
-            content=[
-                info_text,
-                BinaryContent(data=image_bytes, media_type=mime_type),
-            ]
+        return await self._generate_image_result(
+            prompt,
+            width,
+            height,
+            max_wait_time,
+            include_image_content=True,
         )
 
-    def worker_tool_groups(self, *, include_browser: bool) -> dict[str, list]:
+    def _text_only_generate_image_tool(self):
+        async def generate_image(
+            prompt: str,
+            width: int = 1024,
+            height: int = 1024,
+            max_wait_time: int = 300,
+        ) -> str | ToolReturn:
+            return await self._generate_image_result(
+                prompt,
+                width,
+                height,
+                max_wait_time,
+                include_image_content=False,
+            )
+
+        generate_image.__doc__ = self.generate_image.__doc__
+        return generate_image
+
+    def worker_tool_groups(self, *, include_browser: bool, include_multimodal: bool = True) -> dict[str, list]:
         """Worker tools grouped for resident tools and deferred capabilities."""
         browser = [
             self.browser_navigate,
@@ -660,8 +698,8 @@ class BasicToolkit:
                 self.run_command,
             ],
             "media": [
-                self.generate_image,
-                self.read_image,
+                self.generate_image if include_multimodal else self._text_only_generate_image_tool(),
+                *([self.read_image] if include_multimodal else []),
                 extract_text,
             ],
             "memory": list(self._extra_worker_tools),
@@ -671,12 +709,21 @@ class BasicToolkit:
             groups["browser"] = browser
         return {name: tools for name, tools in groups.items() if tools}
 
-    def _worker_tools(self, *, include_browser: bool) -> list:
+    def _worker_tools(self, *, include_browser: bool, include_multimodal: bool = True) -> list:
         """扁平工具集（Coordinator 直用）：由 worker_tool_groups 拍平，单一真相源。"""
         tools: list = []
-        for group in self.worker_tool_groups(include_browser=include_browser).values():
+        for group in self.worker_tool_groups(
+            include_browser=include_browser,
+            include_multimodal=include_multimodal,
+        ).values():
             tools.extend(group)
         return tools
+
+    def worker_tools(self, *, include_browser: bool, include_multimodal: bool = True) -> list:
+        return self._worker_tools(
+            include_browser=include_browser,
+            include_multimodal=include_multimodal,
+        )
 
     @property
     def workers_tools(self) -> list:

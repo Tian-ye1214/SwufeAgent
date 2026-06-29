@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import weakref
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,7 +13,7 @@ from typing import Any
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
 from redlotus.config.app_config import settings
-from redlotus.infra.persist_utils import atomic_write_json, iso_utc_now, safe_segment
+from redlotus.infra.persist_utils import atomic_write_json, file_lock, iso_utc_now, safe_segment
 from redlotus.infra import logger
 from redlotus.workspace.workspace import (
     MODEL_MESSAGES_SUFFIX,
@@ -19,14 +22,94 @@ from redlotus.workspace.workspace import (
     snapshot_basename,
 )
 
-_PENDING_SAVE_TASKS: set[asyncio.Task[None]] = set()
+_SAVE_BATCH_DELAY_SECONDS = 0.2
+
+
+@dataclass(frozen=True)
+class _SavePayload:
+    model_path: Path
+    write: Callable[[], None]
+
+
+class ConversationLogWriter:
+    def __init__(self, *, batch_delay: float = _SAVE_BATCH_DELAY_SECONDS) -> None:
+        self._batch_delay = batch_delay
+        self._queue: asyncio.Queue[_SavePayload] = asyncio.Queue()
+        self._pending: dict[Path, _SavePayload] = {}
+        self._task: asyncio.Task[None] | None = None
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    def enqueue(self, payload: _SavePayload) -> None:
+        self._idle.clear()
+        self._queue.put_nowait(payload)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name="conversation-log-writer")
+
+    async def drain(self, timeout: float) -> bool:
+        if self._task is None:
+            return True
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("conversation_log drain timed out after %.1fs", timeout)
+            return False
+
+    async def _run(self) -> None:
+        while True:
+            payload = await self._queue.get()
+            self._pending[payload.model_path] = payload
+            self._queue.task_done()
+            await self._collect_batch()
+            await self._flush_pending()
+            if self._queue.empty() and not self._pending:
+                self._idle.set()
+
+    async def _collect_batch(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._batch_delay
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                payload = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+            self._pending[payload.model_path] = payload
+            self._queue.task_done()
+
+    async def _flush_pending(self) -> None:
+        batch = self._pending
+        self._pending = {}
+        for payload in batch.values():
+            try:
+                await asyncio.to_thread(payload.write)
+            except Exception as e:
+                logger.error("conversation_log 写入失败: %s", e)
+
+
+_WRITERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, ConversationLogWriter] = weakref.WeakKeyDictionary()
+_WRITERS_LOCK = threading.Lock()
+
+
+def _writer_for_running_loop() -> ConversationLogWriter:
+    loop = asyncio.get_running_loop()
+    with _WRITERS_LOCK:
+        writer = _WRITERS.get(loop)
+        if writer is None:
+            writer = ConversationLogWriter()
+            _WRITERS[loop] = writer
+        return writer
 
 
 def read_saved_model_messages_file(path: Path) -> tuple[list[Any], dict[str, Any]]:
     """从 `*_ModelMessages.json` 读取 `model_messages`，校验并还原为 pydantic-ai 消息对象。"""
     path = Path(path)
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
+    with file_lock(path):
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
     raw = data.get("model_messages")
     if not isinstance(raw, list):
         raise ValueError("文件格式无效：缺少 model_messages 数组")
@@ -43,18 +126,13 @@ def dump_validated_model_messages(model_messages: list[Any]) -> list[dict[str, A
 
 
 async def drain_pending_saves(timeout: float = 10.0) -> bool:
-    tasks = [t for t in list(_PENDING_SAVE_TASKS) if not t.done()]
-    if not tasks:
-        return True
     try:
-        await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=timeout,
-        )
+        writer = _WRITERS.get(asyncio.get_running_loop())
+    except RuntimeError:
         return True
-    except asyncio.TimeoutError:
-        logger.warning("conversation_log drain timed out after %.1fs", timeout)
-        return False
+    if writer is None:
+        return True
+    return await writer.drain(timeout)
 
 
 class ConversationLog:
@@ -76,14 +154,6 @@ class ConversationLog:
         self._root = conversations_root()
         self._run_base: Path | None = existing_run_base
         self._init_lock = threading.Lock()
-        self._write_lock: asyncio.Lock | None = None
-
-    def _write_lock_for_loop(self) -> asyncio.Lock:
-        if self._write_lock is None:
-            with self._init_lock:
-                if self._write_lock is None:
-                    self._write_lock = asyncio.Lock()
-        return self._write_lock
 
     def _snapshot_paths(self, base: Path) -> tuple[Path, Path]:
         return (
@@ -115,17 +185,15 @@ class ConversationLog:
             return
         snap = list(model_messages)
 
-        async def _job() -> None:
-            try:
-                async with self._write_lock_for_loop():
-                    await asyncio.to_thread(self._write, base, snap, extra)
-            except Exception as e:
-                logger.error("conversation_log 写入失败: %s", e)
-
         try:
-            task = asyncio.get_running_loop().create_task(_job())
-            _PENDING_SAVE_TASKS.add(task)
-            task.add_done_callback(_PENDING_SAVE_TASKS.discard)
+            extra_snapshot = dict(extra) if extra else None
+            _, model_path = self._snapshot_paths(base)
+            _writer_for_running_loop().enqueue(
+                _SavePayload(
+                    model_path=model_path,
+                    write=lambda: self._write(base, snap, extra_snapshot),
+                )
+            )
         except RuntimeError:
             pass
 
@@ -142,14 +210,16 @@ class ConversationLog:
             meta.update(extra)
         readable_path, model_path = self._snapshot_paths(base)
         readable_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(
-            readable_path,
-            {"saved_at": saved_at, "meta": meta, "messages": self._to_readable(raw)},
-        )
-        atomic_write_json(
-            model_path,
-            {"saved_at": saved_at, "meta": meta, "model_messages": raw},
-        )
+        with file_lock(readable_path):
+            atomic_write_json(
+                readable_path,
+                {"saved_at": saved_at, "meta": meta, "messages": self._to_readable(raw)},
+            )
+        with file_lock(model_path):
+            atomic_write_json(
+                model_path,
+                {"saved_at": saved_at, "meta": meta, "model_messages": raw},
+            )
 
     def _to_readable(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []

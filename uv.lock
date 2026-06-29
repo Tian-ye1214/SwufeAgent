@@ -2303,7 +2303,7 @@ wheels = [
 [[package]]
 name = "redlotus"
 version = "1.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "ddgs" },
     { name = "filelock" },
@@ -2312,32 +2312,49 @@ dependencies = [
     { name = "json-repair" },
     { name = "lancedb" },
     { name = "loguru" },
-    { name = "matplotlib" },
-    { name = "ncatbot" },
     { name = "numpy" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pandas" },
-    { name = "pillow" },
-    { name = "playwright" },
+    { name = "platformdirs" },
     { name = "prompt-toolkit" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "google"] },
-    { name = "pyinstaller" },
     { name = "pymupdf" },
     { name = "python-docx" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "reportlab" },
     { name = "requests" },
     { name = "rich" },
     { name = "textual" },
-    { name = "wechatbot-sdk" },
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "matplotlib" },
+    { name = "ncatbot" },
+    { name = "pillow" },
+    { name = "playwright" },
+    { name = "reportlab" },
+    { name = "wechatbot-sdk" },
+]
+bots = [
+    { name = "ncatbot" },
+    { name = "wechatbot-sdk" },
+]
+browser = [
+    { name = "playwright" },
+]
+build = [
+    { name = "pyinstaller" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+]
+viz = [
+    { name = "matplotlib" },
+    { name = "pillow" },
+    { name = "reportlab" },
 ]
 
 [package.metadata]
@@ -2349,30 +2366,37 @@ requires-dist = [
     { name = "json-repair", specifier = ">=0.59.5" },
     { name = "lancedb", specifier = ">=0.30.2" },
     { name = "loguru", specifier = ">=0.7.0" },
-    { name = "matplotlib", specifier = ">=3.10.9" },
-    { name = "ncatbot", specifier = ">=4.4.1.post1" },
+    { name = "matplotlib", marker = "extra == 'all'", specifier = ">=3.10.9" },
+    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.9" },
+    { name = "ncatbot", marker = "extra == 'all'", specifier = ">=4.4.1.post1" },
+    { name = "ncatbot", marker = "extra == 'bots'", specifier = ">=4.4.1.post1" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "openai", specifier = ">=2.32.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=3.0.2" },
-    { name = "pillow", specifier = ">=12.2.0" },
-    { name = "playwright", specifier = ">=1.49.0" },
+    { name = "pillow", marker = "extra == 'all'", specifier = ">=12.2.0" },
+    { name = "pillow", marker = "extra == 'viz'", specifier = ">=12.2.0" },
+    { name = "platformdirs", specifier = ">=4.9.0" },
+    { name = "playwright", marker = "extra == 'all'", specifier = ">=1.49.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "google"], specifier = "==1.105.0" },
-    { name = "pyinstaller", specifier = ">=6.20.0" },
+    { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.20.0" },
     { name = "pymupdf", specifier = ">=1.27.2.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "reportlab", specifier = ">=4.5.0" },
+    { name = "reportlab", marker = "extra == 'all'", specifier = ">=4.5.0" },
+    { name = "reportlab", marker = "extra == 'viz'", specifier = ">=4.5.0" },
     { name = "requests", specifier = ">=2.33.1" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "textual", specifier = ">=8.2.7" },
-    { name = "wechatbot-sdk", specifier = ">=0.2.1" },
+    { name = "wechatbot-sdk", marker = "extra == 'all'", specifier = ">=0.2.1" },
+    { name = "wechatbot-sdk", marker = "extra == 'bots'", specifier = ">=0.2.1" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["browser", "bots", "viz", "build", "dev", "all"]
 
 [[package]]
 name = "reportlab"

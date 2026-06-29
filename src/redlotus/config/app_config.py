@@ -136,6 +136,14 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
     return name, out
 
 
+def role_supports_input_modality(role: str, modality: str) -> bool:
+    from redlotus.ModelGateway.ModelChecker import model_supports_input_modality
+
+    model_cfg = settings().get("models", {}).get(role, {})
+    model_name = str(model_cfg.get("name") or "").strip()
+    return bool(model_name and model_supports_input_modality(model_name, modality))
+
+
 def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
     """OpenAI 兼容 chat/completions 的 extra_body 思考参数(DeepSeek/Kimi 用)。"""
     effort = _resolve_reasoning_effort(model_params)

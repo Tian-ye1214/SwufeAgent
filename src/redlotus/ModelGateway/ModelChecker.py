@@ -283,6 +283,21 @@ def _lookup_openrouter_meta(name: str) -> dict[str, Any] | None:
     return None
 
 
+def openrouter_meta_supports_input_modality(meta: dict[str, Any] | None, modality: str) -> bool:
+    arch = meta.get("architecture") if meta else None
+    modalities = arch.get("input_modalities") if isinstance(arch, dict) else None
+    return isinstance(modalities, list) and modality.lower() in {
+        str(item).lower() for item in modalities
+    }
+
+
+def model_supports_input_modality(model_name: str, modality: str) -> bool:
+    return openrouter_meta_supports_input_modality(
+        _lookup_openrouter_meta(model_name),
+        modality,
+    )
+
+
 def _multi_source_lookup(name: str, fns: tuple) -> int | None:
     """按顺序尝试多个查找函数，精确匹配优先，再用归一化名兜底。"""
     for fn in fns:
