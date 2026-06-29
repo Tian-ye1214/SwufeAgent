@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable
 
+from redlotus.config import app_config
 from redlotus.config.app_config import get_env, settings
 from redlotus.agent_core.input_messages import UserMessage
 from redlotus.agent_core.system import AgentSystem
@@ -540,6 +541,17 @@ class BotBase(ABC):
             return
         if not user_text and attachments:
             user_text = ""
+
+        app_config.reload_config()
+        missing = app_config.missing_main_api_keys()
+        if missing:
+            await self._safe_send(
+                send_reply,
+                "Missing main model API config: "
+                + ", ".join(missing)
+                + ". Configure /api or config.json first.",
+            )
+            return
 
         msg = UserMessage(text=user_text, attachments=attachments)
         q = self._get_queue(session_id)

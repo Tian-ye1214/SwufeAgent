@@ -24,7 +24,6 @@ from redlotus.prompt import (
     format_prompt_current_time,
     load_prompt,
 )
-from redlotus.tools.memory import ChatHistory, pydantic_messages_to_text
 
 from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
 
@@ -491,6 +490,8 @@ def _save_compress_debug_artifacts(
     head_end: int,
     tail_start: int,
 ) -> None:
+    from redlotus.tools.memory import pydantic_messages_to_text
+
     root = logger.LOG_DIR / "context_compress_debug"
     root.mkdir(parents=True, exist_ok=True)
     run_dir = root / f"{int(time.time() * 1000)}_{role}"

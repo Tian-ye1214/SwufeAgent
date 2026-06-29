@@ -25,8 +25,21 @@ _API_CONFIG_KEYS = {"BASE_URL", "API_KEY", "SILICONFLOW_BASE", "SILICONFLOW_KEY"
 THINKING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
+def _seed_config_if_missing() -> None:
+    if CONFIG_FILE.exists():
+        return
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    src = default_config_file()
+    try:
+        text = src.read_text(encoding="utf-8") if src.is_file() else "{}\n"
+    except OSError:
+        text = "{}\n"
+    CONFIG_FILE.write_text(text, encoding="utf-8")
+
+
 def load_config() -> dict[str, Any]:
     global _CONFIG
+    _seed_config_if_missing()
     with open(CONFIG_FILE, encoding="utf-8") as f:
         _CONFIG = json.load(f)
     return _CONFIG
