@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from redlotus.config.app_config import get_agent_roles
+from redlotus.config.app_config import (
+    THINKING_EFFORTS,
+    get_agent_roles,
+    role_supported_thinking_efforts,
+)
 
 COMMANDS: tuple[str, ...] = (
     "/help",
@@ -32,7 +36,7 @@ COMMANDS: tuple[str, ...] = (
     "/tasks",
 )
 
-EFFORT_VALUES: tuple[str, ...] = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_VALUES: tuple[str, ...] = ("off", *THINKING_EFFORTS)
 
 CompletionKind = Literal["command", "agent_role", "effort_value", "literal_choice", "file_path"]
 
@@ -40,6 +44,7 @@ _SUBCOMMAND_CHOICES: dict[str, tuple[str, ...]] = {
     "/ltm": ("show", "clear"),
     "/stm": ("show", "clear"),
     "/cancel": ("agent",),
+    "/api": ("embedding",),
 }
 
 
@@ -51,6 +56,7 @@ class InputCompletion:
     prefix: str
     at_mode: bool = False
     choices: tuple[str, ...] = ()
+    role: str = ""
 
 
 def completion_for_input(text: str) -> InputCompletion | None:
@@ -66,12 +72,12 @@ def completion_for_input(text: str) -> InputCompletion | None:
         return None
 
     if text.startswith("/effort "):
-        parts = text.split()
-        prefix = parts[-1] if len(parts) > 1 else ""
-        if len(parts) == 2:
-            return InputCompletion(kind="agent_role", prefix=prefix)
-        if len(parts) == 3:
-            return InputCompletion(kind="effort_value", prefix=prefix)
+        rest = text[len("/effort ") :]
+        if " " not in rest:
+            return InputCompletion(kind="agent_role", prefix=rest)
+        role, prefix = rest.split(" ", 1)
+        if " " not in prefix.strip():
+            return InputCompletion(kind="effort_value", prefix=prefix, role=role.lower())
         return None
 
     if text.startswith("/cd "):
@@ -111,10 +117,11 @@ def iter_agent_role_completions(prefix: str):
             yield role
 
 
-def iter_effort_value_completions(prefix: str):
+def iter_effort_value_completions(prefix: str, role: str = ""):
     """Yield thinking on/off + effort-level values matching *prefix*."""
     folded = prefix.lower()
-    for value in EFFORT_VALUES:
+    values = ("off", *role_supported_thinking_efforts(role)) if role in get_agent_roles() else EFFORT_VALUES
+    for value in values:
         if value.startswith(folded):
             yield value
 

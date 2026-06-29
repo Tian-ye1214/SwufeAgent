@@ -11,7 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from redlotus.config.app_config import CONFIG_FILE, get_agent_roles, get_env, get_model_and_params, set_api, set_model_name, set_thinking
+from redlotus.config.app_config import (
+    CONFIG_FILE,
+    get_agent_roles,
+    get_env,
+    get_model_and_params,
+    role_supported_thinking_efforts,
+    save_config,
+    set_api,
+    set_model_name,
+    settings,
+)
 from redlotus.runtime.lifecycle import AgentInvocationState
 from redlotus.runtime.runtime_state import TRACE_STORE
 from redlotus.ModelGateway.ModelChecker import (
@@ -108,8 +118,9 @@ def print_cli_help() -> None:
 | `/LTM show` / `/LTM clear` | 查看或清空长期记忆 |
 | `/STM show` / `/STM clear` | 查看或清空短期 RAG 记忆 |
 | `/agent` | 查看或切换模型：`/agent <role> <模型名>` |
-| `/effort` | 查看或调整各角色思考：`/effort <role> off｜minimal｜low｜medium｜high｜xhigh｜max` |
-| `/api` | 修改 BASE_URL 与 API_KEY |
+| `/effort` | 查看或调整各角色思考：`/effort <role> off｜<supported>` |
+| `/api` | 修改主模型 BASE_URL 与 API_KEY |
+| `/api embedding` | 修改 embedding/rerank API |
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` | Agent 生命周期与 invocation |
 | `/cancel` | 中止 invocation |
@@ -156,17 +167,51 @@ def print_effort_settings() -> None:
     print_panel("\n".join(lines), title="思考配置")
 
 
-def interactive_set_api() -> None:
-    cur_b = (get_env("BASE_URL", warn=False) or "").strip()
-    cur_k = (get_env("API_KEY", warn=False) or "").strip()
-    _out(f"\n当前 BASE_URL: {cur_b or '(空；优先 .env 再 config)'}")
-    _out(f"当前 API_KEY: {'已填写' if cur_k else '(空；优先 .env 再 config)'}\n")
-    nb = input("请输入 BASE_URL（回车保持当前值）: ").strip()
-    nk = input("请输入 API_KEY（回车保持当前值）: ").strip()
-    new_base = nb if nb else cur_b
-    new_key = nk if nk else cur_k
-    set_api(new_base, new_key)
-    _out("已更新 API 配置并写入 config.json。\n")
+def _effort_values_text(role: str) -> str:
+    return "|".join(role_supported_thinking_efforts(role))
+
+
+def _print_effort_usage(roles: tuple[str, ...]) -> None:
+    role_text = "|".join(roles)
+    _out(f"设置思考: /effort <{role_text}> off")
+    for role in roles:
+        values = _effort_values_text(role)
+        if values:
+            _out(f"设置思考: /effort {role} <{values}>")
+
+
+def _api_value_label(key: str, value: str) -> str:
+    if "KEY" in key:
+        return "已填写" if value else "(空；优先 config 再 .env)"
+    return value or "(空；优先 config 再 .env)"
+
+
+def _prompt_api_values(fields: tuple[tuple[str, str], ...]) -> dict[str, str | None]:
+    values: dict[str, str | None] = {}
+    _out()
+    for key, label in fields:
+        cur = (get_env(key, warn=False) or "").strip()
+        _out(f"当前 {label}: {_api_value_label(key, cur)}")
+        value = input(f"请输入 {label}（回车保持当前值）: ").strip()
+        values[key] = value or None
+    return values
+
+
+def interactive_set_api(*, embedding: bool = False) -> None:
+    if embedding:
+        values = _prompt_api_values(
+            (("SILICONFLOW_BASE", "Embedding URL"), ("SILICONFLOW_KEY", "Embedding Key"))
+        )
+        set_api(
+            embedding_url=values["SILICONFLOW_BASE"],
+            embedding_key=values["SILICONFLOW_KEY"],
+        )
+        _out("\n已更新 embedding/rerank API 配置并写入 config.json。\n")
+        return
+
+    values = _prompt_api_values((("BASE_URL", "BASE_URL"), ("API_KEY", "API_KEY")))
+    set_api(values["BASE_URL"], values["API_KEY"])
+    _out("\n已更新主模型 API 配置并写入 config.json。\n")
 
 
 def print_loaded_skills(skills_manager: SkillsManager) -> None:
@@ -697,13 +742,13 @@ async def _cmd_agent(ctx: SlashCommandContext) -> bool | None:
 async def _cmd_effort(ctx: SlashCommandContext) -> bool | None:
     roles = get_agent_roles()
     role_text = "|".join(roles)
-    value_text = "|".join(EFFORT_VALUES)
     if len(ctx.parts) == 1:
         print_effort_settings()
-        _out(f"设置思考: /effort <{role_text}> <{value_text}>")
+        _print_effort_usage(roles)
         return None
     if len(ctx.parts) < 3:
-        print_error(f"用法: /effort <{role_text}> <{value_text}>")
+        print_error(f"用法: /effort <{role_text}> off")
+        _print_effort_usage(roles)
         return None
     role = ctx.parts[1].lower()
     value = ctx.parts[2].strip().lower()
@@ -711,19 +756,33 @@ async def _cmd_effort(ctx: SlashCommandContext) -> bool | None:
         print_error(f"未知角色: {role}（可选: {role_text}）")
         return None
     if value not in EFFORT_VALUES:
-        print_error(f"非法取值: {value}（可选: {value_text}）")
+        print_error(f"非法取值: {value}（可选: off|{_effort_values_text(role)}）")
         return None
+    cfg = settings()
     if value == "off":
-        set_thinking(role, "disabled")
+        cfg["models"][role]["thinking"] = "disabled"
+        save_config(cfg)
         print_success(f"已关闭 [{role}] 思考（已写入 config.json）")
     else:
-        set_thinking(role, "enabled", value)
+        supported = role_supported_thinking_efforts(role)
+        if value not in supported:
+            print_error(f"{role} 模型不支持 {value}（可选: {'|'.join(supported)}）")
+            return None
+        cfg["models"][role]["thinking"] = "enabled"
+        cfg["models"][role]["reasoning_effort"] = value
+        save_config(cfg)
         print_success(f"已设置 [{role}] 思考为 on · {value}（已写入 config.json）")
     return None
 
 
 async def _cmd_api(ctx: SlashCommandContext) -> bool | None:
-    interactive_set_api()
+    if len(ctx.parts) == 1:
+        interactive_set_api()
+        return None
+    if len(ctx.parts) == 2 and ctx.parts[1].lower() == "embedding":
+        interactive_set_api(embedding=True)
+        return None
+    print_error("用法: /api [embedding]")
     return None
 
 

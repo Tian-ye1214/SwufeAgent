@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,27 +21,22 @@ CONFIG_FILE, DOTENV_FILE = config_file(), dotenv_file()
 
 _CONFIG: dict[str, Any] | None = None
 _DOTENV_CACHE: dict[str, str] | None = None
-
-
-def _seed_config_if_missing() -> None:
-    """首次运行：把随包默认 config.json 落到用户配置目录，供用户编辑。"""
-    if CONFIG_FILE.exists():
-        return
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    src = default_config_file()
-    try:
-        text = src.read_text(encoding="utf-8") if src.is_file() else "{}\n"
-    except OSError:
-        text = "{}\n"
-    CONFIG_FILE.write_text(text, encoding="utf-8")
+_API_CONFIG_KEYS = {"BASE_URL", "API_KEY", "SILICONFLOW_BASE", "SILICONFLOW_KEY"}
+THINKING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def load_config() -> dict[str, Any]:
     global _CONFIG
-    _seed_config_if_missing()
     with open(CONFIG_FILE, encoding="utf-8") as f:
         _CONFIG = json.load(f)
     return _CONFIG
+
+
+def reload_config() -> dict[str, Any]:
+    global _CONFIG, _DOTENV_CACHE
+    _CONFIG = None
+    _DOTENV_CACHE = None
+    return load_config()
 
 
 def settings() -> dict[str, Any]:
@@ -72,20 +68,44 @@ def _dotenv_values() -> dict[str, str]:
     return _DOTENV_CACHE
 
 
-def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
-    """配置读取唯一入口：环境变量 → .env（缓存）→ config.json 根级标量；都没有则告警并返回 default。"""
-    if env_val := (os.environ.get(key) or "").strip():
-        return env_val
-    if val := (_dotenv_values().get(key) or "").strip():
-        return val
+def _config_scalar(key: str) -> str:
     raw = settings().get(key)
     if raw is not None and not isinstance(raw, (dict, list)):
-        s = raw.strip() if isinstance(raw, str) else str(raw).strip()
-        if s:
-            return s
+        return raw.strip() if isinstance(raw, str) else str(raw).strip()
+    return ""
+
+
+def get_env(key: str, *, warn: bool = True, default: str = "") -> str:
+    """配置读取唯一入口；/api 管理的 key 让 config.json 优先于 .env。"""
+    if env_val := (os.environ.get(key) or "").strip():
+        return env_val
+    if key in _API_CONFIG_KEYS:
+        if val := _config_scalar(key):
+            return val
+        if val := (_dotenv_values().get(key) or "").strip():
+            return val
+        if warn and not default:
+            logger.warning("未配置 %r，请在 .env 或 config.json 根中填写。", key)
+        return default
+    if val := (_dotenv_values().get(key) or "").strip():
+        return val
+    if val := _config_scalar(key):
+        return val
     if warn and not default:
         logger.warning("未配置 %r，请在 .env 或 config.json 根中填写。", key)
     return default
+
+
+def _missing_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(key for key in keys if not get_env(key, warn=False).strip())
+
+
+def missing_main_api_keys() -> tuple[str, ...]:
+    return _missing_keys(("BASE_URL", "API_KEY"))
+
+
+def missing_rag_api_keys() -> tuple[str, ...]:
+    return _missing_keys(("SILICONFLOW_BASE", "SILICONFLOW_KEY"))
 
 
 def save_config(cfg: dict[str, Any] | None = None) -> None:
@@ -108,31 +128,94 @@ def get_agent_run_policy() -> AgentRunPolicy:
     return AgentRunPolicy.from_config(settings())
 
 
-def _resolve_reasoning_effort(model_params: dict[str, Any]) -> str | None:
-    if str(model_params.get("thinking", "")).strip().lower() != "enabled":
+def _lookup_openrouter_meta_for_model(model_name: str | None) -> dict[str, Any] | None:
+    if not model_name:
         return None
-    effort = str(model_params.get("reasoning_effort", "")).strip().lower()
-    if effort == "max":
-        effort = "xhigh"
-    return effort if effort in ["minimal", "low", "medium", "high", "xhigh"] else None
+    from redlotus.ModelGateway.ModelChecker import _lookup_openrouter_meta
+
+    return _lookup_openrouter_meta(model_name)
+
+
+def _supported_thinking_efforts_from_meta(meta: dict[str, Any] | None) -> tuple[str, ...]:
+    raw = meta.get("supported_efforts") if meta else None
+    if not isinstance(raw, list):
+        return THINKING_EFFORTS
+    supported = {str(e).strip().lower() for e in raw}
+    return tuple(e for e in THINKING_EFFORTS if e in supported)
+
+
+def supported_thinking_efforts(model_name: str | None) -> tuple[str, ...]:
+    return _supported_thinking_efforts_from_meta(_lookup_openrouter_meta_for_model(model_name))
+
+
+def role_supported_thinking_efforts(role: str) -> tuple[str, ...]:
+    model_cfg = settings()["models"][role]
+    return supported_thinking_efforts(str(model_cfg.get("name") or "").strip())
+
+
+def _resolve_thinking_effort(effort: str, supported: tuple[str, ...]) -> str | None:
+    effort = str(effort).strip().lower()
+    return effort if effort in supported else (supported[-1] if supported else None)
+
+
+def apply_thinking_config(
+    model_params: dict[str, Any],
+    *,
+    model_name: str | None = None,
+    chat_completions: bool = False,
+    strict_effort: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    params = deepcopy(model_params)
+    params.update(deepcopy(kwargs))
+    thinking = str(params.pop("thinking", "")).strip().lower()
+    effort = str(params.pop("reasoning_effort", "")).strip().lower()
+    if thinking != "enabled":
+        if not chat_completions and thinking in ("disabled", "off", "false"):
+            extra_body = params.get("extra_body")
+            params["extra_body"] = {
+                **(extra_body if isinstance(extra_body, dict) else {}),
+                "thinking": {"type": "disabled"},
+            }
+        elif chat_completions and thinking in ("disabled", "off", "false"):
+            params["thinking"] = {"type": "disabled"}
+        return params
+
+    meta = _lookup_openrouter_meta_for_model(model_name)
+    resolved_effort = _resolve_thinking_effort(
+        effort,
+        _supported_thinking_efforts_from_meta(meta),
+    )
+    if resolved_effort is None:
+        return params
+
+    raw_supported_params = meta.get("supported_parameters") if meta else None
+    supported_params = {
+        str(p)
+        for p in raw_supported_params
+    } if isinstance(raw_supported_params, list) else None
+    if chat_completions:
+        if supported_params is None:
+            params.update({"thinking": {"type": "enabled"}, "reasoning_effort": resolved_effort})
+        elif "reasoning" in supported_params:
+            params["reasoning"] = {"effort": resolved_effort}
+        elif "include_reasoning" in supported_params:
+            params["include_reasoning"] = True
+        elif "reasoning_effort" in supported_params:
+            params["reasoning_effort"] = resolved_effort
+        return params if supported_params is None else {k: v for k, v in params.items() if k in supported_params}
+
+    params["thinking"] = resolved_effort
+    return params
 
 
 def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
     from redlotus.ModelGateway.ModelChecker import merge_openrouter_into_model_params
 
-    raw: dict[str, Any] = dict(settings()["models"][role])
+    raw: dict[str, Any] = deepcopy(settings()["models"][role])
     name = str(raw.pop("name")).strip()
-    s = str(raw.pop("reasoning_effort")).strip().lower()
-    if s in ("none", "off", "false"):
-        raw["reasoning_effort"] = False
-    elif s in ["minimal", "low", "medium", "high", "xhigh"] or s == "max":
-        raw["reasoning_effort"] = s
-    else:
-        raw["reasoning_effort"] = "medium"
-    raw["thinking"] = str(raw.pop("thinking")).strip().lower()
-
     out = merge_openrouter_into_model_params(name, raw)
-    out.update(kwargs)
+    out.update(deepcopy(kwargs))
     return name, out
 
 
@@ -144,94 +227,31 @@ def role_supports_input_modality(role: str, modality: str) -> bool:
     return bool(model_name and model_supports_input_modality(model_name, modality))
 
 
-def http_chat_completions_thinking_extras(model_params: dict[str, Any]) -> dict[str, Any]:
-    """OpenAI 兼容 chat/completions 的 extra_body 思考参数(DeepSeek/Kimi 用)。"""
-    effort = _resolve_reasoning_effort(model_params)
-    if effort is None:
-        return {"thinking": {"type": "disabled"}}
-    return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
-
-
-def unified_thinking_setting(model_params: dict[str, Any]) -> bool | str:
-    return _resolve_reasoning_effort(model_params) or False
-
-
-def _openrouter_reasoning_extras(model_params: dict[str, Any], supported: set[str]) -> dict[str, Any]:
-    effort = _resolve_reasoning_effort(model_params)
-    if effort is None:
-        return {}
-    if "reasoning" in supported:
-        return {"reasoning": {"effort": effort}}
-    if "include_reasoning" in supported:
-        return {"include_reasoning": True}
-    if "reasoning_effort" in supported:
-        return {"reasoning_effort": effort}
-    return {}
-
-
-def _openrouter_supported_params(model_name: str | None) -> set[str] | None:
-    """OpenRouter 元数据中该模型支持的请求参数集合;无模型名/无元数据/无该字段时返回 None。"""
-    if not model_name:
-        return None
-    from redlotus.ModelGateway.ModelChecker import _lookup_openrouter_meta
-
-    meta = _lookup_openrouter_meta(model_name)
-    supported = meta.get("supported_parameters") if meta else None
-    if not isinstance(supported, list):
-        return None
-    return {str(p) for p in supported}
-
-
-def _filter_openrouter_supported_request_fields(
-    model_name: str | None,
-    fields: dict[str, Any],
-) -> dict[str, Any]:
-    allowed = _openrouter_supported_params(model_name)
-    if allowed is None:
-        return fields
-    return {k: v for k, v in fields.items() if k in allowed}
-
-
-def chat_completion_inference_request_fields(
-    model_params: dict[str, Any],
-    *,
-    model_name: str | None = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """OpenAI 兼容 chat/completions 请求体中除 model、messages 外的推理相关字段；config 与运行时 kwargs 均可扩展。"""
-    mp = dict(model_params)
-    meta_supported = _openrouter_supported_params(model_name)
-    if meta_supported is None:
-        tex = http_chat_completions_thinking_extras(mp)
-    else:
-        tex = _openrouter_reasoning_extras(mp, meta_supported)
-        mp.pop("reasoning_effort", None)
-    mp.pop("thinking", None)
-    mp.update(tex)
-    mp.update(kwargs)
-    return _filter_openrouter_supported_request_fields(model_name, mp)
-
-
 def set_model_name(role: str, model_name: str) -> None:
     cfg = settings()
     cfg["models"][role]["name"] = model_name.strip()
     save_config(cfg)
 
 
-def set_thinking(role: str, thinking: str, reasoning_effort: str | None = None) -> None:
+def set_api(
+    base_url: str | None = None,
+    api_key: str | None = None,
+    *,
+    embedding_url: str | None = None,
+    embedding_key: str | None = None,
+) -> None:
+    values = {
+        "BASE_URL": base_url,
+        "API_KEY": api_key,
+        "SILICONFLOW_BASE": embedding_url,
+        "SILICONFLOW_KEY": embedding_key,
+    }
+    if all(v is None for v in values.values()):
+        return
     cfg = settings()
-    cfg["models"][role]["thinking"] = thinking
-    if reasoning_effort is not None:
-        cfg["models"][role]["reasoning_effort"] = reasoning_effort
-    save_config(cfg)
-
-
-def set_api(base_url: str | None = None, api_key: str | None = None) -> None:
-    cfg = settings()
-    if base_url is not None:
-        cfg["BASE_URL"] = base_url.strip()
-    if api_key is not None:
-        cfg["API_KEY"] = api_key.strip()
+    for key, value in values.items():
+        if value is not None:
+            cfg[key] = value.strip()
     save_config(cfg)
 
 

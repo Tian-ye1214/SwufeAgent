@@ -12,7 +12,7 @@ from redlotus.infra import logger
 from redlotus.infra import paths
 from redlotus.infra.persist_utils import atomic_write_text, file_lock, iso_utc_now, update_locked_json
 from redlotus.config.app_config import (
-    chat_completion_inference_request_fields,
+    apply_thinking_config,
     get_env,
     get_model_and_params,
 )
@@ -303,9 +303,10 @@ class LongTermMemory:
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": [{"role": "user", "content": user_content}],
-            **chat_completion_inference_request_fields(
+            **apply_thinking_config(
                 w_params,
                 model_name=model_name,
+                chat_completions=True,
                 max_tokens=int(ltm["max_output_tokens"]),
                 temperature=0.2,
                 **kwargs,

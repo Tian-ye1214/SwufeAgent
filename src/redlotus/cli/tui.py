@@ -72,7 +72,7 @@ class AgentInputSuggester(Suggester):
                     return value[: -len(ctx.prefix)] + role if ctx.prefix else value + role
             return None
         if ctx.kind == "effort_value":
-            for effort in iter_effort_value_completions(ctx.prefix):
+            for effort in iter_effort_value_completions(ctx.prefix, ctx.role):
                 if effort != ctx.prefix:
                     return value[: -len(ctx.prefix)] + effort if ctx.prefix else value + effort
             return None
@@ -256,6 +256,7 @@ class RedLotusTui(App[None]):
         self._ask_future: asyncio.Future[str] | None = None
         self._ask_lock: asyncio.Lock | None = None
         self._ask_question = ""
+        self._api_state: dict[str, Any] | None = None
         self._active_line_handlers = 0
         self._status_is_working = False
         self._working_frame = 0
@@ -857,9 +858,85 @@ class RedLotusTui(App[None]):
                 inp.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
                 self.refresh_status()
 
+    def _set_api_prompt(self, prompt: str) -> None:
+        inp = self.query_one("#input", AgentInput)
+        inp.add_class("ask")
+        inp.suggester = None
+        inp.placeholder = prompt
+        inp.value = ""
+        inp.focus()
+        self.refresh_status()
+
+    def _restore_api_prompt(self) -> None:
+        inp = self.query_one("#input", AgentInput)
+        inp.remove_class("ask")
+        inp.placeholder = "📝 请输入您的任务:"
+        inp.suggester = AgentInputSuggester(case_sensitive=True, use_cache=False)
+        self.refresh_status()
+
+    @staticmethod
+    def _api_fields(embedding: bool) -> tuple[tuple[str, str, str], ...]:
+        if embedding:
+            return (
+                ("embedding_url", "SILICONFLOW_BASE", "Embedding URL"),
+                ("embedding_key", "SILICONFLOW_KEY", "Embedding Key"),
+            )
+        return (("base_url", "BASE_URL", "BASE_URL"), ("api_key", "API_KEY", "API_KEY"))
+
+    @staticmethod
+    def _api_value_label(key: str, value: str) -> str:
+        if "KEY" in key:
+            return "已填写" if value else "(空；优先 config 再 .env)"
+        return value or "(空；优先 config 再 .env)"
+
+    @staticmethod
+    def _api_prompt(label: str) -> str:
+        return f"请输入 {label}（回车保持当前值）:"
+
+    def _begin_api_input(self, *, embedding: bool = False) -> None:
+        from redlotus.config.app_config import get_env
+        from redlotus.cli.render import print_panel
+
+        fields = self._api_fields(embedding)
+        lines = []
+        for _, key, label in fields:
+            cur = (get_env(key, warn=False) or "").strip()
+            lines.append(f"当前 {label}: {self._api_value_label(key, cur)}")
+        print_panel(
+            "\n".join(lines),
+            title="/api embedding" if embedding else "/api",
+        )
+        self._api_state = {"fields": fields, "index": 0, "values": {}}
+        self._set_api_prompt(self._api_prompt(fields[0][2]))
+
+    def _handle_api_input(self, value: str) -> bool:
+        if self._api_state is None:
+            return False
+        fields = self._api_state["fields"]
+        index = int(self._api_state["index"])
+        arg, _, _ = fields[index]
+        self._api_state["values"][arg] = value or None
+        index += 1
+        if index < len(fields):
+            self._api_state["index"] = index
+            self._set_api_prompt(self._api_prompt(fields[index][2]))
+            return True
+
+        from redlotus.config import app_config
+        from redlotus.cli.render import print_success
+
+        app_config.set_api(**self._api_state["values"])
+        self._api_state = None
+        self._restore_api_prompt()
+        print_success("已更新 API 配置并写入 config.json。")
+        return True
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
         event.input.value = ""
+        if self._api_state is not None:
+            self._handle_api_input(value)
+            return
         if not value:
             return
         if self._ask_future is not None and not self._ask_future.done():
@@ -873,9 +950,14 @@ class RedLotusTui(App[None]):
             return
         if self._panel_mode:
             self._exit_panel()
-        if value.lower() == "/api":
-            from redlotus.cli.render import print_warning
-            print_warning("TUI does not support interactive /api changes; use the legacy CLI or config file.")
+        if parts and parts[0].lower() == "/api":
+            if len(parts) == 1:
+                self._begin_api_input()
+            elif len(parts) == 2 and parts[1].lower() == "embedding":
+                self._begin_api_input(embedding=True)
+            else:
+                from redlotus.cli.render import print_error
+                print_error("用法: /api [embedding]")
             return
         if self._active_line_handlers > 0 and self._should_echo_as_user_input(value):
             from redlotus.cli.render import print_warning

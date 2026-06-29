@@ -1,6 +1,5 @@
 prompt_toolkit>=3.0.0
-genai-prices==0.0.57
-pydantic-ai-slim[anthropic,google]==1.105.0
+pydantic-ai-slim[openai,anthropic,google]==2.0.0
 openai>=2.32.0
 python-dotenv
 httpx[http2]

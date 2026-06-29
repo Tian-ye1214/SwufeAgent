@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import math
 import threading
@@ -8,6 +9,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from redlotus.config import app_config
 from redlotus.infra import logger
 from redlotus.config.app_config import get_env
 from redlotus.infra.persist_utils import (
@@ -519,6 +521,10 @@ class ShortTermMemory:
         inner = ""
         if not q:
             return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
+        missing = app_config.missing_rag_api_keys()
+        if missing:
+            logger.warning("STM 暂时不可用，缺少 RAG API 配置: %s", ", ".join(missing))
+            return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
         async with self._lock:
             if self._reconcile_on_query:
                 try:
@@ -527,7 +533,11 @@ class ShortTermMemory:
                     logger.warning("STM on-query reconcile 失败，降级为直接检索: %s", e)
             rag = self._get_rag()
             await rag.connect()
-            hits = await rag.retrieve(q)
+            try:
+                hits = await rag.retrieve(q)
+            except httpx.HTTPStatusError as e:
+                logger.warning("STM RAG HTTP 请求失败，返回空短时记忆: %s", e)
+                return f"<ShortTermMemory>\n{inner}\n</ShortTermMemory>"
             if hits and self._soft_cfg.get("enabled", False):
                 if not self._soft_loaded:
                     if self._soft_since is None and not self._soft_meta:

@@ -159,7 +159,7 @@ pip install "redlotus[all]"       # 一次装全
 
 ### 配置与数据落点
 
-首次运行会在**用户配置目录**生成 `config.json`（Windows：`%LOCALAPPDATA%\RedLotus`；Linux：`~/.config/RedLotus`；macOS：`~/Library/Application Support/RedLotus`）。在其中填好 `BASE_URL`、`API_KEY`、`RAG_models` 与各角色模型；也可用**环境变量**或就近的 `.env` 覆盖同名项（优先级：环境变量 → `.env` → `config.json`）。
+首次运行会在**用户配置目录**生成 `config.json`（Windows：`%LOCALAPPDATA%\RedLotus`；Linux：`~/.config/RedLotus`；macOS：`~/Library/Application Support/RedLotus`）。在其中填好 `BASE_URL`、`API_KEY`、`SILICONFLOW_BASE`、`SILICONFLOW_KEY`、`RAG_models` 与各角色模型；也可用**环境变量**或就近的 `.env` 覆盖同名项。`/api` 管理的四个 API key 优先级为：环境变量 → `config.json` → `.env`；其他同名项仍为：环境变量 → `.env` → `config.json`。
 
 - **跟随用户（全局）**：日志、向量库（RAG）、长期记忆，落在用户数据目录，换工作目录也不丢。
 - **跟随工作目录**：Agent 工作产物 `WorkDatabase/` 与会话快照 `.redlotus/`，落在你**启动时的当前目录**，可用 `/load`、`/cd` 随时回载历史对话。
@@ -207,7 +207,8 @@ QQ 机器人前置：先装好并运行 [NapCat](https://github.com/NapNeko/NapC
 | `/LTM show｜clear` · `/STM show｜clear` | 查看 / 清空长期 · 短期记忆 |
 | `/agent [<role> <模型名>]` | 查看或切换某角色模型 |
 | `/effort [<role> <off｜minimal｜low｜medium｜high｜xhigh｜max>]` | 调各角色思考力度 |
-| `/api` | 修改 `BASE_URL` 与 `API_KEY` |
+| `/api` | 修改主模型 `BASE_URL` 与 `API_KEY` |
+| `/api embedding` | 修改 embedding/rerank 的 `SILICONFLOW_BASE` 与 `SILICONFLOW_KEY` |
 | `/compress` | 压缩 Manager / Coordinator 上下文 |
 | `/status` · `/trace <turn_id>` · `/tasks` | 生命周期 · 回合追踪 · 任务状态 |
 | `/stop` · `/cancel <id>` | 中断当前回合 · 取消某个 invocation |

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -287,7 +286,7 @@ def summarize_usage_files(
 
 
 def resolve_token_price(model_name: str) -> ResolvedTokenPrice | None:
-    candidates = _openrouter_price_candidates(model_name) + _genai_price_candidates(model_name)
+    candidates = _openrouter_price_candidates(model_name)
     prompt = _max_price(candidates, "prompt")
     completion = _max_price(candidates, "completion")
     if prompt is None or completion is None:
@@ -333,40 +332,6 @@ def _openrouter_price_candidates(model_name: str) -> list[tuple[Decimal | None, 
     return [(prompt, completion, "openrouter")]
 
 
-def _genai_price_candidates(model_name: str) -> list[tuple[Decimal | None, Decimal | None, str]]:
-    try:
-        from genai_prices.data_snapshot import get_snapshot
-    except Exception:
-        return []
-    try:
-        snap = get_snapshot()
-    except Exception:
-        return []
-    now = datetime.now(timezone.utc)
-    out: list[tuple[Decimal | None, Decimal | None, str]] = []
-    names = {model_name, model_name.lower()}
-    if "/" in model_name:
-        names.add(model_name.rsplit("/", 1)[-1])
-    for provider in snap.providers:
-        for model in provider.models:
-            try:
-                matched = any(model.is_match(name) for name in names)
-            except Exception:
-                matched = False
-            if not matched:
-                continue
-            try:
-                prices = model.get_prices(now)
-            except Exception:
-                prices = getattr(model, "prices", None)
-            prompt = _mtok_to_token_price(getattr(prices, "input_mtok", None))
-            completion = _mtok_to_token_price(getattr(prices, "output_mtok", None))
-            if prompt is not None or completion is not None:
-                provider_name = str(getattr(provider, "name", "") or getattr(provider, "id", ""))
-                out.append((prompt, completion, f"genai-prices:{provider_name}"))
-    return out
-
-
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value is None:
         return None
@@ -374,30 +339,3 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except Exception:
         return None
-
-
-def _mtok_to_token_price(value: Any) -> Decimal | None:
-    price = _max_mtok_price(value)
-    if price is None:
-        return None
-    return price / Decimal(1_000_000)
-
-
-def _max_mtok_price(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return value
-    base = getattr(value, "base", None)
-    prices: list[Decimal] = []
-    if isinstance(base, Decimal):
-        prices.append(base)
-    tiers = getattr(value, "tiers", None)
-    if isinstance(tiers, list):
-        for tier in tiers:
-            tier_price = getattr(tier, "price", None)
-            if isinstance(tier_price, Decimal):
-                prices.append(tier_price)
-    if not prices:
-        return None
-    return max(prices)

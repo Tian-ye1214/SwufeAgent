@@ -9,6 +9,7 @@ from redlotus.tools.WorkerOrchestrator import WorkerOrchestrator
 from redlotus.tools.memory import (
     ChatHistory,
 )
+from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
 from redlotus.agent_core.input_messages import (
     UserMessage,
     filter_messages_for_input_modalities,
@@ -70,7 +71,10 @@ def _role_input_modalities(role: str) -> set[str]:
 
 
 def _history_for_role(messages: list, role: str) -> list:
-    return filter_messages_for_input_modalities(messages, _role_input_modalities(role))
+    return filter_messages_for_input_modalities(
+        messages_safe_for_new_prompt(messages),
+        _role_input_modalities(role),
+    )
 
 
 def _prompt_for_role(text: str, attachments: list, role: str):

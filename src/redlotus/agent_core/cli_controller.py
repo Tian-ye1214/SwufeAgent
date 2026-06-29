@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from redlotus.config import app_config
 from redlotus.infra import logger
 from redlotus.infra.persist_utils import safe_name
 from redlotus.ModelGateway.ModelChecker import (
@@ -305,6 +306,16 @@ class AgentCliController:
         if raw_input.startswith("/"):
             await self._publish_context_usage(state.history)
             return await self._handle_slash_command(raw_input, state)
+
+        app_config.reload_config()
+        missing = app_config.missing_main_api_keys()
+        if missing:
+            print_warning(
+                "缺少主模型 API 配置: "
+                + ", ".join(missing)
+                + "。请先输入 /api，或在 .env/config.json 中配置。"
+            )
+            return "continue"
 
         if self.system._current_turn is not None or self._queue_draining:
             self._queue_input(raw_input, state)

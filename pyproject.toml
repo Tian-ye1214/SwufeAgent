@@ -11,7 +11,6 @@ requires-python = ">=3.12"
 dependencies = [
     "ddgs>=9.14.1",
     "filelock>=3.29.0",
-    "genai-prices==0.0.57",
     "httpx[http2]>=0.28.1",
     "json-repair>=0.59.5",
     "lancedb>=0.30.2",
@@ -22,7 +21,7 @@ dependencies = [
     "pandas>=3.0.2",
     "platformdirs>=4.9.0",
     "prompt-toolkit>=3.0.0",
-    "pydantic-ai-slim[anthropic,google]==1.105.0",
+    "pydantic-ai-slim[openai,anthropic,google]==2.0.0",
     "pymupdf>=1.27.2.3",
     "python-docx>=1.2.0",
     "python-dotenv>=1.2.2",
@@ -35,11 +34,8 @@ dependencies = [
 [project.optional-dependencies]
 # 浏览器自动化（用后需 `playwright install chromium`）
 browser = ["playwright>=1.49.0"]
-# QQ / 微信 机器人
 bots = ["ncatbot>=4.4.1.post1", "wechatbot-sdk>=0.2.1"]
-# 绘图 / PDF 生成 / 图像（量化回测等技能用）
 viz = ["matplotlib>=3.10.9", "reportlab>=4.5.0", "pillow>=12.2.0"]
-# 打成可执行文件
 build = ["pyinstaller>=6.20.0"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
 all = [

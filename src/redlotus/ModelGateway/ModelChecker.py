@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from redlotus.config.app_config import (
-    chat_completion_inference_request_fields,
+    apply_thinking_config,
     get_agent_roles,
     get_context_config,
     get_context_profile_roles,
@@ -26,7 +26,6 @@ from redlotus.prompt import (
 )
 from redlotus.tools.memory import ChatHistory, pydantic_messages_to_text
 
-from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
 from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
 
 from redlotus.infra import logger
@@ -99,18 +98,6 @@ def _normalize_model_name(name: str) -> str:
     return n
 
 
-def _lookup_genai_prices(name: str) -> int | None:
-    try:
-        snap = _genai_get_snapshot()
-    except Exception:
-        return None
-    for provider in snap.providers:
-        for m in provider.models:
-            if m.is_match(name) and isinstance(m.context_window, int) and m.context_window >= 4096:
-                return m.context_window
-    return None
-
-
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 _OPENROUTER_LOCK = threading.Lock()
 _OPENROUTER_CONTEXT_MAP: dict[str, int] | None = None
@@ -149,6 +136,7 @@ def _openrouter_raw_to_maps(
                 "pricing",
                 "architecture",
                 "supported_parameters",
+                "supported_efforts",
                 "default_parameters",
                 "knowledge_cutoff",
                 "expiration_date",
@@ -314,8 +302,8 @@ def _multi_source_lookup(name: str, fns: tuple) -> int | None:
 
 
 def lookup_model_context(model_name: str) -> int | None:
-    """多源查找上下文窗口：OpenRouter > genai-prices 兜底。"""
-    return _multi_source_lookup(model_name, (_lookup_openrouter, _lookup_genai_prices))
+    """OpenRouter metadata lookup for model context window."""
+    return _multi_source_lookup(model_name, (_lookup_openrouter,))
 
 
 def lookup_model_max_output_tokens(model_name: str) -> int | None:
@@ -629,7 +617,7 @@ def _call_compressor_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        **chat_completion_inference_request_fields(comp_params, model_name=model, **kwargs),
+        **apply_thinking_config(comp_params, model_name=model, chat_completions=True, **kwargs),
     }
     headers = {"Content-Type": "application/json"}
     if key:
