@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from redlotus.infra.persist_utils import safe_segment
+from redlotus.infra.persist_utils import file_lock, safe_segment
 
 MODEL_MESSAGES_SUFFIX = "_ModelMessages.json"
 MODEL_MESSAGES_GLOB = f"*{MODEL_MESSAGES_SUFFIX}"
@@ -77,8 +77,10 @@ def _parse_saved_at(value: Any, *, fallback_path: Path) -> datetime:
 
 
 def read_snapshot_meta(path: Path) -> dict[str, Any]:
-    with Path(path).open(encoding="utf-8") as f:
-        data = json.load(f)
+    path = Path(path)
+    with file_lock(path):
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
     meta_raw = data.get("meta")
     meta: dict[str, Any] = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     if data.get("saved_at") is not None:

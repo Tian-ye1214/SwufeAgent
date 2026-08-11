@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from redlotus.config.app_config import (
-    chat_completion_inference_request_fields,
+    apply_thinking_config,
     get_agent_roles,
     get_context_config,
     get_context_profile_roles,
@@ -24,9 +24,7 @@ from redlotus.prompt import (
     format_prompt_current_time,
     load_prompt,
 )
-from redlotus.tools.memory import ChatHistory, pydantic_messages_to_text
 
-from genai_prices.data_snapshot import get_snapshot as _genai_get_snapshot
 from redlotus.ModelGateway.usage_accounting import latest_usage_input_tokens
 
 from redlotus.infra import logger
@@ -99,18 +97,6 @@ def _normalize_model_name(name: str) -> str:
     return n
 
 
-def _lookup_genai_prices(name: str) -> int | None:
-    try:
-        snap = _genai_get_snapshot()
-    except Exception:
-        return None
-    for provider in snap.providers:
-        for m in provider.models:
-            if m.is_match(name) and isinstance(m.context_window, int) and m.context_window >= 4096:
-                return m.context_window
-    return None
-
-
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 _OPENROUTER_LOCK = threading.Lock()
 _OPENROUTER_CONTEXT_MAP: dict[str, int] | None = None
@@ -149,6 +135,7 @@ def _openrouter_raw_to_maps(
                 "pricing",
                 "architecture",
                 "supported_parameters",
+                "supported_efforts",
                 "default_parameters",
                 "knowledge_cutoff",
                 "expiration_date",
@@ -283,6 +270,21 @@ def _lookup_openrouter_meta(name: str) -> dict[str, Any] | None:
     return None
 
 
+def openrouter_meta_supports_input_modality(meta: dict[str, Any] | None, modality: str) -> bool:
+    arch = meta.get("architecture") if meta else None
+    modalities = arch.get("input_modalities") if isinstance(arch, dict) else None
+    return isinstance(modalities, list) and modality.lower() in {
+        str(item).lower() for item in modalities
+    }
+
+
+def model_supports_input_modality(model_name: str, modality: str) -> bool:
+    return openrouter_meta_supports_input_modality(
+        _lookup_openrouter_meta(model_name),
+        modality,
+    )
+
+
 def _multi_source_lookup(name: str, fns: tuple) -> int | None:
     """按顺序尝试多个查找函数，精确匹配优先，再用归一化名兜底。"""
     for fn in fns:
@@ -299,8 +301,8 @@ def _multi_source_lookup(name: str, fns: tuple) -> int | None:
 
 
 def lookup_model_context(model_name: str) -> int | None:
-    """多源查找上下文窗口：OpenRouter > genai-prices 兜底。"""
-    return _multi_source_lookup(model_name, (_lookup_openrouter, _lookup_genai_prices))
+    """OpenRouter metadata lookup for model context window."""
+    return _multi_source_lookup(model_name, (_lookup_openrouter,))
 
 
 def lookup_model_max_output_tokens(model_name: str) -> int | None:
@@ -488,6 +490,8 @@ def _save_compress_debug_artifacts(
     head_end: int,
     tail_start: int,
 ) -> None:
+    from redlotus.tools.memory import pydantic_messages_to_text
+
     root = logger.LOG_DIR / "context_compress_debug"
     root.mkdir(parents=True, exist_ok=True)
     run_dir = root / f"{int(time.time() * 1000)}_{role}"
@@ -614,7 +618,7 @@ def _call_compressor_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        **chat_completion_inference_request_fields(comp_params, model_name=model, **kwargs),
+        **apply_thinking_config(comp_params, model_name=model, chat_completions=True, **kwargs),
     }
     headers = {"Content-Type": "application/json"}
     if key:

@@ -9,14 +9,18 @@ from redlotus.tools.WorkerOrchestrator import WorkerOrchestrator
 from redlotus.tools.memory import (
     ChatHistory,
 )
-from redlotus.agent_core.input_messages import UserMessage
+from redlotus.tools.memory.chat_history import messages_safe_for_new_prompt
+from redlotus.agent_core.input_messages import (
+    UserMessage,
+    filter_messages_for_input_modalities,
+)
 
 from redlotus.tools.conversation_log import SessionConversationLogs, drain_pending_saves
 from redlotus.ModelGateway.ModelChecker import (
     prewarm_effective_max_contexts_by_role_async,
     maybe_auto_compress_async,
 )
-from redlotus.config.app_config import get_agent_usage_limits
+from redlotus.config.app_config import get_agent_usage_limits, role_supports_input_modality
 from redlotus.cli.output import supports_model_stream
 from redlotus.cli.render import (
     TextEventStreamHandler,
@@ -60,6 +64,21 @@ def _make_coordinator_stream_handler() -> TextEventStreamHandler | None:
     if not supports_model_stream():
         return None
     return TextEventStreamHandler(title="Coordinator")
+
+
+def _role_input_modalities(role: str) -> set[str]:
+    return {"text", "image"} if role_supports_input_modality(role, "image") else {"text"}
+
+
+def _history_for_role(messages: list, role: str) -> list:
+    return filter_messages_for_input_modalities(
+        messages_safe_for_new_prompt(messages),
+        _role_input_modalities(role),
+    )
+
+
+def _prompt_for_role(text: str, attachments: list, role: str):
+    return [text, *attachments] if attachments and "image" in _role_input_modalities(role) else text
 
 
 def _messages_with_replaced_output(result: Any, output: str) -> list[Any]:
@@ -567,7 +586,7 @@ class AgentSystem:
                 current_todo=current_todo
             )
 
-        planning_prompt = [planning_text, *attachments] if attachments else planning_text
+        planning_prompt = _prompt_for_role(planning_text, attachments, "manager")
         manager_aid = await self._agent_id("manager")
         manager_log = self._session_logs.for_agent("manager")
         planning_extra = {"kind": "manager", "phase": "planning", "turn_id": tid}
@@ -584,7 +603,7 @@ class AgentSystem:
                 registry=self._registry,
                 hooks=self._hooks,
                 turn_id=tid,
-                message_history=self._manager_history.messages,
+                message_history=_history_for_role(self._manager_history.messages, "manager"),
                 usage_limits=get_agent_usage_limits(),
                 on_node=_save_planning_node,
             )
@@ -605,7 +624,7 @@ class AgentSystem:
             user_input=user_input,
             final_summary=final_summary
         )
-        summary_prompt = [summary_text, *attachments] if attachments else summary_text
+        summary_prompt = _prompt_for_role(summary_text, attachments, "manager")
         try:
             final_text = await run_agent_stream_with_lifecycle(
                 agent=manager_agent,
@@ -613,7 +632,7 @@ class AgentSystem:
                 registry=self._registry,
                 hooks=self._hooks,
                 turn_id=tid,
-                message_history=self._manager_history.messages,
+                message_history=_history_for_role(self._manager_history.messages, "manager"),
                 usage_limits=get_agent_usage_limits(),
                 prompt=summary_prompt,
                 consumer=lambda s: consume_stream_markdown(
@@ -632,7 +651,7 @@ class AgentSystem:
                     registry=self._registry,
                     hooks=self._hooks,
                     turn_id=tid,
-                    message_history=self._manager_history.messages,
+                    message_history=_history_for_role(self._manager_history.messages, "manager"),
                     usage_limits=get_agent_usage_limits(),
                 )
                 await self._save_manager_result(phase="summary", turn_id=tid, result=final_result, log_suffix="summary 后")
@@ -750,7 +769,10 @@ class AgentSystem:
             self._skills_manager,
             mem_inj,
             routing_tools,
-            self._toolkit.workers_tools,
+            self._toolkit.worker_tools(
+                include_browser=True,
+                include_multimodal=role_supports_input_modality("coordinator", "image"),
+            ),
         )
 
         if self._session_key is None:
@@ -772,12 +794,14 @@ class AgentSystem:
         try:
             result = await run_agent_iter_with_lifecycle(
                 agent=agent,
-                prompt=message.to_prompt(),
+                prompt=message.to_prompt(
+                    include_attachments=role_supports_input_modality("coordinator", "image")
+                ),
                 agent_id=coord_aid,
                 registry=self._registry,
                 hooks=self._hooks,
                 turn_id=turn_id,
-                message_history=history.messages,
+                message_history=_history_for_role(history.messages, "coordinator"),
                 usage_limits=get_agent_usage_limits(),
                 event_stream_handler=stream_handler,
                 on_node=_save_coordinator_node,
@@ -807,8 +831,8 @@ class AgentSystem:
         await self._after_coordinator_turn(history)
         return history, output
 
-    async def prepare_cli_session(self) -> None:
-        await self._cli_controller.prepare_session()
+    async def prepare_cli_session(self) -> tuple[str, ...]:
+        return await self._cli_controller.prepare_session()
 
     async def process_cli_line(
         self,

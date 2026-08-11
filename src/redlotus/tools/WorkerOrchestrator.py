@@ -6,10 +6,16 @@ import time
 import traceback
 
 from redlotus.infra import logger
+from redlotus.agent_core.input_messages import filter_messages_for_input_modalities
 from redlotus.prompt import get_worker_system_prompt
 from redlotus.ModelGateway.agent_factory import create_agent, create_worker_toolsets_and_capabilities
 from redlotus.ModelGateway.ModelChecker import maybe_auto_compress_async
-from redlotus.config.app_config import get_agent_run_policy, get_agent_usage_limits, get_model_and_params
+from redlotus.config.app_config import (
+    get_agent_run_policy,
+    get_agent_usage_limits,
+    get_model_and_params,
+    role_supports_input_modality,
+)
 from redlotus.runtime.lifecycle import AgentRegistry, LifecycleHooks, run_agent_with_lifecycle
 from redlotus.tools.ManagementTools import Task, TaskStatus, TaskManager
 from redlotus.tools.memory import ChatHistory
@@ -107,6 +113,10 @@ class WorkerOrchestrator:
 
             start_time = time.time()
             worker_aid = await self._worker_agent_id(agent_id_suffix)
+            history_messages = filter_messages_for_input_modalities(
+                history.messages,
+                {"text", "image"} if role_supports_input_modality("worker", "image") else {"text"},
+            )
             if self._registry is not None and self._hooks is not None:
                 result = await run_agent_with_lifecycle(
                     agent=worker_agent,
@@ -115,13 +125,13 @@ class WorkerOrchestrator:
                     registry=self._registry,
                     hooks=self._hooks,
                     turn_id=turn_id,
-                    message_history=history.messages,
+                    message_history=history_messages,
                     usage_limits=get_agent_usage_limits(),
                 )
             else:
                 result = await worker_agent.run(
                     prompt,
-                    message_history=history.messages,
+                    message_history=history_messages,
                     usage_limits=get_agent_usage_limits(),
                 )
             elapsed = time.time() - start_time
@@ -173,10 +183,14 @@ class WorkerOrchestrator:
         instructions: str,
         *,
         include_browser: bool,
+        include_multimodal: bool,
         core_extra_tools: list[Any] | None = None,
     ):
         toolsets, capabilities = create_worker_toolsets_and_capabilities(
-            self._toolkit.worker_tool_groups(include_browser=include_browser),
+            self._toolkit.worker_tool_groups(
+                include_browser=include_browser,
+                include_multimodal=include_multimodal,
+            ),
             core_extra_tools=core_extra_tools or (),
         )
         return create_agent(
@@ -209,6 +223,7 @@ class WorkerOrchestrator:
             Tuple[bool, str]: (success, result_message)
         """
         w_name, w_params = get_model_and_params("worker")
+        worker_supports_images = role_supports_input_modality("worker", "image")
         mem = self._memory_injection_getter()
         worker_sysprompt = await asyncio.to_thread(
             get_worker_system_prompt, self._toolkit.skills_manager, mem
@@ -218,6 +233,7 @@ class WorkerOrchestrator:
             w_params,
             worker_sysprompt,
             include_browser=True,
+            include_multimodal=worker_supports_images,
         )
         prompt_text = (
             f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -229,7 +245,7 @@ class WorkerOrchestrator:
                 "Please try an alternative approach to complete the task."
             )
 
-        prompt = [prompt_text, *attachments] if attachments else prompt_text
+        prompt = [prompt_text, *attachments] if attachments and worker_supports_images else prompt_text
         adhoc_history = ChatHistory()
 
         self._worker_adhoc_seq += 1
@@ -366,11 +382,13 @@ class WorkerOrchestrator:
             self._memory_injection_getter(),
         )
         w_name, w_params = get_model_and_params("worker")
+        worker_supports_images = role_supports_input_modality("worker", "image")
         worker_agent = self._create_worker_agent(
             w_name,
             w_params,
             full_system_prompt,
             include_browser=False,
+            include_multimodal=worker_supports_images,
         )
 
         prompt = f"[User's Ultimate Goal]\n{user_goal}\n\n"
@@ -392,7 +410,7 @@ class WorkerOrchestrator:
                 prompt += f"  Attempt {i+1}: {failure}\n"
             prompt += "Please try an alternative approach."
 
-        prompt_input = [prompt, *attachments] if attachments else prompt
+        prompt_input = [prompt, *attachments] if attachments and worker_supports_images else prompt
 
         needs_confirmation = False
 

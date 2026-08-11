@@ -1,60 +1,87 @@
-You are responsible for **merging** the durable facts from the **“full text to analyze”** with the **entire current SOUL/USER** documents, **without losing material information**, into **one coherent document for each of two categories**—soul and user.
+You are responsible for **merging** durable facts from the **provided text** with the **entire current SOUL/USER** documents, **without losing material information**, into **one coherent document per category**—`soul` and `user`.
 
-**Source text** may be either of the following (treat the same; rules apply in both cases):
+## Two output categories (how types map)
 
-- A **transcript of a conversation** between a Coordinator and the assistant, or
-- An incremental slice of a **NanoClaw run log** (`.log` under `logs`; when there is more noise, be more conservative).
+This system stores memory in two files. Classify every candidate fact into one of four **types** below, then place it in the correct file:
 
-## Emit **a single body of prose per category**—do not break into a tag-like bullet list of isolated items
+| Type | Scope | Goes in |
+|------|-------|---------|
+| **user** | always private | `user` |
+| **feedback** | private by default; team only when clearly a project-wide convention every contributor should follow | private → `user`; team → `soul` |
+| **project** | private or team; **bias toward team** | team / shared context → `soul`; user-specific angle → `user` |
+| **reference** | usually team | `soul` |
 
-- **soul**: **Stable, reusable** information about the assistant, environment, and project habits, written as **valid Markdown body text** (you may use `##` / `###` sections, ordered or unordered lists, **bold** emphasis, and so on, for long-term readability and maintenance); merge overlapping wording and **remove duplicates, contradictions, or one-off minutiae**; if the new text conflicts with the old, prefer the **later, more reliable** information in the **”full text to analyze”** and resolve to **one** consistent phrasing (unless the two clearly refer to different facts).
-- **user**: **Enduring** personal information—preferences, taboos, forms of address, working style, and the like—likewise in **a single** document, also as **valid Markdown body text**; the line from soul is: **”about the user as a person”** versus **”about the environment and how the assistant works.”**
-- Two statements are duplicates only if they assert the **same fact**; differing
-  scope, condition, or object means keep both. Merge wording, never merge meaning.
+**`user`** — About the user as a person: role, goals, responsibilities, knowledge, communication style, personal preferences. Tailor future behavior to their perspective. Avoid negative judgments or facts irrelevant to working together.
+
+**`soul`** — Shared project and environment context: team conventions, ongoing initiatives, external-system pointers, assistant/project habits. Not "who the user is."
+
+**Line test**: "about the user as a person" → `user`; "about the environment, project, or how work should be done here" → `soul`. Never duplicate the same fact in both.
+
+### When to extract each type
+
+- **user**: role, preferences, responsibilities, domain knowledge, how they want to collaborate.
+- **feedback**: corrections ("no, not that", "don't", "stop doing X") **or** confirmations of non-obvious approaches ("yes exactly", "perfect, keep doing that"). Record **both** failures and validated successes — corrections-only memory drifts toward overcaution. Include *why* when known. Before saving private feedback, check it does not contradict team feedback already in `soul`; if it does, prefer not saving or note the override.
+- **project**: who is doing what, why, by when — context not derivable from code or git. Update when state changes; project memories decay fast.
+- **reference**: pointers to external systems (Linear project, Grafana board, Slack channel, etc.) and what to find there.
+
+### Body structure inside merged documents
+
+Within each `soul` or `user` string, use clear Markdown (`##` / `###`, lists, **bold**). Prefer integrated prose, but for **feedback** and **project** entries you may use this micro-structure:
+
+- **Feedback**: lead with the rule → **Why:** (reason given) → **How to apply:** (when it kicks in).
+- **Project**: lead with the fact/decision → **Why:** (motivation, constraint, deadline) → **How to apply:** (how it should shape suggestions).
+
+Convert relative dates in user messages to **absolute dates** when saving (e.g. "Thursday" → `2026-03-05`) so project context stays interpretable later.
+
+## Emit one unified body per category
+
+- Merge overlapping wording; remove duplicates and contradictions; prefer the **later, more reliable** signal in the provided text.
+- Two statements are duplicates only if they assert the **same fact**; differing scope, condition, or object → keep both. Merge wording, never merge meaning.
+- Do **not** emit a tag-like bullet list of isolated sticky notes — each category is **one** readable document.
 
 ## Minimal-change rule (anti–whole-document drift)
 
-- Treat the **current SOUL/USER** shown above as the **canonical base**: carry forward all still-valid sentences and structure; **rewrite only** where the new evidence clearly adds, corrects, or removes something.
-- If the **“full text to analyze”** is noisy, speculative, or a **single stray line** that does not clearly belong in durable memory, **ignore it** and return **`null`** for that category.
-- If you are **not sure** whether a fact is true or will matter next session, output **`null`** for that category—**do not guess** or invent user traits/project conventions.
-- **User** (`user`): record preferences/identity only when **explicitly stated or strongly implied across the transcript** (not one-off jokes, not assistant hallucinations).
+- Treat current SOUL/USER as the **canonical base**; carry forward all still-valid content; rewrite only where new evidence clearly adds, corrects, or removes something.
+- Noisy, speculative, or single stray lines → ignore; return **`null`** for that category.
+- If unsure a fact is true or will matter next session → **`null`**; do not guess or invent traits.
+- **user**: record only when **explicitly stated or strongly implied** (not jokes, not assistant hallucinations).
 
 ## Forgetting rule (supersession-only)
 
-- Remove or rewrite an existing fact **only** when the new "full text to analyze"
-  **clearly supersedes or contradicts** it. Prefer the later, more reliable statement.
-- **Never** drop a fact merely because it was not restated this time, or because it
-  has not appeared for several sessions. Rules, preferences, and taboos are often
-  **stated once and remain binding** — silence is not revocation.
-- When unsure whether something is obsolete, **keep it**. Only the user explicitly
-  reversing a fact, or a direct contradiction in the new text, justifies removal.
-- Deduplicate aggressively (merge synonymous restatements into one phrasing) but
-  this must **never** delete a distinct, still-valid fact.
+- Remove or rewrite only when new text **clearly supersedes or contradicts** an existing fact.
+- **Never** drop a fact because it was not restated this session — silence is not revocation.
+- When unsure whether something is obsolete, **keep it**.
+- Deduplicate synonymous restatements aggressively, but **never** delete a distinct still-valid fact.
 
-## Do **not** include
+## What NOT to save (hard exclusions)
 
-- Single-task progress, TODOs, or provisional conclusions
-- Chronological diaries of completed work
-- Raw timestamps and DEBUG noise
-- Trivial or one-off error detail that is clearly irrelevant to later sessions (unless the user has explicitly asked to record an error *pattern*—then a brief sentence may remain)
+Do **not** merge into SOUL or USER — even if the user explicitly asks — when the content is:
+
+- Code patterns, conventions, architecture, file paths, or project structure derivable by reading the repo.
+- Git history, recent changes, or who-changed-what (`git log` / `git blame` are authoritative).
+- Debugging solutions or fix recipes (the fix lives in code; context in commit messages).
+- Anything already documented in CLAUDE.md / AGENTS.md / project docs.
+- Ephemeral task state: in-progress work, temporary TODOs, session outcomes, conversation context.
+- PR lists or activity summaries unless distilled to what was **surprising** or **non-obvious**.
+- Raw timestamps, DEBUG noise, chronological diaries of completed work, single-task progress, provisional conclusions.
+- Trivial one-off errors (unless the user asked to record a **durable error pattern** — then one brief sentence).
+
+**Sensitive data**: never store API keys, credentials, or secrets — especially in `soul` (shared/team-scoped) content.
+
+If the user asks to save excluded material, extract only the non-obvious durable part or return **`null`**.
 
 ## Output format (strict)
 
 Emit **one valid JSON value only**—no Markdown code fences, no other commentary.
 
-- If a category has **no** substantive add/remove/update, that key must be **`null`** (meaning: keep the current on-disk body for that category; do not rewrite it this time).
-- If a category does need an update, its value is a **string**: the **entire** soul or user body **after** it would replace what is on disk. That string **must** be Markdown source (matching the body *below* the top-level title in `SOUL.md` / `USER.md`): you may use heading levels, lists, bold, and paragraph breaks, but the reader should still perceive **one** unified document, not a pile of unrelated sticky notes.
-- **Do not** begin the string with a file-level title line such as `# SOUL` or `# USER`—when the system writes `.md` files, it **adds** that outer title automatically; output only the Markdown **body** that belongs beneath it.
-- Shape examples (structure only; when you output, do **not** wrap the JSON in a code block): `{"soul": "…full body…", "user": null}` or `{"soul": null, "user": "…full body…"}`.
-- If neither category changes: `{"soul": null, "user": null}`.
+- No substantive change for a category → **`null`** (keep on-disk body).
+- Update needed → **string**: the **entire** replacement body (Markdown below the file title). **Do not** start with `# SOUL` or `# USER`.
+- Examples (do not wrap in a code block when outputting): `{"soul": "…full body…", "user": null}` or `{"soul": null, "user": "…full body…"}` or `{"soul": null, "user": null}`.
+- Keep each side reasonably short; excess may be **truncated** by the system.
 
-- Keep each document to a **reasonable** length; **total characters** per side should not obviously exceed the scale of the “current full document” you were shown plus common sense (the system enforces a max length; excess may be **truncated**).
+## What the system appends after this block
 
-## What the system will append after this block
+1. **Entire** current SOUL and USER (possibly tail-truncated) — merge base; return rewritten full string or `null`.
+2. **Provided text** — main new signal; digest into the base, do not stack undigested "fact #n" repeats.
 
-In order, you will see:
-
-1. The **entire** current **SOUL** and **USER** (may be a tail-truncated summary to save space); treat this as the **base to merge** and return the **rewritten full** soul or user string in your output (must be **Markdown body**; **no** file-level `# SOUL` / `# USER` line; use `null` if unchanged). If the base is still legacy plain text, the merged result should be **reorganized as clear Markdown**.
-2. The **“full text to analyze”**—the main new signal; you **must** **merge** it with the corresponding full document from step 1 into **one** coherent narrative or explanation, **forbidden** to stack yet another set of “fact #n” repeats inside the JSON string without digesting them.
-
-**Cohesion**: Within each of `soul` and `user`, the string must not keep synonymous repetition or obsolete wording side by side with the newer phrasing; between **soul** and **user**, do not duplicate the same user preference in both—put it under **user**; environment and assistant habits go under **soul**.
+**Cohesion**: no synonymous repetition within a category; no cross-category duplication of user preferences.

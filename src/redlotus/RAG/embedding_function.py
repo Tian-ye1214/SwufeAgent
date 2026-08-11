@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 from redlotus.infra import logger
+from redlotus.config import app_config
 from redlotus.config.app_config import get_env, settings
 from redlotus.infra.shared_http import get_client
 
@@ -33,6 +34,12 @@ def _get_shared_client() -> httpx.AsyncClient:
     return get_client(_HTTP_KEY, lambda: httpx.AsyncClient(**_client_kwargs(60.0)))
 
 
+def _require_rag_api() -> None:
+    missing = app_config.missing_rag_api_keys()
+    if missing:
+        raise RuntimeError("缺少 RAG API 配置: " + ", ".join(missing))
+
+
 async def _rag_api_post(endpoint: str, body: dict[str, Any], *, timeout: float) -> dict[str, Any]:
     """RAG 接口统一 POST：构造鉴权头、校验状态、解析 JSON。"""
     response = await _get_shared_client().post(
@@ -57,6 +64,7 @@ async def embed_texts(
     timeout: float = 60.0,
 ) -> list[list[float]]:
     """异步获取文本向量；支持单条字符串或多条批量，超过上限自动分批请求。"""
+    _require_rag_api()
     if isinstance(texts, str):
         texts = [texts]
     logger.debug("RAG embed: batch_size=%d", len(texts))
@@ -81,6 +89,7 @@ async def rerank_documents(
     timeout: float = 60.0,
 ) -> list[dict[str, Any]]:
     """调用与 OpenAI 兼容的 /v1/rerank，返回按相关度排序的结果（含原始下标与分数）。"""
+    _require_rag_api()
     if not documents:
         return []
     logger.debug("RAG rerank: n_docs=%d, top_n=%s", len(documents), top_n)

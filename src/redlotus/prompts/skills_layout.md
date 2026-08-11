@@ -1,11 +1,11 @@
 ## Skills Directory Description
 
-- All Skills are located in the **`skills/` folder ({skills_root_path}) under the project root directory.
+- Skills are loaded from **two roots**: shipped baseline skills inside the RedLotus package, plus a **writable overlay** at `{skills_root_path}`. New installs go to the overlay path shown above.
 
-- **Stored by Skill directory:** Each **subfolder** under `skills/` corresponds to one Skill; the subfolder name can differ from the `name` field in the YAML file `SKILL.md`, but the system uses `name` for registration.
+- **Stored by Skill directory:** Each **subfolder** under a skills root corresponds to one Skill. The folder name can differ from the `name` field in `SKILL.md` YAML; the system registers by `name`.
 
-- Each Skill directory must contain a **`SKILL.md`: The file begins with YAML metadata (including `name`, `description`, etc.), followed by the main instructions.
+- Each Skill directory must contain **`SKILL.md`**: YAML frontmatter (`name`, `description`, …) followed by instructions.
 
-- Reference materials, rules, scripts, etc. (such as `references/`, `rules/`) can be placed in the same Skill directory, and loaded as needed using tools.
+- Reference materials (`references/`, `rules/`, scripts, etc.) live in the same Skill directory and can be loaded with `load_skill_resource()`.
 
-- The system will rescan after file changes (including hot reloading); the following "Available Skills" list will be updated with the scan results.
+- The skill list is **rescanned at the start of each user turn** and when an agent calls `refresh_skills`. The "Available Skills" section below reflects the latest scan.

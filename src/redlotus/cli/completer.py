@@ -39,7 +39,7 @@ class AgentCompleter(Completer):
             return
 
         if ctx.kind == "effort_value":
-            for value in iter_effort_value_completions(ctx.prefix):
+            for value in iter_effort_value_completions(ctx.prefix, ctx.role):
                 yield Completion(value, start_position=-len(ctx.prefix), display_meta="effort")
             return
 

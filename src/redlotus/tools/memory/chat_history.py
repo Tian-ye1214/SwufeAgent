@@ -1,6 +1,39 @@
 from __future__ import annotations
 
 
+def _part_kind(part) -> str:
+    return str(getattr(part, "part_kind", "") or "")
+
+
+def _tool_key(part) -> str:
+    return str(getattr(part, "tool_call_id", None) or getattr(part, "tool_name", "") or "")
+
+
+def _has_user_prompt(message) -> bool:
+    return any(_part_kind(part) == "user-prompt" for part in getattr(message, "parts", ()) or ())
+
+
+def messages_safe_for_new_prompt(messages: list) -> list:
+    pending: dict[str, int] = {}
+    for index, message in enumerate(messages):
+        for part in getattr(message, "parts", ()) or ():
+            kind = _part_kind(part)
+            key = _tool_key(part)
+            if kind == "tool-return":
+                pending.pop(key, None)
+            elif kind == "tool-call":
+                pending[key] = index
+    if not pending:
+        return list(messages)
+
+    cut = min(pending.values())
+    for index in range(cut, -1, -1):
+        if _has_user_prompt(messages[index]):
+            cut = index
+            break
+    return list(messages[:cut])
+
+
 class ChatHistory:
     __slots__ = (
         "_messages",
