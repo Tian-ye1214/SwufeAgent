@@ -233,11 +233,18 @@ def get_model_and_params(role: str, **kwargs: Any) -> tuple[str, dict[str, Any]]
 
 
 def role_supports_input_modality(role: str, modality: str) -> bool:
-    from redlotus.ModelGateway.ModelChecker import model_supports_input_modality
+    from redlotus.ModelGateway.ModelChecker import (
+        _lookup_openrouter_meta,
+        model_supports_input_modality,
+    )
 
     model_cfg = settings().get("models", {}).get(role, {})
     model_name = str(model_cfg.get("name") or "").strip()
-    return bool(model_name and model_supports_input_modality(model_name, modality))
+    if not model_name:
+        return True
+    if _lookup_openrouter_meta(model_name) is None:
+        return True
+    return model_supports_input_modality(model_name, modality)
 
 
 def set_model_name(role: str, model_name: str) -> None:
