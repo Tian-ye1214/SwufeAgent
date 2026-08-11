@@ -2,11 +2,14 @@
   <img src="docs/assets/icon.svg" alt="RedLotus icon" width="112" height="112">
 </p>
 
-<h1 align="center">RedLotus · 红莲极意</h1>
+<h1 align="center">RedLotus</h1>
 
 <p align="center">
-  面向终端的多 Agent 助手，支持任务编排、长期记忆与运行时技能扩展。<br>
-  <sub>A terminal AI agent with orchestration, memory, and runtime skills.</sub>
+  English · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  A terminal AI agent with task orchestration, long-term memory, and runtime skills.
 </p>
 
 <p align="center">
@@ -16,7 +19,7 @@
   <a href="https://ai.pydantic.dev/"><img src="https://img.shields.io/badge/built%20with-Pydantic%20AI-7c3aed.svg" alt="Pydantic AI"></a>
 </p>
 
-RedLotus 是一个运行在终端中的 AI Agent。它会根据任务复杂度选择直接处理、委派单个 Worker，或由 Manager 拆解任务并协调多个 Worker 执行。项目兼容 OpenAI 风格的模型接口，并提供记忆、Skills、文件解析、浏览器操作和聊天机器人接入。
+RedLotus is an AI agent that runs in your terminal. It chooses how to handle each request based on its complexity: work directly, delegate a focused task to one Worker, or ask a Manager to break down and coordinate a larger job. It supports OpenAI-compatible model APIs and includes memory, runtime Skills, file extraction, browser automation, and chat bot integrations.
 
 ```bash
 pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
@@ -24,93 +27,93 @@ redlotus
 ```
 
 <p align="center">
-  <img src="docs/assets/terminal.png" alt="RedLotus 终端任务示例" width="760">
+  <img src="docs/assets/terminal.png" alt="RedLotus terminal task example" width="760">
 </p>
 
-## 主要功能
+## Features
 
-| 功能 | 说明 |
-|------|------|
-| 多 Agent 编排 | Coordinator 判断处理路径；复杂任务由 Manager 构建带依赖的任务列表，Worker 按依赖分批执行并汇总结果。 |
-| 目标模式 | 给定一个明确目标后持续迭代，直到任务完成；执行期间仍可接收用户补充信息。 |
-| 长短期记忆 | 短期记忆写入 LanceDB 并支持语义召回；长期记忆保存用户偏好与助手工作习惯，可跨会话使用。 |
-| 运行时 Skills | 通过 `SKILL.md` 按需加载指令、参考资料和脚本；技能目录会在用户回合开始时重新扫描，无需重启。 |
-| 文件与多媒体处理 | 可读取图片，并提取 PDF、Word、Excel、HTML、Markdown、CSV、JSON 和文本文件中的内容。PDF 支持按页提取正文、表格、链接与内嵌图片。 |
-| 终端审查与安全护栏 | 提供全屏 TUI、逐块 diff 审查、路径沙箱、危险命令拦截和子进程回收。 |
+| Feature | Description |
+|---------|-------------|
+| Multi-agent orchestration | The Coordinator selects the execution path. For complex work, the Manager creates dependent tasks and Workers execute them in dependency-aware batches. |
+| Goal mode | RedLotus keeps iterating toward a defined goal until it finishes. Additional user input can be incorporated while the goal is running. |
+| Short- and long-term memory | Short-term memory is stored in LanceDB for semantic retrieval. Long-term memory preserves user preferences and assistant working habits across conversations. |
+| Runtime Skills | `SKILL.md` files provide instructions, references, and scripts on demand. Skill directories are rescanned at the start of each user turn, so newly installed skills do not require a restart. |
+| File and media handling | RedLotus can read images and extract content from PDF, Word, Excel, HTML, Markdown, CSV, JSON, and text files. PDF extraction preserves page text, tables, links, and embedded images. |
+| Review workflow and safeguards | The full-screen TUI includes hunk-by-hunk diff review. Runtime safeguards include path sandboxing, dangerous-command blocking, and child-process cleanup. |
 
-此外，RedLotus 提供浏览器自动化、图像生成，以及 QQ（NapCat / OneBot）和微信机器人接入。这些能力可按需安装。
+Optional capabilities include browser automation, image generation, QQ integration through NapCat / OneBot, and a WeChat bot.
 
-## 工作方式
+## How it works
 
 ```mermaid
 flowchart LR
-    U["用户请求"] --> C{"Coordinator"}
-    C -->|简单任务| T["直接调用工具"]
-    C -->|单步任务| W0["单个 Worker"]
-    C -->|复杂任务| M["Manager 规划"]
-    M --> D["依赖任务列表"]
+    U["User request"] --> C{"Coordinator"}
+    C -->|Simple task| T["Use tools directly"]
+    C -->|Focused task| W0["Single Worker"]
+    C -->|Complex task| M["Manager planning"]
+    M --> D["Dependency-aware task list"]
     D --> W1["Worker 1"]
     D --> W2["Worker 2"]
     D --> W3["Worker 3"]
-    W1 --> R["汇总结果"]
+    W1 --> R["Combined result"]
     W2 --> R
     W3 --> R
-    MEM["长短期记忆"] -.-> C
+    MEM["Short- and long-term memory"] -.-> C
     MEM -.-> M
     SK["Skills"] -.-> W0
     SK -.-> W1
 ```
 
-- 简单请求由 Coordinator 直接调用工具处理。
-- 单个独立任务可以委派给一个临时 Worker。
-- 复杂请求交给 Manager 拆解；任务会校验重复 ID、未知依赖和依赖环，并按依赖关系分批执行。
-- 规划与执行角色可以分别配置模型，在能力、速度与成本之间做取舍。
+- The Coordinator handles straightforward requests directly with tools.
+- A single independent task can be delegated to a temporary Worker.
+- Complex requests go to the Manager. Task definitions are checked for duplicate IDs, unknown dependencies, and dependency cycles before execution.
+- Planning and execution roles can use different models to balance capability, latency, and cost.
 
-## 安装
+## Installation
 
-要求 Python 3.12 或更高版本，支持 Windows、Linux 和 macOS。
+RedLotus requires Python 3.12 or later and supports Windows, Linux, and macOS.
 
-### 从 GitHub 安装
+### Install from GitHub
 
 ```bash
 pip install "redlotus @ git+https://github.com/Tian-ye1214/RedLotus.git"
 redlotus
 ```
 
-如果希望将命令安装到独立环境，可以使用 `uv`：
+To install the command in an isolated environment, use `uv`:
 
 ```bash
 uv tool install git+https://github.com/Tian-ye1214/RedLotus.git
 ```
 
-项目发布到 PyPI 后，也可以使用 `pip install redlotus` 或 `uv tool install redlotus`。
+After a PyPI release is available, `pip install redlotus` and `uv tool install redlotus` can be used instead.
 
-### 可选能力
+### Optional dependencies
 
 ```bash
-pip install "redlotus[browser] @ git+https://github.com/Tian-ye1214/RedLotus.git"  # 浏览器自动化
-pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"     # QQ / 微信机器人
-pip install "redlotus[viz] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # 绘图与图像处理
-pip install "redlotus[all] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # 全部可选依赖
+pip install "redlotus[browser] @ git+https://github.com/Tian-ye1214/RedLotus.git"  # Browser automation
+pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"     # QQ and WeChat bots
+pip install "redlotus[viz] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # Plotting and image tools
+pip install "redlotus[all] @ git+https://github.com/Tian-ye1214/RedLotus.git"      # All optional dependencies
 ```
 
-浏览器能力首次使用前还需要安装 Chromium：
+Install Chromium before using browser automation:
 
 ```bash
 playwright install chromium
 ```
 
-## 首次配置
+## Initial configuration
 
-首次启动会在用户配置目录生成 `config.json`：
+On first launch, RedLotus creates `config.json` in the platform-specific user configuration directory:
 
-| 系统 | 配置目录 |
-|------|----------|
+| Platform | Configuration directory |
+|----------|-------------------------|
 | Windows | `%LOCALAPPDATA%\RedLotus` |
 | Linux | `~/.config/RedLotus` |
 | macOS | `~/Library/Application Support/RedLotus` |
 
-至少需要配置模型服务地址和密钥：
+At minimum, configure the model API endpoint and key:
 
 ```json
 {
@@ -119,94 +122,94 @@ playwright install chromium
 }
 ```
 
-RedLotus 接受 OpenAI 兼容接口。Manager、Worker、Coordinator 和 Compressor 可以分别配置模型。短期记忆的向量检索与重排使用 `SILICONFLOW_BASE`、`SILICONFLOW_KEY` 和 `RAG_models` 配置。
+RedLotus accepts OpenAI-compatible APIs. Manager, Worker, Coordinator, and Compressor models can be configured independently. Vector retrieval and reranking use `SILICONFLOW_BASE`, `SILICONFLOW_KEY`, and `RAG_models`.
 
-也可以通过环境变量或当前目录附近的 `.env` 提供同名配置。不要将包含真实密钥的配置文件提交到 Git。
+The same values can be supplied through environment variables or a nearby `.env` file. Do not commit configuration files that contain real API keys.
 
-## 终端使用
+## Terminal usage
 
-全屏 TUI 提供三种运行模式，可使用 `Shift+Tab` 循环切换：
+Use `Shift+Tab` to cycle through the three TUI run modes:
 
-| 模式 | 行为 |
-|------|------|
-| 审查模式 | Agent 写入文件后进入待审查列表，可逐块决定保留或撤销。 |
-| 放行模式 | 文件改动直接写入，不进入逐块审查。 |
-| 目标模式 | 围绕一个目标持续执行，直到完成或被用户停止。 |
+| Mode | Behavior |
+|------|----------|
+| Review | File writes are collected for hunk-by-hunk approval or rejection. |
+| Pass-through | File changes are written directly without entering the review queue. |
+| Goal | RedLotus continues working toward a goal until it finishes or the user stops it. |
 
-常用快捷键：
+Common shortcuts:
 
-| 快捷键 | 作用 |
-|--------|------|
-| `Shift+Tab` | 切换运行模式 |
-| `Ctrl+R` | 打开逐块改动审查 |
-| `Ctrl+C` | 停止当前回合 |
-| `Ctrl+Q` | 退出 |
-| `@路径` | 引用本地文本文件，支持 Tab 补全 |
+| Shortcut | Action |
+|----------|--------|
+| `Shift+Tab` | Switch run mode |
+| `Ctrl+R` | Open the pending-change review |
+| `Ctrl+C` | Stop the current turn |
+| `Ctrl+Q` | Exit |
+| `@path` | Reference a local text file, with Tab completion |
 
 <details>
-<summary>常用斜杠命令</summary>
+<summary>Common slash commands</summary>
 
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助 |
-| `/clear` | 清空上下文并开启新对话 |
-| `/pwd` · `/cd <path>` | 查看或切换工作目录 |
-| `/load` | 加载当前工作区的历史会话 |
-| `/config` · `/context` · `/panel` | 查看配置、上下文和运行概览 |
-| `/skills` | 查看已加载的 Skills |
-| `/LTM show` · `/STM show` | 查看长期或短期记忆 |
-| `/agent` · `/effort` | 查看或调整角色模型与思考配置 |
-| `/api` · `/api embedding` | 配置主模型或向量检索接口 |
-| `/compress` | 压缩 Manager / Coordinator 上下文 |
-| `/status` · `/trace` · `/tasks` | 查看生命周期、调用追踪和任务状态 |
-| `/stop` · `/cancel` | 中断当前回合或 invocation |
+| Command | Description |
+|---------|-------------|
+| `/help` | Show help |
+| `/clear` | Clear context and start a new conversation |
+| `/pwd` · `/cd <path>` | Show or change the working directory |
+| `/load` | Load a saved conversation for the current workspace |
+| `/config` · `/context` · `/panel` | Show configuration, context usage, or the runtime overview |
+| `/skills` | List loaded Skills |
+| `/LTM show` · `/STM show` | Show long- or short-term memory |
+| `/agent` · `/effort` | Inspect or change role models and reasoning settings |
+| `/api` · `/api embedding` | Configure the main model or retrieval API |
+| `/compress` | Compress Manager and Coordinator context |
+| `/status` · `/trace` · `/tasks` | Inspect lifecycle, invocation traces, and task status |
+| `/stop` · `/cancel` | Stop the current turn or cancel an invocation |
 
 </details>
 
 ## Skills
 
-Skills 使用目录化的 `SKILL.md` 作为入口。系统只预加载技能名称与简介，在需要时再读取完整说明、参考文件和脚本，减少无关内容对上下文的占用。
+Each Skill is organized around a `SKILL.md` entry point. RedLotus initially loads only the skill name and summary, then reads full instructions, references, and scripts when needed. This keeps unrelated material out of the active context.
 
-项目当前包含以下类型的内置技能：
+The repository currently includes skills for:
 
-- 量化回测与 TA-Lib 技术分析
-- 浏览器自动化与网页抓取
-- FLUX 图像生成与提示词规范
-- Agent 编程与 CI/CD 工作流
-- 技能创建、管理和安装前审核
+- Cryptocurrency backtesting and TA-Lib technical analysis
+- Browser automation and web scraping
+- FLUX image generation and prompting guidance
+- Agentic coding and CI/CD workflows
+- Skill creation, management, and pre-installation review
 
-也可以在运行期间安装兼容技能：
+Compatible skills can also be installed while RedLotus is running:
 
 ```bash
 npx clawhub --dir skills install <slug>
 ```
 
-新技能会在后续用户回合自动发现。
+New skills are discovered automatically on subsequent user turns.
 
-## 文件与数据位置
+## Files and data
 
-- 用户级数据：日志、LanceDB 短期记忆和长期记忆保存在系统用户数据目录，可跨工作区使用。
-- 工作区数据：会话快照保存在当前目录的 `.redlotus/`，Agent 工作产物保存在 `WorkDatabase/`。
-- 使用 `/cd` 切换目录时，会加载对应工作区的会话数据。
+- User-level data: logs, LanceDB short-term memory, and long-term memory are stored in the platform user data directory and remain available across workspaces.
+- Workspace data: conversation snapshots are stored in `.redlotus/`, while Agent artifacts are written to `WorkDatabase/` in the current working directory.
+- Changing directories with `/cd` loads the conversation data associated with that workspace.
 
-## QQ 与微信机器人
+## QQ and WeChat bots
 
-安装机器人依赖：
+Install the bot dependencies:
 
 ```bash
 pip install "redlotus[bots] @ git+https://github.com/Tian-ye1214/RedLotus.git"
 ```
 
-启动方式：
+Start either integration:
 
 ```bash
 python -m redlotus.API.QQ
 python -m redlotus.API.WeChat
 ```
 
-QQ 接入需要先运行 [NapCat](https://github.com/NapNeko/NapCatQQ)，并配置 OneBot WebSocket、机器人 QQ 号和 WebUI token。微信接入在启动后按提示扫码登录。
+QQ integration requires [NapCat](https://github.com/NapNeko/NapCatQQ) with a configured OneBot WebSocket endpoint, bot QQ number, and WebUI token. The WeChat integration prompts for QR-code login at startup.
 
-## 本地开发
+## Development
 
 ```bash
 git clone https://github.com/Tian-ye1214/RedLotus.git
@@ -217,17 +220,17 @@ python main.py
 pytest -q
 ```
 
-构建 Python 包：
+Build the Python package:
 
 ```bash
 uv build
 ```
 
-构建 PyInstaller 可执行目录：
+Build a PyInstaller application directory:
 
 ```bash
 pip install ".[build]"
 pyinstaller build.spec
 ```
 
-项目主要代码位于 `src/redlotus/`，命令入口为 `redlotus.agent_core.entrypoint:main`。
+The main package lives in `src/redlotus/`. The `redlotus` command maps to `redlotus.agent_core.entrypoint:main`.
